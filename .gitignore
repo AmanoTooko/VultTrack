@@ -1,0 +1,12 @@
+.env
+data/
+node_modules/
+plugins/fetchers/node_modules/
+plugins/fetchers/dist/
+src/**/bin/
+src/**/obj/
+tests/**/bin/
+tests/**/obj/
+.DS_Store
+TestResults/
+coverage/

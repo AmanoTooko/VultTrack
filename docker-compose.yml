@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vultrack-postgres
+    environment:
+      POSTGRES_DB: vultrack
+      POSTGRES_USER: vultrack
+      POSTGRES_PASSWORD: vultrack
+    ports:
+      - "5432:5432"
+    volumes:
+      - vultrack_pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vultrack -d vultrack"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  vultrack_pgdata:

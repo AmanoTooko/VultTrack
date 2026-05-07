@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VulTrack.App/VulTrack.App.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VulTrack.Tests/VulTrack.Tests.csproj" />
+  </Folder>
+</Solution>

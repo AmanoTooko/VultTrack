@@ -1,0 +1,656 @@
+create extension if not exists pg_trgm;
+create extension if not exists unaccent;
+create extension if not exists btree_gin;
+create extension if not exists pgcrypto;
+
+create table if not exists sources (
+  id uuid primary key default gen_random_uuid(),
+  code text not null unique,
+  name text not null,
+  kind text not null,
+  homepage_url text,
+  license text,
+  enabled boolean not null default true,
+  plugin_name text not null,
+  plugin_version text,
+  config_json jsonb not null default '{}'::jsonb,
+  schedule_cron text,
+  rate_limit_json jsonb not null default '{}'::jsonb,
+  checkpoint_json jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists source_sync_runs (
+  id uuid primary key default gen_random_uuid(),
+  source_id uuid not null references sources(id),
+  status text not null,
+  trigger text not null,
+  checkpoint_before jsonb,
+  checkpoint_after jsonb,
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  fetched_count integer not null default 0,
+  changed_count integer not null default 0,
+  parsed_count integer not null default 0,
+  normalized_count integer not null default 0,
+  error_count integer not null default 0,
+  log_summary text
+);
+
+create table if not exists source_task_errors (
+  id uuid primary key default gen_random_uuid(),
+  sync_run_id uuid references source_sync_runs(id),
+  source_id uuid references sources(id),
+  stage text not null,
+  external_key text,
+  error_code text not null,
+  error_message text not null,
+  error_detail jsonb not null default '{}'::jsonb,
+  retry_count integer not null default 0,
+  next_retry_at timestamptz,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists source_objects (
+  id uuid primary key default gen_random_uuid(),
+  source_id uuid not null references sources(id),
+  sync_run_id uuid references source_sync_runs(id),
+  object_uri text not null,
+  content_type text not null,
+  compression text not null default 'gzip',
+  sha256 text not null,
+  size_bytes bigint not null,
+  compressed_size_bytes bigint not null,
+  schema_hint text,
+  fetched_at timestamptz not null default now(),
+  retention_class text not null default 'hot',
+  unique (source_id, sha256)
+);
+
+create table if not exists source_raw_index (
+  id uuid primary key default gen_random_uuid(),
+  source_id uuid not null references sources(id),
+  sync_run_id uuid references source_sync_runs(id),
+  object_id uuid references source_objects(id),
+  external_key text not null,
+  external_id text,
+  source_url text,
+  etag text,
+  last_modified_header text,
+  source_published_at timestamptz,
+  source_modified_at timestamptz,
+  content_hash text not null,
+  record_hash text not null,
+  record_offset jsonb,
+  identifier_summary text[] not null default '{}',
+  status text not null default 'new',
+  parse_status text not null default 'pending',
+  normalize_status text not null default 'pending',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists ux_raw_source_external_hash
+  on source_raw_index(source_id, external_key, record_hash);
+create index if not exists ix_raw_identifier_summary
+  on source_raw_index using gin(identifier_summary);
+create index if not exists ix_raw_source_modified
+  on source_raw_index(source_id, source_modified_at desc);
+
+create table if not exists stg_nvd_cves (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  cve_id text not null,
+  vuln_status text,
+  descriptions jsonb not null default '[]'::jsonb,
+  metrics jsonb not null default '{}'::jsonb,
+  weaknesses jsonb not null default '[]'::jsonb,
+  configurations jsonb not null default '[]'::jsonb,
+  references_json jsonb not null default '[]'::jsonb,
+  published_at timestamptz,
+  modified_at timestamptz,
+  cisa_exploit_add text,
+  cisa_action_due text,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_nvd_cpe_dictionary (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  cpe23_uri text not null,
+  part text,
+  vendor text,
+  product text,
+  version text,
+  target_sw text,
+  titles jsonb not null default '[]'::jsonb,
+  refs jsonb not null default '[]'::jsonb,
+  deprecated boolean not null default false,
+  last_modified_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_ghsa_advisories (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  ghsa_id text not null,
+  cve_id text,
+  identifiers jsonb not null default '[]'::jsonb,
+  summary text,
+  description text,
+  ecosystem text,
+  package_name text,
+  vulnerable_ranges jsonb not null default '[]'::jsonb,
+  patched_versions jsonb not null default '[]'::jsonb,
+  cvss jsonb not null default '{}'::jsonb,
+  cwes jsonb not null default '[]'::jsonb,
+  references_json jsonb not null default '[]'::jsonb,
+  published_at timestamptz,
+  updated_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_osv_vulnerabilities (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  osv_id text not null,
+  aliases text[] not null default '{}',
+  related text[] not null default '{}',
+  summary text,
+  details text,
+  affected jsonb not null default '[]'::jsonb,
+  severity jsonb not null default '[]'::jsonb,
+  references_json jsonb not null default '[]'::jsonb,
+  published_at timestamptz,
+  modified_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_cve_list_records (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  cve_id text not null,
+  cve_metadata jsonb not null default '{}'::jsonb,
+  containers_cna jsonb not null default '{}'::jsonb,
+  containers_adp jsonb not null default '[]'::jsonb,
+  state text,
+  published_at timestamptz,
+  updated_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_threat_intel_records (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  provider text not null,
+  identifier text not null,
+  epss_score numeric(8,7),
+  epss_percentile numeric(8,7),
+  observed_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_alpine_secdb (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  distro_release text not null,
+  package_name text not null,
+  identifiers text[] not null default '{}',
+  secfixes jsonb not null default '{}'::jsonb,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_debian_security_tracker (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  cve_id text not null,
+  packages jsonb not null default '{}'::jsonb,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_ubuntu_osv (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  osv_id text not null,
+  aliases text[] not null default '{}',
+  affected jsonb not null default '[]'::jsonb,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_registry_packages (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  registry text not null,
+  ecosystem text not null,
+  namespace text,
+  name text not null,
+  version text,
+  purl text,
+  repository_url text,
+  homepage_url text,
+  metadata jsonb not null default '{}'::jsonb,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists vulnerabilities (
+  id uuid primary key default gen_random_uuid(),
+  canonical_key text not null unique,
+  primary_identifier text not null,
+  title text,
+  description text,
+  status text not null default 'active',
+  published_at timestamptz,
+  modified_at timestamptz,
+  withdrawn_at timestamptz,
+  max_cvss_score numeric(3,1),
+  max_cvss_version text,
+  max_cvss_vector text,
+  max_cvss_source_id uuid references sources(id),
+  severity_label text,
+  severity_source text,
+  severity_confidence numeric(4,3),
+  epss_score numeric(8,7),
+  epss_percentile numeric(8,7),
+  kev_date_added date,
+  known_ransomware boolean,
+  risk_score numeric(6,2),
+  source_count integer not null default 0,
+  affected_component_count integer not null default 0,
+  affected_ecosystems text[] not null default '{}',
+  affected_component_names text[] not null default '{}',
+  identifiers text[] not null default '{}',
+  aliases text[] not null default '{}',
+  search_text tsvector,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists vulnerability_records (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid references vulnerabilities(id),
+  source_id uuid not null references sources(id),
+  raw_index_id uuid not null references source_raw_index(id),
+  source_record_id text not null,
+  title text,
+  description text,
+  status text,
+  source_specific jsonb not null default '{}'::jsonb,
+  confidence numeric(4,3) not null default 1.0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique(source_id, source_record_id, raw_index_id)
+);
+
+create table if not exists vulnerability_identifier_groups (
+  id uuid primary key default gen_random_uuid(),
+  canonical_vulnerability_id uuid references vulnerabilities(id),
+  group_key text not null unique,
+  primary_identifier text not null,
+  identifiers text[] not null default '{}',
+  source_count integer not null default 0,
+  strong_edge_count integer not null default 0,
+  weak_edge_count integer not null default 0,
+  merge_version bigint not null default 1,
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists vulnerability_identifier_index (
+  id uuid primary key default gen_random_uuid(),
+  identifier_type text not null,
+  identifier_value text not null,
+  normalized_value text not null,
+  identifier_group_id uuid references vulnerability_identifier_groups(id),
+  canonical_vulnerability_id uuid references vulnerabilities(id),
+  source_id uuid references sources(id),
+  raw_index_id uuid references source_raw_index(id),
+  evidence_type text not null default 'source_record',
+  evidence_strength text not null default 'strong',
+  confidence numeric(4,3) not null default 1.0,
+  first_seen_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+
+create unique index if not exists ux_identifier_normalized_source
+  on vulnerability_identifier_index(identifier_type, normalized_value, source_id, raw_index_id);
+create index if not exists ix_identifier_lookup
+  on vulnerability_identifier_index(normalized_value, canonical_vulnerability_id);
+
+create table if not exists vulnerability_identifier_edges (
+  id uuid primary key default gen_random_uuid(),
+  from_identifier text not null,
+  to_identifier text not null,
+  edge_type text not null,
+  strength text not null,
+  source_id uuid references sources(id),
+  raw_index_id uuid references source_raw_index(id),
+  evidence_json jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists vulnerability_severity_scores (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid references vulnerabilities(id),
+  vulnerability_record_id uuid references vulnerability_records(id),
+  source_id uuid references sources(id),
+  raw_index_id uuid references source_raw_index(id),
+  scoring_system text not null,
+  scoring_version text,
+  score_type text,
+  vector_string text,
+  score numeric(4,1),
+  severity_label text,
+  normalized_severity text,
+  source_severity_label text,
+  metric_json jsonb not null default '{}'::jsonb,
+  source_json_path text,
+  is_primary boolean not null default false,
+  is_selected boolean not null default false,
+  confidence numeric(4,3) not null default 1.0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists vulnerability_descriptions (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid references vulnerabilities(id),
+  vulnerability_record_id uuid references vulnerability_records(id),
+  source_id uuid references sources(id),
+  lang text,
+  description_type text,
+  value text not null,
+  source_json_path text,
+  is_selected boolean not null default false
+);
+
+create table if not exists vulnerability_weaknesses (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid references vulnerabilities(id),
+  vulnerability_record_id uuid references vulnerability_records(id),
+  source_id uuid references sources(id),
+  weakness_type text not null,
+  weakness_id text,
+  description text,
+  source_json_path text
+);
+
+create table if not exists vulnerability_references (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid references vulnerabilities(id),
+  vulnerability_record_id uuid references vulnerability_records(id),
+  source_id uuid references sources(id),
+  url text not null,
+  normalized_url text,
+  ref_type text,
+  tags text[] not null default '{}',
+  source_json_path text
+);
+
+create table if not exists vulnerability_source_properties (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid references vulnerabilities(id),
+  vulnerability_record_id uuid references vulnerability_records(id),
+  source_id uuid references sources(id),
+  property_namespace text not null,
+  property_key text not null,
+  value_type text not null,
+  value_text text,
+  value_number numeric,
+  value_bool boolean,
+  value_date timestamptz,
+  value_json jsonb,
+  source_json_path text,
+  is_queryable boolean not null default false,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists vulnerability_detail_blocks (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid references vulnerabilities(id),
+  vulnerability_record_id uuid references vulnerability_records(id),
+  source_id uuid references sources(id),
+  plugin_name text not null,
+  plugin_version text,
+  block_key text not null,
+  block_title text not null,
+  block_type text not null,
+  display_order integer not null default 0,
+  payload_json jsonb not null,
+  source_hash text not null,
+  generated_at timestamptz not null default now(),
+  expires_at timestamptz
+);
+
+create table if not exists components (
+  id uuid primary key default gen_random_uuid(),
+  component_key text not null unique,
+  canonical_name text not null,
+  component_type text not null,
+  primary_purl text,
+  primary_cpe23_uri text,
+  primary_repository_url text,
+  identities text[] not null default '{}',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists component_identity_index (
+  id uuid primary key default gen_random_uuid(),
+  component_id uuid references components(id),
+  identity_type text not null,
+  identity_value text not null,
+  normalized_value text not null,
+  ecosystem text,
+  source_id uuid references sources(id),
+  evidence_type text,
+  confidence numeric(4,3) not null default 1.0,
+  status text not null default 'candidate',
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists component_mapping_edges (
+  id uuid primary key default gen_random_uuid(),
+  from_identity text not null,
+  to_identity text not null,
+  edge_type text not null,
+  method text not null,
+  confidence numeric(4,3) not null default 1.0,
+  status text not null default 'candidate',
+  evidence_json jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists cpe_entries (
+  id uuid primary key default gen_random_uuid(),
+  cpe23_uri text not null unique,
+  part text,
+  vendor text,
+  product text,
+  version text,
+  update_value text,
+  edition text,
+  language_value text,
+  sw_edition text,
+  target_sw text,
+  target_hw text,
+  other text,
+  titles_json jsonb not null default '[]'::jsonb,
+  refs_json jsonb not null default '[]'::jsonb,
+  deprecated boolean not null default false,
+  last_modified_at timestamptz
+);
+
+create table if not exists registry_packages (
+  id uuid primary key default gen_random_uuid(),
+  ecosystem text not null,
+  registry_url text,
+  namespace text,
+  name text not null,
+  normalized_name text not null,
+  purl_type text,
+  purl_without_version text,
+  latest_version text,
+  description text,
+  homepage_url text,
+  repository_url text,
+  issue_url text,
+  metadata_json jsonb not null default '{}'::jsonb,
+  last_seen_at timestamptz not null default now()
+);
+
+create table if not exists purl_name_mappings (
+  id uuid primary key default gen_random_uuid(),
+  purl_type text not null,
+  registry text,
+  namespace text,
+  name text not null,
+  normalized_name text not null,
+  package_manager_name text,
+  package_manager_namespace text,
+  ruleset_version text,
+  confidence numeric(4,3) not null default 1.0
+);
+
+create table if not exists vulnerability_affected_facts (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid references vulnerabilities(id),
+  vulnerability_record_id uuid references vulnerability_records(id),
+  source_id uuid references sources(id),
+  raw_index_id uuid references source_raw_index(id),
+  fact_type text not null,
+  ecosystem text,
+  package_namespace text,
+  package_name text,
+  normalized_package_name text,
+  purl text,
+  purl_without_version text,
+  cpe23_uri text,
+  component_id uuid references components(id),
+  version_range_raw text,
+  range_type text,
+  introduced text,
+  fixed text,
+  last_affected text,
+  limit_version text,
+  affected_versions jsonb not null default '[]'::jsonb,
+  fixed_versions jsonb not null default '[]'::jsonb,
+  vulnerable boolean,
+  source_confidence numeric(4,3) not null default 1.0,
+  source_json_path text,
+  source_specific jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists vulnerability_affected_components (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid not null references vulnerabilities(id),
+  component_id uuid references components(id),
+  ecosystem text,
+  package_name text,
+  display_name text not null,
+  primary_purl text,
+  primary_cpe23_uri text,
+  normalized_range text,
+  range_type text,
+  introduced text,
+  fixed text,
+  last_affected text,
+  affected_versions jsonb not null default '[]'::jsonb,
+  fixed_versions jsonb not null default '[]'::jsonb,
+  confidence numeric(4,3) not null default 1.0,
+  resolution_status text not null default 'candidate',
+  conflict_flag boolean not null default false,
+  evidence_count integer not null default 0,
+  evidence_summary text,
+  selected_by_rule text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists vulnerability_affected_evidence (
+  id uuid primary key default gen_random_uuid(),
+  affected_component_id uuid not null references vulnerability_affected_components(id) on delete cascade,
+  affected_fact_id uuid references vulnerability_affected_facts(id),
+  source_id uuid references sources(id),
+  evidence_kind text not null,
+  evidence_value jsonb not null default '{}'::jsonb,
+  confidence numeric(4,3) not null default 1.0,
+  supports_conclusion boolean,
+  conflict_reason text,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists version_match_cache (
+  id uuid primary key default gen_random_uuid(),
+  ecosystem text not null,
+  package_identity text,
+  version text not null,
+  range_hash text not null,
+  resolver_plugin text not null,
+  result boolean,
+  explanation_json jsonb not null default '{}'::jsonb,
+  expires_at timestamptz
+);
+
+create table if not exists plugin_manifests (
+  id uuid primary key default gen_random_uuid(),
+  plugin_name text not null unique,
+  plugin_version text not null,
+  manifest_json jsonb not null,
+  enabled boolean not null default true,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create table if not exists plugin_runs (
+  id uuid primary key default gen_random_uuid(),
+  plugin_name text not null,
+  capability text not null,
+  operation text not null,
+  status text not null,
+  started_at timestamptz not null default now(),
+  finished_at timestamptz,
+  duration_ms integer,
+  input_hash text,
+  output_hash text,
+  error_message text
+);
+
+create index if not exists ix_vuln_search_text on vulnerabilities using gin(search_text);
+create index if not exists ix_vuln_identifiers on vulnerabilities using gin(identifiers);
+create index if not exists ix_vuln_affected_names on vulnerabilities using gin(affected_component_names);
+create index if not exists ix_vuln_title_trgm on vulnerabilities using gin(title gin_trgm_ops);
+create index if not exists ix_severity_vuln_system_version on vulnerability_severity_scores(vulnerability_id, scoring_system, scoring_version);
+create index if not exists ix_severity_selected on vulnerability_severity_scores(vulnerability_id) where is_selected = true;
+create index if not exists ix_vuln_source_property_key on vulnerability_source_properties(source_id, property_namespace, property_key);
+create index if not exists ix_vuln_detail_blocks on vulnerability_detail_blocks(vulnerability_id, display_order);
+create index if not exists ix_component_identity_lookup on component_identity_index(identity_type, normalized_value);
+create index if not exists ix_component_identity_trgm on component_identity_index using gin(normalized_value gin_trgm_ops);
+create index if not exists ix_affected_components_vuln on vulnerability_affected_components(vulnerability_id, ecosystem, display_name);
+create index if not exists ix_affected_components_component on vulnerability_affected_components(component_id, vulnerability_id);
+create index if not exists ix_affected_facts_vuln on vulnerability_affected_facts(vulnerability_id, ecosystem, normalized_package_name);
+create index if not exists ix_affected_evidence_component on vulnerability_affected_evidence(affected_component_id);
+
+insert into sources (code, name, kind, homepage_url, plugin_name, schedule_cron)
+values
+  ('nvd-cve', 'NVD CVE API/Data Feed', 'vulnerability', 'https://nvd.nist.gov/vuln/data-feeds', 'nvd', '0 */6 * * *'),
+  ('nvd-cpe', 'NVD CPE Dictionary', 'cpe', 'https://nvd.nist.gov/products/cpe', 'nvd', '0 2 * * *'),
+  ('ghsa', 'GitHub Security Advisories', 'vulnerability', 'https://github.com/advisories', 'ghsa', '0 */6 * * *'),
+  ('osv', 'OSV.dev', 'vulnerability', 'https://osv.dev', 'osv', '0 */6 * * *'),
+  ('cve-list-v5', 'CVE List v5', 'vulnerability', 'https://github.com/CVEProject/cvelistV5', 'cve-list', '0 3 * * *'),
+  ('cisa-kev', 'CISA Known Exploited Vulnerabilities', 'threat_intel', 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog', 'threat-intel', '0 */12 * * *'),
+  ('first-epss', 'FIRST EPSS', 'threat_intel', 'https://www.first.org/epss/', 'threat-intel', '0 4 * * *'),
+  ('alpine-secdb', 'Alpine SecDB', 'vulnerability', 'https://secdb.alpinelinux.org/', 'alpine', '0 4 * * *'),
+  ('debian-security-tracker', 'Debian Security Tracker', 'vulnerability', 'https://security-tracker.debian.org/', 'debian', '0 4 * * *'),
+  ('ubuntu-osv', 'Ubuntu OSV', 'vulnerability', 'https://documentation.ubuntu.com/security/security-updates/osv/', 'ubuntu', '0 4 * * *'),
+  ('npm-registry', 'npm Registry Metadata', 'registry', 'https://registry.npmjs.org/', 'registry', null)
+on conflict (code) do update set
+  name = excluded.name,
+  kind = excluded.kind,
+  homepage_url = excluded.homepage_url,
+  plugin_name = excluded.plugin_name,
+  schedule_cron = excluded.schedule_cron,
+  updated_at = now();
