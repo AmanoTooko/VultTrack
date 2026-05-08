@@ -1,9 +1,14 @@
 const apiBaseUrl = process.env.API_BASE_URL ?? 'http://localhost:5099';
 const limitPerSource = Number.parseInt(process.env.LIMIT_PER_SOURCE ?? '1000', 10) || 1000;
 const sleepMs = Number.parseInt(process.env.SLEEP_MS ?? '0', 10) || 0;
+const maxCycles = Number.parseInt(process.env.MAX_CYCLES ?? '0', 10) || 0;
 
 let cycle = 0;
 while (true) {
+  if (maxCycles > 0 && cycle >= maxCycles) {
+    break;
+  }
+
   cycle += 1;
   const response = await fetch(`${apiBaseUrl}/api/v1/raw.normalizePending`, {
     method: 'POST',
