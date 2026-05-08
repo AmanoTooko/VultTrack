@@ -86,16 +86,22 @@ Recent verification records:
 - 2026-05-09: ran `POST /api/v1/raw.normalizePending` with `limitPerSource=1000`.
   Processed `nvd-cve=1000`, `osv-family=1000`, `ghsa-family=1000`, `pypi-advisory=1000`,
   `cve-list-v5=1000`, `threat-intel=1000`, `distro=1000`, `component-catalog=533`, all with `failed=0`.
+- 2026-05-09: parser enrichment added shared source fact extraction for descriptions, severities, references, and weaknesses.
+- 2026-05-09: after parser enrichment, ran `POST /api/v1/raw.normalizePending` with `limitPerSource=500`.
+  Processed `nvd-cve=500`, `osv-family=500`, `ghsa-family=500`, `pypi-advisory=500`,
+  `cve-list-v5=500`, `threat-intel=500`, `distro=500`, `component-catalog=250`, all with `failed=0`.
 
 Post-batch database snapshot:
 
-- `source_raw_index`: `succeeded=17707`, `pending=2811998`.
-- `vulnerabilities`: `21913`.
-- `vulnerability_records`: `31803`.
-- `vulnerability_identifier_groups`: `16598`.
-- `vulnerability_identifier_edges`: `3546`.
-- `vulnerability_affected_components`: `34478`.
-- `cpe_entries`: `560`.
+- `source_raw_index`: `succeeded=22496`, `pending=2807209`.
+- `vulnerabilities`: `24512`.
+- `vulnerability_records`: `43591`.
+- `vulnerability_descriptions`: `6936`.
+- `vulnerability_severity_scores`: `1560`.
+- `vulnerability_references`: `7365`.
+- `vulnerability_weaknesses`: `754`.
+- `vulnerability_affected_components`: `38177`.
+- `cpe_entries`: `886`.
 - `registry_packages`: `20`.
 
 ## Current Runtime Notes
