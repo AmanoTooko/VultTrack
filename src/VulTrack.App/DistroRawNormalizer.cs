@@ -4,16 +4,28 @@ using Npgsql;
 namespace VulTrack.App;
 
 public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer)
-    : NormalizerBase(affectedHooks, canonicalizer), IRawNormalizer
+    : NormalizerBase(affectedHooks, canonicalizer), ISourceScopedRawNormalizer
 {
     public string SourceCode => "distro";
+    public IReadOnlySet<string> SupportedSourceCodes { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "alpine-secdb",
+        "debian-security-tracker"
+    };
 
     public async Task<NormalizeBatchResult> ProcessPendingAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
     {
-        var alpine = await ProcessAlpineAsync(connection, limit, ct);
-        var debian = alpine.Processed >= limit ? new NormalizeBatchResult("debian-security-tracker", 0, 0) : await ProcessDebianAsync(connection, limit - alpine.Processed, ct);
+        var alpine = await ProcessSourcePendingAsync(connection, "alpine-secdb", limit, ct);
+        var debian = alpine.Processed >= limit ? new NormalizeBatchResult("debian-security-tracker", 0, 0) : await ProcessSourcePendingAsync(connection, "debian-security-tracker", limit - alpine.Processed, ct);
         return new NormalizeBatchResult(SourceCode, alpine.Processed + debian.Processed, alpine.Failed + debian.Failed);
     }
+
+    public Task<NormalizeBatchResult> ProcessSourcePendingAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
+        => string.Equals(sourceCode, "alpine-secdb", StringComparison.OrdinalIgnoreCase)
+            ? ProcessAlpineAsync(connection, limit, ct)
+            : string.Equals(sourceCode, "debian-security-tracker", StringComparison.OrdinalIgnoreCase)
+                ? ProcessDebianAsync(connection, limit, ct)
+                : Task.FromResult(new NormalizeBatchResult(sourceCode, 0, 0));
 
     private async Task<NormalizeBatchResult> ProcessAlpineAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
     {
@@ -21,7 +33,8 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             select s.raw_index_id, s.distro_release, s.package_name, s.identifiers, s.secfixes, s.payload, r.source_id
             from stg_alpine_secdb s
             join source_raw_index r on r.id = s.raw_index_id
-            where r.normalize_status <> 'succeeded'
+            join sources src on src.id = r.source_id
+            where r.normalize_status <> 'succeeded' and src.code = 'alpine-secdb'
             order by s.distro_release, s.package_name
             limit $1
             """, connection);
@@ -70,7 +83,8 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             select s.raw_index_id, s.cve_id, s.packages, s.payload, r.source_id
             from stg_debian_security_tracker s
             join source_raw_index r on r.id = s.raw_index_id
-            where r.normalize_status <> 'succeeded'
+            join sources src on src.id = r.source_id
+            where r.normalize_status <> 'succeeded' and src.code = 'debian-security-tracker'
             order by s.cve_id
             limit $1
             """, connection);

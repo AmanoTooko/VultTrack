@@ -90,18 +90,22 @@ Recent verification records:
 - 2026-05-09: after parser enrichment, ran `POST /api/v1/raw.normalizePending` with `limitPerSource=500`.
   Processed `nvd-cve=500`, `osv-family=500`, `ghsa-family=500`, `pypi-advisory=500`,
   `cve-list-v5=500`, `threat-intel=500`, `distro=500`, `component-catalog=250`, all with `failed=0`.
+- 2026-05-09: added source-scoped normalization API and smoke script at `scripts/normalize-source-smoke.mjs`.
+- 2026-05-09: ran source-scoped smoke with `nvd-cve`, `ghsa`, `ubuntu-osv`, `pypi-advisory`, `cisa-kev`, `nvd-cpe` at 500 each.
+  Processed `nvd-cve=500`, `ghsa=500`, `ubuntu-osv=500`, `pypi-advisory=109`,
+  `cisa-kev=500`, `nvd-cpe=500`, all with `failed=0`.
 
 Post-batch database snapshot:
 
-- `source_raw_index`: `succeeded=22496`, `pending=2807209`.
-- `vulnerabilities`: `24512`.
-- `vulnerability_records`: `43591`.
+- `source_raw_index`: `succeeded=25105`, `pending=2804600`.
+- `vulnerabilities`: `26502`.
+- `vulnerability_records`: `45700`.
 - `vulnerability_descriptions`: `6936`.
 - `vulnerability_severity_scores`: `1560`.
 - `vulnerability_references`: `7365`.
 - `vulnerability_weaknesses`: `754`.
-- `vulnerability_affected_components`: `38177`.
-- `cpe_entries`: `886`.
+- `vulnerability_affected_components`: `40173`.
+- `cpe_entries`: `1386`.
 - `registry_packages`: `20`.
 
 ## Current Runtime Notes
@@ -120,6 +124,12 @@ curl -sS -X POST http://localhost:5099/api/v1/raw.normalizePending \
   -d '{"limitPerSource":100}'
 ```
 
+Source-scoped smoke:
+
+```bash
+API_BASE_URL=http://localhost:5099 SOURCE_SMOKE_LIMIT=500 node scripts/normalize-source-smoke.mjs nvd-cve ghsa ubuntu-osv pypi-advisory cisa-kev nvd-cpe
+```
+
 Useful status checks:
 
 ```bash
@@ -133,7 +143,7 @@ docker exec vultrack-postgres psql -U vultrack -d vultrack -c "select s.code, co
 Parser completeness:
 
 - Add shared helper methods in `NormalizerBase` for descriptions, severity scores, references, weaknesses, and source properties.
-- Extend OSV, GHSA, PyPI, distro, and ecosystem advisory normalizers to populate those source fact tables, not only `vulnerability_records` and affected facts.
+- Extend ecosystem advisory normalizers and remaining fetcher-backed sources to populate those source fact tables, not only `vulnerability_records` and affected facts.
 - Add idempotency constraints or cleanup for duplicated `vulnerability_affected_facts`, `vulnerability_descriptions`, `vulnerability_references`, and severity rows before large repeated normalization runs.
 - Add a backfill command for old canonical rows that still use legacy CVE/GHSA canonical keys.
 

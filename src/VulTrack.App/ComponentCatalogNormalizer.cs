@@ -2,9 +2,20 @@ using Npgsql;
 
 namespace VulTrack.App;
 
-public sealed class ComponentCatalogNormalizer : IRawNormalizer
+public sealed class ComponentCatalogNormalizer : ISourceScopedRawNormalizer
 {
     public string SourceCode => "component-catalog";
+    public IReadOnlySet<string> SupportedSourceCodes { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "nvd-cpe",
+        "npm-registry",
+        "nuget-registry",
+        "maven-registry",
+        "pypi-registry",
+        "crates-registry",
+        "rubygems-registry",
+        "packagist-registry"
+    };
 
     public async Task<NormalizeBatchResult> ProcessPendingAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
     {
@@ -16,6 +27,21 @@ public sealed class ComponentCatalogNormalizer : IRawNormalizer
         var registry = await ProcessRegistryAsync(connection, registryLimit + Math.Max(0, cpeLimit - cpe.Processed), ct);
 
         return new NormalizeBatchResult(SourceCode, cpe.Processed + registry.Processed, cpe.Failed + registry.Failed);
+    }
+
+    public Task<NormalizeBatchResult> ProcessSourcePendingAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
+    {
+        if (string.Equals(sourceCode, "nvd-cpe", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProcessCpeAsync(connection, Math.Max(1, limit), ct);
+        }
+
+        if (!SupportedSourceCodes.Contains(sourceCode))
+        {
+            return Task.FromResult(new NormalizeBatchResult(sourceCode, 0, 0));
+        }
+
+        return ProcessRegistrySourceAsync(connection, sourceCode, Math.Max(1, limit), ct);
     }
 
     private static async Task<NormalizeBatchResult> ProcessCpeAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
@@ -140,6 +166,70 @@ public sealed class ComponentCatalogNormalizer : IRawNormalizer
         }
 
         return new NormalizeBatchResult("registry-packages", processed, failed);
+    }
+
+    private async Task<NormalizeBatchResult> ProcessRegistrySourceAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
+    {
+        await using var select = new NpgsqlCommand("""
+            select s.raw_index_id, s.registry, s.ecosystem, s.namespace, s.name, s.version, s.purl,
+                   s.repository_url, s.homepage_url, s.metadata::text, r.source_id
+            from stg_registry_packages s
+            join source_raw_index r on r.id = s.raw_index_id
+            join sources src on src.id = r.source_id
+            where r.normalize_status <> 'succeeded' and src.code = $1
+            order by s.ecosystem, s.namespace, s.name
+            limit $2
+            """, connection);
+        select.Parameters.AddWithValue(sourceCode);
+        select.Parameters.AddWithValue(limit);
+
+        var rows = new List<RegistryRow>();
+        await using (var reader = await select.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add(new RegistryRow(
+                    reader.GetGuid(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.GetString(9),
+                    reader.GetGuid(10)));
+            }
+        }
+
+        var processed = 0;
+        var failed = 0;
+        foreach (var row in rows)
+        {
+            try
+            {
+                await UpsertRegistryPackageAsync(connection, row, ct);
+                var componentId = await UpsertPackageComponentAsync(connection, row, ct);
+                var packageIdentity = PackageIdentity(row.Namespace, row.Name);
+                await UpsertIdentityAsync(connection, componentId, "package-name", packageIdentity, packageIdentity, row.Ecosystem, row.SourceId, "registry", 0.9m, ct);
+
+                var purlWithoutVersion = PurlWithoutVersion(row.Purl);
+                if (purlWithoutVersion is not null)
+                {
+                    await UpsertIdentityAsync(connection, componentId, "purl", purlWithoutVersion, purlWithoutVersion, row.Ecosystem, row.SourceId, "registry", 1.0m, ct);
+                }
+
+                await MarkNormalizedAsync(connection, row.RawIndexId, ct);
+                processed++;
+            }
+            catch
+            {
+                failed++;
+            }
+        }
+
+        return new NormalizeBatchResult(sourceCode, processed, failed);
     }
 
     private static async Task UpsertCpeEntryAsync(NpgsqlConnection connection, CpeRow row, CancellationToken ct)

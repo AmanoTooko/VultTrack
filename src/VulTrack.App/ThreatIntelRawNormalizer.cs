@@ -3,21 +3,44 @@ using Npgsql;
 
 namespace VulTrack.App;
 
-public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonicalizer) : IRawNormalizer
+public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonicalizer) : ISourceScopedRawNormalizer
 {
     public string SourceCode => "threat-intel";
+    public IReadOnlySet<string> SupportedSourceCodes { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "cisa-kev",
+        "first-epss"
+    };
 
     public async Task<NormalizeBatchResult> ProcessPendingAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
+    {
+        var processed = 0;
+        var failed = 0;
+        foreach (var sourceCode in SupportedSourceCodes)
+        {
+            var remaining = Math.Max(0, limit - processed);
+            if (remaining == 0) break;
+            var result = await ProcessSourcePendingAsync(connection, sourceCode, remaining, ct);
+            processed += result.Processed;
+            failed += result.Failed;
+        }
+
+        return new NormalizeBatchResult(SourceCode, processed, failed);
+    }
+
+    public async Task<NormalizeBatchResult> ProcessSourcePendingAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
     {
         await using var select = new NpgsqlCommand("""
             select s.raw_index_id, s.provider, s.identifier, s.epss_score, s.epss_percentile,
                    s.observed_at, s.payload, r.source_id
             from stg_threat_intel_records s
             join source_raw_index r on r.id = s.raw_index_id
-            where r.normalize_status <> 'succeeded'
+            join sources src on src.id = r.source_id
+            where r.normalize_status <> 'succeeded' and src.code = $1
             order by s.observed_at nulls last, s.identifier
-            limit $1
+            limit $2
             """, connection);
+        select.Parameters.AddWithValue(sourceCode);
         select.Parameters.AddWithValue(Math.Max(1, limit));
 
         var rows = new List<Row>();

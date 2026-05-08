@@ -6,6 +6,7 @@
   "scripts": {
     "fetch": "node plugins/fetchers/run-fetcher.mjs",
     "fetch:all:smoke": "FETCHER_MAX_RECORDS=2 node plugins/fetchers/run-all.mjs",
+    "normalize:sources": "node scripts/normalize-source-smoke.mjs",
     "test": "node --test tests/node/*.test.mjs",
     "test:integration": "node --test tests/integration/*.test.mjs",
     "test:api": "node --test tests/api/*.test.mjs"

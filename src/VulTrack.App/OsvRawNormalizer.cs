@@ -4,9 +4,23 @@ using Npgsql;
 namespace VulTrack.App;
 
 public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer)
-    : NormalizerBase(affectedHooks, canonicalizer), IRawNormalizer
+    : NormalizerBase(affectedHooks, canonicalizer), ISourceScopedRawNormalizer
 {
     public string SourceCode => "osv-family";
+    public IReadOnlySet<string> SupportedSourceCodes { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "ubuntu-osv",
+        "android-osv",
+        "android-osv-init",
+        "google-osv",
+        "google-osv-init",
+        "go-advisory",
+        "cargo-advisory",
+        "maven-osv",
+        "maven-osv-init",
+        "osv",
+        "osv-init"
+    };
 
     private static readonly (string Table, string SourceCode)[] Tables =
     [
@@ -24,12 +38,23 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
     ];
 
     public async Task<NormalizeBatchResult> ProcessPendingAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
+        => await ProcessTablesAsync(connection, limit, null, ct);
+
+    public Task<NormalizeBatchResult> ProcessSourcePendingAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
+        => ProcessTablesAsync(connection, limit, sourceCode, ct);
+
+    private async Task<NormalizeBatchResult> ProcessTablesAsync(NpgsqlConnection connection, int limit, string? requestedSourceCode, CancellationToken ct)
     {
         var processed = 0;
         var failed = 0;
 
-        foreach (var (table, sourceCode) in Tables)
+        foreach (var (table, tableSourceCode) in Tables)
         {
+            if (requestedSourceCode is not null && !string.Equals(tableSourceCode, requestedSourceCode, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             await using var select = new NpgsqlCommand($"""
                 select s.raw_index_id, s.osv_id, s.aliases, s.payload, r.source_id
                 from {table} s
@@ -39,7 +64,7 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                 order by r.updated_at
                 limit $2
                 """, connection);
-            select.Parameters.AddWithValue(sourceCode);
+            select.Parameters.AddWithValue(tableSourceCode);
             select.Parameters.AddWithValue(Math.Max(1, limit - processed));
 
             var rows = new List<(Guid RawIndexId, string OsvId, string[] Aliases, string Payload, Guid SourceId)>();

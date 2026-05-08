@@ -142,6 +142,13 @@ app.MapPost("/api/v1/raw.normalizePending", async (IRawNormalizationService proc
     return ApiResult.Ok(result);
 });
 
+app.MapPost("/api/v1/raw.normalizeSource", async (IRawNormalizationService processor, NormalizeSourceRequest request, CancellationToken ct) =>
+{
+    var limit = request.Limit <= 0 ? 100 : request.Limit;
+    var result = await processor.ProcessSourcePendingAsync(request.SourceCode, limit, ct);
+    return ApiResult.Ok(result);
+});
+
 app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, VulnerabilitySearchRequest request, CancellationToken ct) =>
 {
     var rows = new List<object>();

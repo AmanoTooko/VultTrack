@@ -8,6 +8,10 @@ public sealed record VulnerabilitySearchRequest(string? Query = null, int Page =
 
 public sealed record NormalizePendingRequest(int LimitPerSource = 100);
 
+public sealed record NormalizeSourceRequest(
+    string SourceCode,
+    int Limit = 100);
+
 public sealed record ComponentVulnerabilitySearchRequest(
     string? ComponentName = null,
     string? Version = null,

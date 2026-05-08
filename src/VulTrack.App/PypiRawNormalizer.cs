@@ -4,11 +4,15 @@ using Npgsql;
 namespace VulTrack.App;
 
 public sealed class PypiRawNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer)
-    : NormalizerBase(affectedHooks, canonicalizer), IRawNormalizer
+    : NormalizerBase(affectedHooks, canonicalizer), ISourceScopedRawNormalizer
 {
     public string SourceCode => "pypi-advisory";
+    public IReadOnlySet<string> SupportedSourceCodes { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "pypi-advisory" };
 
     public async Task<NormalizeBatchResult> ProcessPendingAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
+        => await ProcessSourcePendingAsync(connection, SourceCode, limit, ct);
+
+    public async Task<NormalizeBatchResult> ProcessSourcePendingAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
     {
         await using var select = new NpgsqlCommand("""
             select s.raw_index_id, s.pysec_id, s.aliases, s.package_name, s.summary, s.details,
@@ -16,10 +20,11 @@ public sealed class PypiRawNormalizer(IEnumerable<IAffectedComponentHook> affect
             from stg_pypi_advisories s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
-            where r.normalize_status <> 'succeeded' and src.code = 'pypi-advisory'
+            where r.normalize_status <> 'succeeded' and src.code = $1
             order by r.updated_at
-            limit $1
+            limit $2
             """, connection);
+        select.Parameters.AddWithValue(sourceCode);
         select.Parameters.AddWithValue(Math.Max(1, limit));
 
         var rows = new List<Row>();

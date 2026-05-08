@@ -8,9 +8,16 @@ public interface IRawNormalizer
     Task<NormalizeBatchResult> ProcessPendingAsync(NpgsqlConnection connection, int limit, CancellationToken ct);
 }
 
+public interface ISourceScopedRawNormalizer : IRawNormalizer
+{
+    IReadOnlySet<string> SupportedSourceCodes { get; }
+    Task<NormalizeBatchResult> ProcessSourcePendingAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct);
+}
+
 public interface IRawNormalizationService
 {
     Task<IReadOnlyList<NormalizeBatchResult>> ProcessPendingAsync(int limitPerSource, CancellationToken ct);
+    Task<NormalizeBatchResult> ProcessSourcePendingAsync(string sourceCode, int limit, CancellationToken ct);
 }
 
 public interface IAffectedComponentHook

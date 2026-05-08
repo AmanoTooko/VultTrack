@@ -7,9 +7,15 @@ public sealed class GhsaRawNormalizer(
     IEnumerable<IAffectedComponentHook> affectedHooks,
     IVulnerabilityCanonicalizer canonicalizer,
     ILogger<GhsaRawNormalizer> logger)
-    : NormalizerBase(affectedHooks, canonicalizer), IRawNormalizer
+    : NormalizerBase(affectedHooks, canonicalizer), ISourceScopedRawNormalizer
 {
     public string SourceCode => "ghsa-family";
+    public IReadOnlySet<string> SupportedSourceCodes { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "ghsa",
+        "npm-advisory",
+        "npm-audit"
+    };
 
     private static readonly (string Table, string SourceCode)[] Tables =
     [
@@ -19,12 +25,23 @@ public sealed class GhsaRawNormalizer(
     ];
 
     public async Task<NormalizeBatchResult> ProcessPendingAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
+        => await ProcessTablesAsync(connection, limit, null, ct);
+
+    public Task<NormalizeBatchResult> ProcessSourcePendingAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
+        => ProcessTablesAsync(connection, limit, sourceCode, ct);
+
+    private async Task<NormalizeBatchResult> ProcessTablesAsync(NpgsqlConnection connection, int limit, string? requestedSourceCode, CancellationToken ct)
     {
         var processed = 0;
         var failed = 0;
 
-        foreach (var (table, sourceCode) in Tables)
+        foreach (var (table, tableSourceCode) in Tables)
         {
+            if (requestedSourceCode is not null && !string.Equals(tableSourceCode, requestedSourceCode, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             await using var select = new NpgsqlCommand($"""
                 select s.raw_index_id, s.ghsa_id, s.cve_id, s.summary, s.description,
                        s.ecosystem, s.package_name, s.vulnerable_ranges, s.cvss, s.cwes,
@@ -36,7 +53,7 @@ public sealed class GhsaRawNormalizer(
                 order by r.updated_at
                 limit $2
                 """, connection);
-            select.Parameters.AddWithValue(sourceCode);
+            select.Parameters.AddWithValue(tableSourceCode);
             select.Parameters.AddWithValue(Math.Max(1, limit - processed));
 
             var rows = new List<Row>();
