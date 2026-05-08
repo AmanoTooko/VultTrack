@@ -19,6 +19,7 @@ builder.Services.AddSingleton<IRawNormalizer, PypiRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, CveListRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ThreatIntelRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, DistroRawNormalizer>();
+builder.Services.AddSingleton<IRawNormalizer, ComponentCatalogNormalizer>();
 builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>();
 builder.Services.AddSingleton<ComponentVulnerabilitySearchService>();
 builder.Services.AddSingleton<SourceScheduler>();
