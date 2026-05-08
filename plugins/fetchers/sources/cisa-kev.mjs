@@ -8,7 +8,22 @@ export const sourceCode = 'cisa-kev';
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
-  const data = await fetchJson('https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json');
+  const checkpoint = ctx.source.checkpoint_json ?? {};
+
+  const resp = await fetch('https://www.cisa.gov/sites/default/files/feeds/known_exploited_vulnerabilities.json', {
+    headers: { 'user-agent': 'VulTrack/0.1', 'accept': 'application/json' }
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} for CISA KEV`);
+  const text = await resp.text();
+  const contentHash = sha256(Buffer.from(text));
+
+  // Skip if content unchanged
+  if (checkpoint.contentHash === contentHash) {
+    console.error('CISA KEV unchanged, skipping.');
+    return { fetchedCount: 0, parsedCount: 0, checkpoint: { contentHash, skipped: true } };
+  }
+
+  const data = JSON.parse(text);
   let count = 0;
   for (const item of data.vulnerabilities ?? []) {
     if (count >= max) break;
@@ -25,5 +40,5 @@ export async function run(client, ctx) {
     await upsertThreatIntel(client, rawIndexId, 'cisa-kev', cve, item);
     count++;
   }
-  return { fetchedCount: count, parsedCount: count, checkpoint: { count } };
+  return { fetchedCount: count, parsedCount: count, checkpoint: { contentHash, lastFetched: new Date().toISOString() } };
 }

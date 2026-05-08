@@ -233,6 +233,25 @@ create table if not exists stg_registry_packages (
   created_at timestamptz not null default now()
 );
 
+create table if not exists stg_ecosystem_advisories (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  provider text not null,
+  ecosystem text,
+  advisory_id text not null,
+  identifiers text[] not null default '{}',
+  package_name text,
+  purl text,
+  vulnerable_ranges jsonb not null default '[]'::jsonb,
+  patched_versions jsonb not null default '[]'::jsonb,
+  severity_label text,
+  cvss jsonb not null default '{}'::jsonb,
+  references_json jsonb not null default '[]'::jsonb,
+  published_at timestamptz,
+  modified_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists vulnerabilities (
   id uuid primary key default gen_random_uuid(),
   canonical_key text not null unique,
@@ -632,25 +651,113 @@ create index if not exists ix_component_identity_trgm on component_identity_inde
 create index if not exists ix_affected_components_vuln on vulnerability_affected_components(vulnerability_id, ecosystem, display_name);
 create index if not exists ix_affected_components_component on vulnerability_affected_components(component_id, vulnerability_id);
 create index if not exists ix_affected_facts_vuln on vulnerability_affected_facts(vulnerability_id, ecosystem, normalized_package_name);
-create index if not exists ix_affected_evidence_component on vulnerability_affected_evidence(affected_component_id);
+create table if not exists stg_android_osv (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  osv_id text not null,
+  aliases text[] not null default '{}',
+  affected jsonb not null default '[]'::jsonb,
+  severity jsonb not null default '[]'::jsonb,
+  summary text,
+  details text,
+  references_json jsonb not null default '[]'::jsonb,
+  published_at timestamptz,
+  modified_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_npm_advisories (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  ghsa_id text not null,
+  cve_id text,
+  ecosystem text not null default 'npm',
+  package_name text,
+  severity text,
+  summary text,
+  description text,
+  vulnerable_ranges jsonb not null default '[]'::jsonb,
+  patched_versions jsonb not null default '[]'::jsonb,
+  cvss jsonb not null default '{}'::jsonb,
+  cwes jsonb not null default '[]'::jsonb,
+  references_json jsonb not null default '[]'::jsonb,
+  published_at timestamptz,
+  updated_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
+create table if not exists stg_pypi_advisories (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  pysec_id text not null,
+  aliases text[] not null default '{}',
+  ecosystem text not null default 'PyPI',
+  package_name text,
+  summary text,
+  details text,
+  affected jsonb not null default '[]'::jsonb,
+  severity jsonb not null default '[]'::jsonb,
+  references_json jsonb not null default '[]'::jsonb,
+  published_at timestamptz,
+  modified_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
 
 insert into sources (code, name, kind, homepage_url, plugin_name, schedule_cron)
 values
   ('nvd-cve', 'NVD CVE API/Data Feed', 'vulnerability', 'https://nvd.nist.gov/vuln/data-feeds', 'nvd', '0 */6 * * *'),
+  ('nvd-cve-init', 'NVD CVE Mirror Baseline', 'vulnerability', 'https://github.com/fkie-cad/nvd-json-data-feeds', 'nvd', null),
   ('nvd-cpe', 'NVD CPE Dictionary', 'cpe', 'https://nvd.nist.gov/products/cpe', 'nvd', '0 2 * * *'),
   ('ghsa', 'GitHub Security Advisories', 'vulnerability', 'https://github.com/advisories', 'ghsa', '0 */6 * * *'),
-  ('osv', 'OSV.dev', 'vulnerability', 'https://osv.dev', 'osv', '0 */6 * * *'),
-  ('cve-list-v5', 'CVE List v5', 'vulnerability', 'https://github.com/CVEProject/cvelistV5', 'cve-list', '0 3 * * *'),
+  ('osv', 'OSV.dev Modified IDs', 'vulnerability', 'https://osv.dev', 'osv', '0 */6 * * *'),
+  ('osv-init', 'OSV.dev Full Baseline', 'vulnerability', 'https://osv.dev', 'osv', null),
+  ('cve-list-v5', 'CVE List v5', 'vulnerability', 'https://github.com/CVEProject/cvelistV5', 'cve-list', null),
   ('cisa-kev', 'CISA Known Exploited Vulnerabilities', 'threat_intel', 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog', 'threat-intel', '0 */12 * * *'),
   ('first-epss', 'FIRST EPSS', 'threat_intel', 'https://www.first.org/epss/', 'threat-intel', '0 4 * * *'),
   ('alpine-secdb', 'Alpine SecDB', 'vulnerability', 'https://secdb.alpinelinux.org/', 'alpine', '0 4 * * *'),
   ('debian-security-tracker', 'Debian Security Tracker', 'vulnerability', 'https://security-tracker.debian.org/', 'debian', '0 4 * * *'),
   ('ubuntu-osv', 'Ubuntu OSV', 'vulnerability', 'https://documentation.ubuntu.com/security/security-updates/osv/', 'ubuntu', '0 4 * * *'),
-  ('npm-registry', 'npm Registry Metadata', 'registry', 'https://registry.npmjs.org/', 'registry', null)
+  ('android-osv', 'Android Security Bulletins (OSV)', 'vulnerability', 'https://source.android.com/docs/security/bulletin', 'android', '0 6 * * *'),
+  ('android-osv-init', 'Android OSV Baseline', 'vulnerability', 'https://osv.dev', 'android', null),
+  ('npm-advisory', 'npm Advisory Database', 'vulnerability', 'https://github.com/advisories?query=ecosystem:npm', 'npm', '0 */6 * * *'),
+  ('npm-audit', 'npm Registry Audit Advisory API', 'vulnerability', 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk', 'npm', '0 */6 * * *'),
+  ('pypi-advisory', 'PyPI Advisory Database (PyPA)', 'vulnerability', 'https://github.com/pypa/advisory-database', 'pypi', '0 6 * * *'),
+  ('go-advisory', 'Go Vulnerability Database', 'vulnerability', 'https://github.com/golang/vulndb', 'go', '0 6 * * *'),
+  ('cargo-advisory', 'RustSec Advisory DB', 'vulnerability', 'https://github.com/rustsec/advisory-db', 'cargo', '0 6 * * *'),
+  ('nuget-advisory', 'NuGet VulnerabilityInfo', 'vulnerability', 'https://api.nuget.org/v3/vulnerabilities/index.json', 'nuget', '0 6 * * *'),
+  ('maven-advisory', 'Maven Vulnerability Lookup', 'vulnerability', 'https://ossindex.sonatype.org/', 'maven', '0 6 * * *'),
+  ('maven-osv', 'Maven OSV Modified IDs', 'vulnerability', 'https://osv.dev', 'maven', '0 6 * * *'),
+  ('maven-osv-init', 'Maven OSV Baseline', 'vulnerability', 'https://osv.dev', 'maven', null),
+  ('google-osv', 'Google OSV Ecosystems', 'vulnerability', 'https://osv.dev', 'google', '0 6 * * *'),
+  ('google-osv-init', 'Google OSV Baseline', 'vulnerability', 'https://osv.dev', 'google', null),
+  ('redhat-csaf', 'Red Hat Security Data CSAF', 'vulnerability', 'https://access.redhat.com/security/data/csaf', 'redhat', '0 4 * * *'),
+  ('suse-csaf', 'SUSE Security CSAF', 'vulnerability', 'https://ftp.suse.com/pub/projects/security/csaf/', 'suse', '0 4 * * *'),
+  ('npm-registry', 'npm Registry Metadata', 'registry', 'https://registry.npmjs.org/', 'registry', null),
+  ('pypi-registry', 'PyPI Package Metadata', 'registry', 'https://pypi.org/pypi/', 'registry', null),
+  ('maven-registry', 'Maven Central Metadata', 'registry', 'https://search.maven.org/', 'registry', null),
+  ('nuget-registry', 'NuGet Package Metadata', 'registry', 'https://api.nuget.org/v3/', 'registry', null),
+  ('rubygems-registry', 'RubyGems Package Metadata', 'registry', 'https://rubygems.org/api/v1/gems/', 'registry', null),
+  ('packagist-registry', 'Packagist Package Metadata', 'registry', 'https://repo.packagist.org/p2/', 'registry', null),
+  ('crates-registry', 'crates.io Package Metadata', 'registry', 'https://crates.io/api/v1/crates/', 'registry', null)
 on conflict (code) do update set
   name = excluded.name,
   kind = excluded.kind,
   homepage_url = excluded.homepage_url,
   plugin_name = excluded.plugin_name,
   schedule_cron = excluded.schedule_cron,
+  config_json = case
+    when sources.code in ('cve-list-v5', 'nvd-cve-init', 'osv-init', 'android-osv-init', 'maven-osv-init', 'google-osv-init') then jsonb_set(sources.config_json, '{runMode}', '"init"', true)
+    else sources.config_json
+  end,
   updated_at = now();
+
+update sources
+set config_json = jsonb_set(config_json, '{runMode}', '"init"', true),
+    schedule_cron = null,
+    updated_at = now()
+where code in ('cve-list-v5', 'nvd-cve-init', 'osv-init', 'android-osv-init', 'maven-osv-init', 'google-osv-init');
+
+update sources
+set config_json = config_json - 'runMode',
+    updated_at = now()
+where code in ('osv', 'maven-osv');

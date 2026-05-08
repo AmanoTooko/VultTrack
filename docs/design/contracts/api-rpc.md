@@ -173,9 +173,52 @@ Response:
 POST /api/v1/component.search
 GET  /api/v1/component.get?id={uuid}
 GET  /api/v1/component.vulnerabilities?id={uuid}
+POST /api/v1/component.vulnerabilitySearch
 POST /api/v1/component.mappingCandidates
 POST /api/v1/component.mappingApprove
 POST /api/v1/component.mappingReject
+```
+
+### 6.1 component.vulnerabilitySearch
+
+用于在尚未拥有完整 SBOM 的情况下，根据组件名、版本、供应商、生态或 PURL 查询匹配组件和已知漏洞。
+
+Request:
+
+```json
+{
+  "componentName": "log4j-core",
+  "version": "2.14.1",
+  "vendor": "org.apache.logging.log4j",
+  "ecosystem": "maven",
+  "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+  "pageSize": 50
+}
+```
+
+Response:
+
+```json
+{
+  "componentName": "log4j-core",
+  "purl": "pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1",
+  "purlWithoutVersion": "pkg:maven/org.apache.logging.log4j/log4j-core",
+  "items": [
+    {
+      "vulnerabilityId": "uuid",
+      "primaryIdentifier": "CVE-2021-44228",
+      "title": "Apache Log4j remote code execution",
+      "severityLabel": "critical",
+      "cvssScore": 10.0,
+      "ecosystem": "maven",
+      "packageName": "org.apache.logging.log4j:log4j-core",
+      "purl": "pkg:maven/org.apache.logging.log4j/log4j-core",
+      "versionRange": "< 2.15.0",
+      "rangeType": "SEMVER",
+      "versionMatched": true
+    }
+  ]
+}
 ```
 
 ## 7. Match
@@ -245,4 +288,3 @@ POST /api/v1/admin.identifierMerge
 POST /api/v1/admin.identifierSplit
 GET  /api/v1/admin.auditLogs
 ```
-

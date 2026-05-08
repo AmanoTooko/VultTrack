@@ -9,6 +9,17 @@ var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL")
 
 builder.Services.AddSingleton(NpgsqlDataSource.Create(ToNpgsqlConnectionString(databaseUrl)));
 builder.Services.AddSingleton<NvdRawProcessor>();
+builder.Services.AddSingleton<IVulnerabilityCanonicalizer, VulnerabilityCanonicalizer>();
+builder.Services.AddSingleton<IAffectedComponentHook, DefaultAffectedComponentHook>();
+builder.Services.AddSingleton<IRawNormalizer, NvdRawNormalizer>();
+builder.Services.AddSingleton<IRawNormalizer, OsvRawNormalizer>();
+builder.Services.AddSingleton<IRawNormalizer, GhsaRawNormalizer>();
+builder.Services.AddSingleton<IRawNormalizer, EcosystemAdvisoryNormalizer>();
+builder.Services.AddSingleton<IRawNormalizer, PypiRawNormalizer>();
+builder.Services.AddSingleton<IRawNormalizer, CveListRawNormalizer>();
+builder.Services.AddSingleton<IRawNormalizer, ThreatIntelRawNormalizer>();
+builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>();
+builder.Services.AddSingleton<ComponentVulnerabilitySearchService>();
 builder.Services.AddSingleton<SourceScheduler>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SourceScheduler>());
 
@@ -57,6 +68,12 @@ app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken 
 app.MapPost("/api/v1/nvd.processPending", async (NvdRawProcessor processor, ProcessPendingRequest request, CancellationToken ct) =>
 {
     var result = await processor.ProcessPendingAsync(request.Limit <= 0 ? 100 : request.Limit, ct);
+    return ApiResult.Ok(result);
+});
+
+app.MapPost("/api/v1/raw.normalizePending", async (IRawNormalizationService processor, NormalizePendingRequest request, CancellationToken ct) =>
+{
+    var result = await processor.ProcessPendingAsync(request.LimitPerSource <= 0 ? 100 : request.LimitPerSource, ct);
     return ApiResult.Ok(result);
 });
 
@@ -144,6 +161,12 @@ app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, Can
         affectedComponentNames = reader.GetFieldValue<string[]>(7),
         identifiers = reader.GetFieldValue<string[]>(8)
     });
+});
+
+app.MapPost("/api/v1/component.vulnerabilitySearch", async (ComponentVulnerabilitySearchService search, ComponentVulnerabilitySearchRequest request, CancellationToken ct) =>
+{
+    var result = await search.SearchAsync(request, ct);
+    return ApiResult.Ok(result);
 });
 
 app.Run();

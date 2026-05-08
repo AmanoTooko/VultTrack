@@ -33,8 +33,10 @@ export async function getSource(client, code) {
 
 export async function startRun(client, sourceId, trigger = 'manual') {
   const result = await client.query(
-    `insert into source_sync_runs (source_id, status, trigger)
-     values ($1, 'running', $2)
+    `insert into source_sync_runs (source_id, status, trigger, checkpoint_before)
+     select id, 'running', $2, checkpoint_json
+     from sources
+     where id = $1
      returning *`,
     [sourceId, trigger]
   );
@@ -113,6 +115,105 @@ export async function writeRecord(client, ctx, record) {
     ]
   );
   return rawResult.rows[0].id;
+}
+
+export async function saveCheckpoint(client, sourceId, checkpoint) {
+  await client.query(
+    'update sources set checkpoint_json = $2, updated_at = now() where id = $1',
+    [sourceId, JSON.stringify(checkpoint)]
+  );
+}
+
+/**
+ * Bulk init fetcher: download archive from URL, extract, and run processFile for each entry.
+ * Supports .zip, .tar.xz, .json.gz formats via system tools.
+ * Skips if archive hash matches checkpoint.
+ */
+export async function initFetch({ client, ctx, archiveUrl, format, processFile }) {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  const { createWriteStream } = await import('node:fs');
+  const { pipeline } = await import('node:stream/promises');
+  const { Readable } = await import('node:stream');
+  const { spawnSync } = await import('node:child_process');
+
+  const checkpoint = ctx.source.checkpoint_json ?? {};
+  const max = Number(process.env.FETCHER_MAX_RECORDS) || Number.MAX_SAFE_INTEGER;
+  const tmpDir = getRootPath('data/mirrors');
+  await fs.mkdir(tmpDir, { recursive: true });
+
+  const ext = archiveUrl.split('.').pop();
+  const archivePath = path.default.join(tmpDir, `init-${ctx.source.code}-${Date.now()}.${ext}`);
+
+  // Download
+  console.error(`Downloading ${archiveUrl}...`);
+  const resp = await fetch(archiveUrl, {
+    headers: {
+      'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+    }
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status} for ${archiveUrl}`);
+  if (!resp.body) throw new Error('Response has no body');
+
+  const fileStream = createWriteStream(archivePath);
+  await pipeline(Readable.fromWeb(resp.body), fileStream);
+
+  // Check hash
+  const fileHash = sha256(await fs.readFile(archivePath));
+  if (checkpoint.archiveHash === fileHash) {
+    console.error('Archive unchanged, skipping.');
+    await fs.unlink(archivePath).catch(() => {});
+    return { fetchedCount: 0, parsedCount: 0, checkpoint: { archiveHash: fileHash, skipped: true } };
+  }
+
+  console.error('Download complete, extracting...');
+  let files = [];
+
+  if (format === 'zip-list' || ext === 'zip') {
+    // List .json entries
+    const list = spawnSync('unzip', ['-Z1', archivePath], { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
+    if (list.status !== 0) throw new Error(`Failed to list archive: ${list.stderr}`);
+    files = list.stdout.split('\n').filter(f => f.endsWith('.json'));
+    for (const entry of files) {
+      const result = spawnSync('unzip', ['-p', archivePath, entry], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
+      if (result.status !== 0) continue;
+      try {
+        await processFile(entry, JSON.parse(result.stdout));
+      } catch { continue; }
+    }
+  } else if (format === 'tar-xz-list' || ext === 'xz') {
+    const extractDir = path.default.join(tmpDir, `init-extract-${Date.now()}`);
+    await fs.mkdir(extractDir, { recursive: true });
+    spawnSync('tar', ['-xJf', archivePath, '-C', extractDir], { stdio: 'pipe' });
+    const walked = [];
+    await walkDir(extractDir, walked, max);
+    for (const f of walked) {
+      try {
+        const item = JSON.parse(await fs.readFile(f, 'utf8'));
+        await processFile(path.default.basename(f), item);
+      } catch { continue; }
+    }
+    await fs.rm(extractDir, { recursive: true, force: true }).catch(() => {});
+  } else {
+    // Assume JSON or gzip JSON
+    throw new Error(`Unsupported format: ${format}`);
+  }
+
+  await fs.unlink(archivePath).catch(() => {});
+  return { checkpoint: { archiveHash: fileHash, lastFetched: new Date().toISOString() } };
+}
+
+async function walkDir(dir, files, max) {
+  const fs = await import('node:fs/promises');
+  const path = await import('node:path');
+  if (files.length >= max) return;
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (files.length >= max) break;
+    const full = path.default.join(dir, entry.name);
+    if (entry.isDirectory()) await walkDir(full, files, max);
+    else if (entry.isFile() && entry.name.endsWith('.json')) files.push(full);
+  }
 }
 
 export async function recordError(client, ctx, stage, error, externalKey = null) {

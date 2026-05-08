@@ -191,6 +191,48 @@ export async function upsertRegistryPackage(client, rawIndexId, registry, ecosys
   );
 }
 
+export async function upsertEcosystemAdvisory(client, rawIndexId, item) {
+  await client.query(
+    `insert into stg_ecosystem_advisories
+       (raw_index_id, provider, ecosystem, advisory_id, identifiers, package_name, purl,
+        vulnerable_ranges, patched_versions, severity_label, cvss, references_json,
+        published_at, modified_at, payload)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+     on conflict (raw_index_id) do update set
+       provider = excluded.provider,
+       ecosystem = excluded.ecosystem,
+       advisory_id = excluded.advisory_id,
+       identifiers = excluded.identifiers,
+       package_name = excluded.package_name,
+       purl = excluded.purl,
+       vulnerable_ranges = excluded.vulnerable_ranges,
+       patched_versions = excluded.patched_versions,
+       severity_label = excluded.severity_label,
+       cvss = excluded.cvss,
+       references_json = excluded.references_json,
+       published_at = excluded.published_at,
+       modified_at = excluded.modified_at,
+       payload = excluded.payload`,
+    [
+      rawIndexId,
+      item.provider,
+      item.ecosystem ?? null,
+      item.advisoryId,
+      item.identifiers ?? [],
+      item.packageName ?? null,
+      item.purl ?? null,
+      JSON.stringify(item.vulnerableRanges ?? []),
+      JSON.stringify(item.patchedVersions ?? []),
+      item.severityLabel ?? null,
+      JSON.stringify(item.cvss ?? {}),
+      JSON.stringify(item.references ?? []),
+      item.publishedAt ?? null,
+      item.modifiedAt ?? null,
+      JSON.stringify(item.payload ?? item)
+    ]
+  );
+}
+
 function parseCpe23(uri) {
   const raw = String(uri ?? '');
   const parts = raw.startsWith('cpe:2.3:') ? raw.split(':') : [];
@@ -201,4 +243,81 @@ function parseCpe23(uri) {
     version: parts[5] ?? null,
     target_sw: parts[10] ?? null
   };
+}
+
+export async function upsertAndroidOsv(client, rawIndexId, item) {
+  await client.query(
+    `insert into stg_android_osv
+       (raw_index_id, osv_id, aliases, affected, severity, summary, details, references_json, published_at, modified_at, payload)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+     on conflict (raw_index_id) do update set payload = excluded.payload`,
+    [
+      rawIndexId,
+      item.id,
+      item.aliases ?? [],
+      JSON.stringify(item.affected ?? []),
+      JSON.stringify(item.severity ?? []),
+      item.summary ?? null,
+      item.details ?? null,
+      JSON.stringify(item.references ?? []),
+      item.published ?? null,
+      item.modified ?? null,
+      JSON.stringify(item)
+    ]
+  );
+}
+
+export async function upsertNpmAdvisory(client, rawIndexId, item) {
+  const identifiers = item.identifiers ?? [];
+  const cve = identifiers.find((x) => x.type === 'CVE')?.value ?? item.cve_id ?? null;
+  const vulnerabilities = item.vulnerabilities ?? [];
+  const first = vulnerabilities[0] ?? {};
+  await client.query(
+    `insert into stg_npm_advisories
+       (raw_index_id, ghsa_id, cve_id, ecosystem, package_name, severity, summary, description,
+        vulnerable_ranges, patched_versions, cvss, cwes, references_json, published_at, updated_at, payload)
+     values ($1,$2,$3,'npm',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+     on conflict (raw_index_id) do update set payload = excluded.payload`,
+    [
+      rawIndexId,
+      item.ghsa_id,
+      cve,
+      first.package?.name ?? null,
+      item.severity ?? null,
+      item.summary ?? null,
+      item.description ?? null,
+      JSON.stringify(vulnerabilities.map((x) => x.vulnerable_version_range).filter(Boolean)),
+      JSON.stringify(vulnerabilities.map((x) => x.first_patched_version).filter(Boolean)),
+      JSON.stringify(item.cvss ?? item.cvss_severities ?? {}),
+      JSON.stringify(item.cwes ?? []),
+      JSON.stringify(item.references ?? []),
+      item.published_at ?? null,
+      item.updated_at ?? null,
+      JSON.stringify(item)
+    ]
+  );
+}
+
+export async function upsertPypiAdvisory(client, rawIndexId, item) {
+  await client.query(
+    `insert into stg_pypi_advisories
+       (raw_index_id, pysec_id, aliases, ecosystem, package_name, summary, details, affected,
+        severity, references_json, published_at, modified_at, payload)
+     values ($1,$2,$3,'PyPI',$4,$5,$6,$7,$8,$9,$10,$11,$12)
+     on conflict (raw_index_id) do update set payload = excluded.payload`,
+    [
+      rawIndexId,
+      item.id,
+      item.aliases ?? [],
+      item.affected?.[0]?.package?.name ?? null,
+      item.summary ?? null,
+      item.details ?? null,
+      JSON.stringify(item.affected ?? []),
+      JSON.stringify(item.severity ?? []),
+      JSON.stringify(item.references ?? []),
+      item.published ?? null,
+      item.modified ?? null,
+      JSON.stringify(item)
+    ]
+  );
 }

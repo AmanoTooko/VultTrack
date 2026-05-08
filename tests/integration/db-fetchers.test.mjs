@@ -1,6 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import path from 'node:path';
 import { withClient } from '../../plugins/fetchers/lib/db.mjs';
+
+test('database has source rows for every fetcher module', async () => {
+  const sourceCodes = (await fs.readdir('plugins/fetchers/sources'))
+    .filter((file) => file.endsWith('.mjs'))
+    .map((file) => path.basename(file, '.mjs'))
+    .sort();
+  await withClient(async (client) => {
+    const result = await client.query('select code from sources where code = any($1) order by code', [sourceCodes]);
+    assert.deepEqual(result.rows.map((row) => row.code), sourceCodes);
+  });
+});
 
 test('smoke fetchers wrote raw index rows for multiple sources', async () => {
   await withClient(async (client) => {

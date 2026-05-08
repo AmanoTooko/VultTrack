@@ -5,7 +5,10 @@ using NpgsqlTypes;
 
 namespace VulTrack.App;
 
-public sealed class NvdRawProcessor(NpgsqlDataSource db, ILogger<NvdRawProcessor> logger)
+public sealed class NvdRawProcessor(
+    NpgsqlDataSource db,
+    IVulnerabilityCanonicalizer canonicalizer,
+    ILogger<NvdRawProcessor> logger)
 {
     public async Task<ProcessPendingResult> ProcessPendingAsync(int limit, CancellationToken ct)
     {
@@ -74,47 +77,43 @@ public sealed class NvdRawProcessor(NpgsqlDataSource db, ILogger<NvdRawProcessor
         return new ProcessPendingResult(processed, failed);
     }
 
-    private static async Task<Guid> UpsertVulnerabilityAsync(NpgsqlConnection conn, NvdStagingRecord record, CancellationToken ct)
+    private async Task<Guid> UpsertVulnerabilityAsync(NpgsqlConnection conn, NvdStagingRecord record, CancellationToken ct)
     {
         var descriptions = JsonNode.Parse(record.Descriptions)?.AsArray();
         var title = descriptions?.FirstOrDefault(x => x?["lang"]?.GetValue<string>() == "en")?["value"]?.GetValue<string>();
         var selectedSeverity = ExtractCvss(record.Metrics).OrderByDescending(x => x.Score).FirstOrDefault();
+        var vulnerabilityId = await canonicalizer.UpsertCanonicalAsync(
+            conn,
+            new VulnerabilityCanonicalDraft(
+                record.CveId,
+                title,
+                title,
+                record.Status ?? "active",
+                record.PublishedAt,
+                record.ModifiedAt,
+                [record.CveId],
+                record.SourceId,
+                record.RawIndexId),
+            ct);
+
         await using var cmd = new NpgsqlCommand("""
-            insert into vulnerabilities
-              (canonical_key, primary_identifier, title, description, status, published_at, modified_at,
-               max_cvss_score, max_cvss_version, max_cvss_vector, severity_label, severity_source,
-               severity_confidence, identifiers, aliases, search_text)
-            values
-              ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'nvd-cve',1.0,$12,$13,
-               to_tsvector('simple', coalesce($2,'') || ' ' || coalesce($3,'') || ' ' || coalesce($4,'')))
-            on conflict (canonical_key) do update set
-              title = excluded.title,
-              description = excluded.description,
-              status = excluded.status,
-              modified_at = excluded.modified_at,
-              max_cvss_score = excluded.max_cvss_score,
-              max_cvss_version = excluded.max_cvss_version,
-              max_cvss_vector = excluded.max_cvss_vector,
-              severity_label = excluded.severity_label,
-              identifiers = excluded.identifiers,
-              search_text = excluded.search_text,
-              updated_at = now()
-            returning id
+            update vulnerabilities
+            set max_cvss_score = coalesce($2, max_cvss_score),
+                max_cvss_version = coalesce($3, max_cvss_version),
+                max_cvss_vector = coalesce($4, max_cvss_vector),
+                severity_label = coalesce($5, severity_label),
+                severity_source = 'nvd-cve',
+                severity_confidence = 1.0,
+                updated_at = now()
+            where id = $1
             """, conn);
-        cmd.Parameters.AddWithValue(record.CveId);
-        cmd.Parameters.AddWithValue(record.CveId);
-        cmd.Parameters.AddWithValue((object?)title ?? DBNull.Value);
-        cmd.Parameters.AddWithValue((object?)title ?? DBNull.Value);
-        cmd.Parameters.AddWithValue(record.Status ?? "active");
-        cmd.Parameters.AddWithValue((object?)record.PublishedAt ?? DBNull.Value);
-        cmd.Parameters.AddWithValue((object?)record.ModifiedAt ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(vulnerabilityId);
         cmd.Parameters.AddWithValue((object?)selectedSeverity?.Score ?? DBNull.Value);
         cmd.Parameters.AddWithValue((object?)selectedSeverity?.Version ?? DBNull.Value);
         cmd.Parameters.AddWithValue((object?)selectedSeverity?.Vector ?? DBNull.Value);
         cmd.Parameters.AddWithValue((object?)selectedSeverity?.Severity ?? DBNull.Value);
-        cmd.Parameters.AddWithValue(new[] { record.CveId });
-        cmd.Parameters.AddWithValue(Array.Empty<string>());
-        return (Guid)(await cmd.ExecuteScalarAsync(ct))!;
+        await cmd.ExecuteNonQueryAsync(ct);
+        return vulnerabilityId;
     }
 
     private static async Task<Guid> UpsertRecordAsync(NpgsqlConnection conn, Guid vulnerabilityId, NvdStagingRecord record, CancellationToken ct)
@@ -142,25 +141,7 @@ public sealed class NvdRawProcessor(NpgsqlDataSource db, ILogger<NvdRawProcessor
         return (Guid)(await cmd.ExecuteScalarAsync(ct))!;
     }
 
-    private static async Task UpsertIdentifierAsync(NpgsqlConnection conn, Guid vulnerabilityId, NvdStagingRecord record, CancellationToken ct)
-    {
-        await using var cmd = new NpgsqlCommand("""
-            insert into vulnerability_identifier_index
-              (identifier_type, identifier_value, normalized_value, canonical_vulnerability_id,
-               source_id, raw_index_id, evidence_type, evidence_strength)
-            values ($1,$2,$3,$4,$5,$6,'same_source_record','strong')
-            on conflict (identifier_type, normalized_value, source_id, raw_index_id) do update set
-              canonical_vulnerability_id = excluded.canonical_vulnerability_id,
-              last_seen_at = now()
-            """, conn);
-        cmd.Parameters.AddWithValue(Identifier.TypeOf(record.CveId));
-        cmd.Parameters.AddWithValue(record.CveId);
-        cmd.Parameters.AddWithValue(Identifier.Normalize(record.CveId));
-        cmd.Parameters.AddWithValue(vulnerabilityId);
-        cmd.Parameters.AddWithValue(record.SourceId);
-        cmd.Parameters.AddWithValue(record.RawIndexId);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
+    private static Task UpsertIdentifierAsync(NpgsqlConnection conn, Guid vulnerabilityId, NvdStagingRecord record, CancellationToken ct) => Task.CompletedTask;
 
     private static async Task UpsertDescriptionsAsync(NpgsqlConnection conn, Guid vulnerabilityId, Guid recordId, NvdStagingRecord record, CancellationToken ct)
     {

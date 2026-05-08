@@ -11,6 +11,9 @@ public static partial class Identifier
         var normalized = Normalize(value);
         if (normalized.StartsWith("CVE-")) return "CVE";
         if (normalized.StartsWith("GHSA-")) return "GHSA";
+        if (normalized.StartsWith("PYSEC-")) return "PYSEC";
+        if (normalized.StartsWith("RUSTSEC-")) return "RUSTSEC";
+        if (normalized.StartsWith("ASB-")) return "ASB";
         if (normalized.StartsWith("OSV-")) return "OSV";
         if (normalized.StartsWith("UBUNTU-")) return "UBUNTU";
         if (CweRegex().IsMatch(normalized)) return "CWE";

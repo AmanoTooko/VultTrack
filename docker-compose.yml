@@ -17,5 +17,16 @@ services:
       timeout: 5s
       retries: 20
 
+  adminer:
+    image: adminer:4
+    container_name: vultrack-adminer
+    ports:
+      - "8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+      ADMINER_DESIGN: dracula
+    depends_on:
+      - postgres
+
 volumes:
   vultrack_pgdata:

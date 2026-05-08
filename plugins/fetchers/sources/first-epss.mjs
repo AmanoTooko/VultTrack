@@ -11,7 +11,17 @@ export const sourceCode = 'first-epss';
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
+  const checkpoint = ctx.source.checkpoint_json ?? {};
+
   const gz = await fetchBuffer('https://epss.empiricalsecurity.com/epss_scores-current.csv.gz');
+  const contentHash = sha256(gz);
+
+  // Skip if content unchanged
+  if (checkpoint.contentHash === contentHash) {
+    console.error('EPSS data unchanged, skipping.');
+    return { fetchedCount: 0, parsedCount: 0, checkpoint: { contentHash, skipped: true } };
+  }
+
   const csv = (await gunzip(gz)).toString('utf8');
   const lines = csv.split(/\r?\n/).filter((line) => line && !line.startsWith('#'));
   let count = 0;
@@ -35,5 +45,5 @@ export async function run(client, ctx) {
     });
     count++;
   }
-  return { fetchedCount: count, parsedCount: count, checkpoint: { count } };
+  return { fetchedCount: count, parsedCount: count, checkpoint: { contentHash, lastFetched: new Date().toISOString() } };
 }

@@ -1,11 +1,26 @@
-import { getEnv, getIntEnv } from './env.mjs';
+import { getIntEnv } from './env.mjs';
+
+const BROWSER_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36';
+
+const COMMON_HEADERS = {
+  'accept': 'application/json, text/plain, */*',
+  'accept-language': 'en-US,en;q=0.9',
+  'accept-encoding': 'gzip, deflate, br',
+  'user-agent': BROWSER_UA,
+  'sec-fetch-dest': 'empty',
+  'sec-fetch-mode': 'cors',
+  'sec-fetch-site': 'cross-site',
+  'sec-gpc': '1',
+  'cache-control': 'no-cache',
+  'pragma': 'no-cache',
+};
 
 export async function fetchJson(url, options = {}) {
   const res = await fetch(url, {
     ...options,
     headers: {
-      'accept': 'application/json',
-      'user-agent': getEnv('FETCHER_USER_AGENT', 'VulTrack/0.1'),
+      ...COMMON_HEADERS,
       ...(options.headers ?? {})
     }
   });
@@ -25,7 +40,7 @@ export async function fetchBuffer(url, options = {}) {
       ...options,
       signal: controller.signal,
       headers: {
-        'user-agent': getEnv('FETCHER_USER_AGENT', 'VulTrack/0.1'),
+        ...COMMON_HEADERS,
         ...(options.headers ?? {})
       }
     });
@@ -40,7 +55,7 @@ export async function fetchBuffer(url, options = {}) {
 }
 
 export function authHeaders() {
-  const githubToken = getEnv('GITHUB_TOKEN');
-  const nvdKey = getEnv('NVD_API_KEY');
+  const githubToken = process.env.GITHUB_TOKEN;
+  const nvdKey = process.env.NVD_API_KEY;
   return { githubToken, nvdKey };
 }

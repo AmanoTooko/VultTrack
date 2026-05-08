@@ -1,9 +1,13 @@
 #!/usr/bin/env node
-import { withClient, getSource, startRun, finishRun, recordError } from './lib/db.mjs';
+import { withClient, getSource, startRun, finishRun, saveCheckpoint, recordError } from './lib/db.mjs';
 
 const source = getArg('--source');
 if (!source) {
   console.error('Usage: npm run fetch -- --source <source-code>');
+  process.exit(2);
+}
+if (!/^[a-z0-9-]+$/.test(source)) {
+  console.error(`Invalid source code: ${source}`);
   process.exit(2);
 }
 
@@ -12,6 +16,10 @@ const mod = await import(modulePath).catch((err) => {
   console.error(`Failed to load fetcher ${source}:`, err.message);
   process.exit(2);
 });
+if (mod.sourceCode !== source || typeof mod.run !== 'function') {
+  console.error(`Fetcher ${source} does not export matching sourceCode and run()`);
+  process.exit(2);
+}
 
 await withClient(async (client) => {
   const sourceRow = await getSource(client, source);
@@ -19,6 +27,9 @@ await withClient(async (client) => {
   const ctx = { source: sourceRow, run };
   try {
     const result = await mod.run(client, ctx);
+    if (result.checkpoint) {
+      await saveCheckpoint(client, sourceRow.id, result.checkpoint);
+    }
     await finishRun(client, run.id, {
       status: 'succeeded',
       fetchedCount: result.fetchedCount,
