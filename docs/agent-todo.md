@@ -82,6 +82,21 @@ Recent verification records:
 - 2026-05-09: `dotnet test VulTrack.slnx --no-build` passed.
 - 2026-05-09: `npm test` passed.
 - 2026-05-09: `API_BASE_URL=http://localhost:5099 npm run test:api` passed, 6 API tests.
+- 2026-05-09: `API_BASE_URL=http://localhost:5099 ./scripts/test-mvp.sh` passed.
+- 2026-05-09: ran `POST /api/v1/raw.normalizePending` with `limitPerSource=1000`.
+  Processed `nvd-cve=1000`, `osv-family=1000`, `ghsa-family=1000`, `pypi-advisory=1000`,
+  `cve-list-v5=1000`, `threat-intel=1000`, `distro=1000`, `component-catalog=533`, all with `failed=0`.
+
+Post-batch database snapshot:
+
+- `source_raw_index`: `succeeded=17707`, `pending=2811998`.
+- `vulnerabilities`: `21913`.
+- `vulnerability_records`: `31803`.
+- `vulnerability_identifier_groups`: `16598`.
+- `vulnerability_identifier_edges`: `3546`.
+- `vulnerability_affected_components`: `34478`.
+- `cpe_entries`: `560`.
+- `registry_packages`: `20`.
 
 ## Current Runtime Notes
 
