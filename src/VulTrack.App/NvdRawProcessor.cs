@@ -8,6 +8,7 @@ namespace VulTrack.App;
 public sealed class NvdRawProcessor(
     NpgsqlDataSource db,
     IVulnerabilityCanonicalizer canonicalizer,
+    IEnumerable<IAffectedComponentHook> affectedHooks,
     ILogger<NvdRawProcessor> logger)
 {
     public async Task<ProcessPendingResult> ProcessPendingAsync(int limit, CancellationToken ct)
@@ -61,7 +62,11 @@ public sealed class NvdRawProcessor(
                 await UpsertSeveritiesAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
                 await UpsertWeaknessesAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
                 await UpsertReferencesAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
-                await UpsertAffectedFactsAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
+                var affectedFacts = await UpsertAffectedFactsAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
+                foreach (var hook in affectedHooks)
+                {
+                    await hook.OnAffectedFactsAsync(tx, vulnerabilityId, vulnerabilityRecordId, affectedFacts, ct);
+                }
                 await MarkNormalizedAsync(tx, record.RawIndexId, ct);
                 await transaction.CommitAsync(ct);
                 processed++;
@@ -229,12 +234,14 @@ public sealed class NvdRawProcessor(
         }
     }
 
-    private static async Task UpsertAffectedFactsAsync(NpgsqlConnection conn, Guid vulnerabilityId, Guid recordId, NvdStagingRecord record, CancellationToken ct)
+    private static async Task<IReadOnlyList<AffectedFactDraft>> UpsertAffectedFactsAsync(NpgsqlConnection conn, Guid vulnerabilityId, Guid recordId, NvdStagingRecord record, CancellationToken ct)
     {
+        var facts = new List<AffectedFactDraft>();
         foreach (var cpeMatch in WalkCpeMatches(JsonNode.Parse(record.Configurations)))
         {
             var criteria = cpeMatch?["criteria"]?.GetValue<string>();
             if (string.IsNullOrWhiteSpace(criteria)) continue;
+            var product = ParseProduct(criteria);
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_affected_facts
                   (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
@@ -247,12 +254,15 @@ public sealed class NvdRawProcessor(
             cmd.Parameters.AddWithValue(record.SourceId);
             cmd.Parameters.AddWithValue(record.RawIndexId);
             cmd.Parameters.AddWithValue(criteria);
-            cmd.Parameters.AddWithValue(ParseProduct(criteria));
+            cmd.Parameters.AddWithValue(product);
             cmd.Parameters.AddWithValue(criteria);
             cmd.Parameters.AddWithValue(cpeMatch?["vulnerable"]?.GetValue<bool>() ?? true);
             cmd.Parameters.AddWithValue(cpeMatch?.ToJsonString() ?? "{}");
             await cmd.ExecuteNonQueryAsync(ct);
+            facts.Add(new AffectedFactDraft("cpe", "cpe", product, null, criteria, "cpe_match", cpeMatch?.ToJsonString() ?? "{}"));
         }
+
+        return facts;
     }
 
     private static async Task MarkNormalizedAsync(NpgsqlConnection conn, Guid rawIndexId, CancellationToken ct)
