@@ -94,6 +94,7 @@ Recent verification records:
 - 2026-05-09: ran source-scoped smoke with `nvd-cve`, `ghsa`, `ubuntu-osv`, `pypi-advisory`, `cisa-kev`, `nvd-cpe` at 500 each.
   Processed `nvd-cve=500`, `ghsa=500`, `ubuntu-osv=500`, `pypi-advisory=109`,
   `cisa-kev=500`, `nvd-cpe=500`, all with `failed=0`.
+- 2026-05-09: added full pending normalization loop script at `scripts/run-full-normalization.mjs`.
 
 Post-batch database snapshot:
 
@@ -128,6 +129,12 @@ Source-scoped smoke:
 
 ```bash
 API_BASE_URL=http://localhost:5099 SOURCE_SMOKE_LIMIT=500 node scripts/normalize-source-smoke.mjs nvd-cve ghsa ubuntu-osv pypi-advisory cisa-kev nvd-cpe
+```
+
+Full normalization loop:
+
+```bash
+API_BASE_URL=http://localhost:5099 LIMIT_PER_SOURCE=1000 npm run normalize:run
 ```
 
 Useful status checks:
