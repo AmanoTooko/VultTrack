@@ -3,7 +3,10 @@ using Npgsql;
 
 namespace VulTrack.App;
 
-public sealed class GhsaRawNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer)
+public sealed class GhsaRawNormalizer(
+    IEnumerable<IAffectedComponentHook> affectedHooks,
+    IVulnerabilityCanonicalizer canonicalizer,
+    ILogger<GhsaRawNormalizer> logger)
     : NormalizerBase(affectedHooks, canonicalizer), IRawNormalizer
 {
     public string SourceCode => "ghsa-family";
@@ -24,7 +27,8 @@ public sealed class GhsaRawNormalizer(IEnumerable<IAffectedComponentHook> affect
         {
             await using var select = new NpgsqlCommand($"""
                 select s.raw_index_id, s.ghsa_id, s.cve_id, s.summary, s.description,
-                       s.ecosystem, s.package_name, s.vulnerable_ranges, s.payload, r.source_id
+                       s.ecosystem, s.package_name, s.vulnerable_ranges, s.cvss, s.cwes,
+                       s.references_json, s.payload, r.source_id
                 from {table} s
                 join source_raw_index r on r.id = s.raw_index_id
                 join sources src on src.id = r.source_id
@@ -50,7 +54,10 @@ public sealed class GhsaRawNormalizer(IEnumerable<IAffectedComponentHook> affect
                         reader.IsDBNull(6) ? null : reader.GetString(6),
                         reader.GetString(7),
                         reader.GetString(8),
-                        reader.GetGuid(9)));
+                        reader.GetString(9),
+                        reader.GetString(10),
+                        reader.GetString(11),
+                        reader.GetGuid(12)));
                 }
             }
 
@@ -60,16 +67,23 @@ public sealed class GhsaRawNormalizer(IEnumerable<IAffectedComponentHook> affect
                 {
                     var identifiers = IdentifiersFrom([row.GhsaId, row.CveId]);
                     var primary = row.CveId ?? row.GhsaId;
-                    var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, primary, row.Summary, row.Description ?? row.Summary, "active", DateValue(JsonNode.Parse(row.Payload), "published_at"), DateValue(JsonNode.Parse(row.Payload), "updated_at"), identifiers, ct);
+                    var payload = JsonNode.Parse(row.Payload);
+                    var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, primary, row.Summary, row.Description ?? row.Summary, "active", DateValue(payload, "published_at"), DateValue(payload, "updated_at"), identifiers, ct);
                     var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.GhsaId, row.Summary, row.Description, "active", row.Payload, ct);
                     await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
+                    await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(row.Summary, row.Description), ct);
+                    var severities = SourceFactExtractor.CvssSeverities(JsonNode.Parse(row.Cvss)).ToList();
+                    await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, severities, ct);
+                    await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(JsonNode.Parse(row.References)), ct);
+                    await InsertWeaknessesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Weaknesses(JsonNode.Parse(row.Cwes)), ct);
                     var facts = ExtractAffectedFacts(row).ToList();
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                     await MarkNormalizedAsync(connection, row.RawIndexId, ct);
                     processed++;
                 }
-                catch
+                catch (Exception ex)
                 {
+                    logger.LogError(ex, "Failed to normalize GHSA record {GhsaId} from raw {RawIndexId}", row.GhsaId, row.RawIndexId);
                     failed++;
                 }
             }
@@ -114,5 +128,5 @@ public sealed class GhsaRawNormalizer(IEnumerable<IAffectedComponentHook> affect
         };
     }
 
-    private sealed record Row(Guid RawIndexId, string GhsaId, string? CveId, string? Summary, string? Description, string? Ecosystem, string? PackageName, string VulnerableRanges, string Payload, Guid SourceId);
+    private sealed record Row(Guid RawIndexId, string GhsaId, string? CveId, string? Summary, string? Description, string? Ecosystem, string? PackageName, string VulnerableRanges, string Cvss, string Cwes, string References, string Payload, Guid SourceId);
 }

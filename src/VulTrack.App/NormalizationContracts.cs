@@ -44,3 +44,30 @@ public sealed record AffectedFactDraft(
     string? VersionRange,
     string? RangeType,
     string SourceSpecificJson);
+
+public sealed record DescriptionDraft(
+    string? Lang,
+    string DescriptionType,
+    string Value,
+    bool IsSelected = false);
+
+public sealed record SeverityScoreDraft(
+    string ScoringSystem,
+    string? ScoringVersion,
+    string? ScoreType,
+    string? VectorString,
+    decimal? Score,
+    string? SeverityLabel,
+    string MetricJson,
+    bool IsSelected = false);
+
+public sealed record ReferenceDraft(
+    string Url,
+    string? RefType,
+    string[] Tags,
+    string? SourceJsonPath = null);
+
+public sealed record WeaknessDraft(
+    string WeaknessType,
+    string? WeaknessId,
+    string? Description);

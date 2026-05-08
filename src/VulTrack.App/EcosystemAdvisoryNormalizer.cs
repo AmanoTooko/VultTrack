@@ -52,10 +52,15 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
             {
                 var identifiers = IdentifiersFrom([row.AdvisoryId], row.Identifiers);
                 var primary = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? row.AdvisoryId;
-                var title = JsonNode.Parse(row.Payload)?["vulnerability"]?["summary"]?.GetValue<string>() ?? row.AdvisoryId;
+                var payload = JsonNode.Parse(row.Payload);
+                var title = payload?["vulnerability"]?["summary"]?.GetValue<string>() ?? row.AdvisoryId;
                 var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, primary, title, title, "active", row.PublishedAt, row.ModifiedAt, identifiers, ct);
                 var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.AdvisoryId, title, title, "active", row.Payload, ct);
                 await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
+                await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, payload?["vulnerability"]?["details"]?.GetValue<string>()), ct);
+                var severities = SourceFactExtractor.CvssSeverities(payload?["cvss"]).Concat(SourceFactExtractor.LabelSeverity(row.SeverityLabel, row.Payload)).ToList();
+                await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, severities, ct);
+                await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(payload?["references"] ?? payload?["references_json"]), ct);
                 var facts = ExtractAffectedFacts(row).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                 await MarkNormalizedAsync(connection, row.RawIndexId, ct);

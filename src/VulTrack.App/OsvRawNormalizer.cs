@@ -68,6 +68,9 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                     var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, primary, title, description, "active", DateValue(payload, "published"), DateValue(payload, "modified"), identifiers, ct);
                     var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.OsvId, title, description, "active", row.Payload, ct);
                     await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
+                    await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, description), ct);
+                    await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, SourceFactExtractor.OsvSeverities(payload?["severity"]), ct);
+                    await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(payload?["references"]), ct);
                     var facts = ExtractAffectedFacts(payload).ToList();
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                     await MarkNormalizedAsync(connection, row.RawIndexId, ct);

@@ -54,6 +54,10 @@ public sealed class PypiRawNormalizer(IEnumerable<IAffectedComponentHook> affect
                 var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, primary, title, row.Details ?? title, "active", row.PublishedAt, row.ModifiedAt, identifiers, ct);
                 var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.PysecId, title, row.Details, "active", row.Payload, ct);
                 await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
+                var payload = JsonNode.Parse(row.Payload);
+                await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(row.Summary, row.Details), ct);
+                await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, SourceFactExtractor.OsvSeverities(payload?["severity"]), ct);
+                await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(payload?["references"]), ct);
                 var facts = ExtractAffectedFacts(row).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                 await MarkNormalizedAsync(connection, row.RawIndexId, ct);
