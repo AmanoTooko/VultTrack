@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using Npgsql;
 using VulTrack.App;
 
@@ -27,7 +28,10 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<SourceScheduler>()
 
 var app = builder.Build();
 
-app.MapGet("/", () => Results.Redirect("/api/v1/system.health"));
+app.UseDefaultFiles();
+app.UseStaticFiles();
+
+app.MapGet("/", () => Results.Redirect("/index.html"));
 
 app.MapGet("/api/v1/system.health", () => ApiResult.Ok(new
 {
@@ -65,6 +69,65 @@ app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken 
         });
     }
     return ApiResult.Ok(rows);
+});
+
+app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToken ct) =>
+{
+    var normalizeStatus = new List<object>();
+    await using (var cmd = db.CreateCommand("""
+        select normalize_status, count(*)
+        from source_raw_index
+        group by normalize_status
+        order by normalize_status
+        """))
+    await using (var reader = await cmd.ExecuteReaderAsync(ct))
+    {
+        while (await reader.ReadAsync(ct))
+        {
+            normalizeStatus.Add(new { status = reader.GetString(0), count = reader.GetInt64(1) });
+        }
+    }
+
+    var pendingBySource = new List<object>();
+    await using (var cmd = db.CreateCommand("""
+        select s.code, count(*)
+        from source_raw_index r
+        join sources s on s.id = r.source_id
+        where r.normalize_status <> 'succeeded'
+        group by s.code
+        order by count(*) desc, s.code
+        limit 25
+        """))
+    await using (var reader = await cmd.ExecuteReaderAsync(ct))
+    {
+        while (await reader.ReadAsync(ct))
+        {
+            pendingBySource.Add(new { sourceCode = reader.GetString(0), pending = reader.GetInt64(1) });
+        }
+    }
+
+    await using var totals = db.CreateCommand("""
+        select
+          (select count(*) from vulnerabilities),
+          (select count(*) from vulnerability_records),
+          (select count(*) from vulnerability_affected_components),
+          (select count(*) from components),
+          (select count(*) from registry_packages),
+          (select count(*) from cpe_entries)
+        """);
+    await using var totalReader = await totals.ExecuteReaderAsync(ct);
+    await totalReader.ReadAsync(ct);
+    return ApiResult.Ok(new
+    {
+        vulnerabilities = totalReader.GetInt64(0),
+        vulnerabilityRecords = totalReader.GetInt64(1),
+        affectedComponents = totalReader.GetInt64(2),
+        components = totalReader.GetInt64(3),
+        registryPackages = totalReader.GetInt64(4),
+        cpeEntries = totalReader.GetInt64(5),
+        normalizeStatus,
+        pendingBySource
+    });
 });
 
 app.MapPost("/api/v1/nvd.processPending", async (NvdRawProcessor processor, ProcessPendingRequest request, CancellationToken ct) =>
@@ -165,10 +228,189 @@ app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, Can
     });
 });
 
+app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
+{
+    await using var cmd = db.CreateCommand("""
+        select id, primary_identifier, title, description, status, severity_label, max_cvss_score,
+               max_cvss_version, max_cvss_vector, epss_score, epss_percentile, kev_date_added,
+               known_ransomware, source_count, affected_component_count, affected_ecosystems,
+               affected_component_names, identifiers, aliases, published_at, modified_at, updated_at
+        from vulnerabilities
+        where id = $1
+        """);
+    cmd.Parameters.AddWithValue(id);
+    await using var reader = await cmd.ExecuteReaderAsync(ct);
+    if (!await reader.ReadAsync(ct)) return ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString());
+
+    var vulnerability = new
+    {
+        id = reader.GetGuid(0),
+        primaryIdentifier = reader.GetString(1),
+        title = reader.IsDBNull(2) ? null : reader.GetString(2),
+        description = reader.IsDBNull(3) ? null : reader.GetString(3),
+        status = reader.GetString(4),
+        severityLabel = reader.IsDBNull(5) ? null : reader.GetString(5),
+        maxCvssScore = reader.IsDBNull(6) ? (decimal?)null : reader.GetDecimal(6),
+        maxCvssVersion = reader.IsDBNull(7) ? null : reader.GetString(7),
+        maxCvssVector = reader.IsDBNull(8) ? null : reader.GetString(8),
+        epssScore = reader.IsDBNull(9) ? (decimal?)null : reader.GetDecimal(9),
+        epssPercentile = reader.IsDBNull(10) ? (decimal?)null : reader.GetDecimal(10),
+        kevDateAdded = reader.IsDBNull(11) ? null : reader.GetDateTime(11).ToString("yyyy-MM-dd"),
+        knownRansomware = reader.IsDBNull(12) ? (bool?)null : reader.GetBoolean(12),
+        sourceCount = reader.GetInt32(13),
+        affectedComponentCount = reader.GetInt32(14),
+        affectedEcosystems = reader.GetFieldValue<string[]>(15),
+        affectedComponentNames = reader.GetFieldValue<string[]>(16),
+        identifiers = reader.GetFieldValue<string[]>(17),
+        aliases = reader.GetFieldValue<string[]>(18),
+        publishedAt = reader.IsDBNull(19) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(19),
+        modifiedAt = reader.IsDBNull(20) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(20),
+        updatedAt = reader.GetFieldValue<DateTimeOffset>(21)
+    };
+
+    return ApiResult.Ok(new
+    {
+        vulnerability,
+        identifiers = await QueryRowsAsync(db, """
+            select i.identifier_type, i.identifier_value, i.normalized_value, i.evidence_strength,
+                   i.confidence, s.code
+            from vulnerability_identifier_index i
+            left join sources s on s.id = i.source_id
+            where i.canonical_vulnerability_id = $1
+            order by i.identifier_type, i.identifier_value
+            limit 200
+            """, id, ct),
+        records = await QueryRowsAsync(db, """
+            select vr.id::text, s.code, s.name, vr.source_record_id, vr.title, vr.description,
+                   vr.status, vr.confidence, vr.source_specific::text, vr.updated_at
+            from vulnerability_records vr
+            join sources s on s.id = vr.source_id
+            where vr.vulnerability_id = $1
+            order by s.code, vr.updated_at desc
+            limit 100
+            """, id, ct),
+        affectedComponents = await QueryRowsAsync(db, """
+            select ecosystem, package_name, display_name, primary_purl, primary_cpe23_uri,
+                   normalized_range, range_type, confidence, evidence_count, resolution_status
+            from vulnerability_affected_components
+            where vulnerability_id = $1
+            order by ecosystem nulls last, display_name
+            limit 200
+            """, id, ct),
+        affectedFacts = await QueryRowsAsync(db, """
+            select s.code, fact_type, ecosystem, package_name, purl, cpe23_uri,
+                   version_range_raw, range_type, vulnerable, source_specific::text
+            from vulnerability_affected_facts f
+            left join sources s on s.id = f.source_id
+            where f.vulnerability_id = $1
+            order by s.code, ecosystem nulls last, package_name nulls last
+            limit 200
+            """, id, ct),
+        descriptions = await QueryRowsAsync(db, """
+            select s.code, lang, description_type, value, is_selected
+            from vulnerability_descriptions d
+            left join sources s on s.id = d.source_id
+            where d.vulnerability_id = $1
+            order by is_selected desc, s.code nulls last
+            limit 100
+            """, id, ct),
+        severities = await QueryRowsAsync(db, """
+            select s.code, scoring_system, scoring_version, score_type, vector_string,
+                   score, severity_label, is_selected
+            from vulnerability_severity_scores vss
+            left join sources s on s.id = vss.source_id
+            where vss.vulnerability_id = $1
+            order by is_selected desc, score desc nulls last
+            limit 100
+            """, id, ct),
+        references = await QueryRowsAsync(db, """
+            select s.code, url, ref_type, tags
+            from vulnerability_references r
+            left join sources s on s.id = r.source_id
+            where r.vulnerability_id = $1
+            order by s.code nulls last, url
+            limit 100
+            """, id, ct)
+    });
+});
+
 app.MapPost("/api/v1/component.vulnerabilitySearch", async (ComponentVulnerabilitySearchService search, ComponentVulnerabilitySearchRequest request, CancellationToken ct) =>
 {
     var result = await search.SearchAsync(request, ct);
     return ApiResult.Ok(result);
+});
+
+app.MapPost("/api/v1/component.search", async (NpgsqlDataSource db, ComponentSearchRequest request, CancellationToken ct) =>
+{
+    var pageSize = request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200);
+    var query = $"%{request.Query?.Trim() ?? ""}%";
+    var ecosystem = string.IsNullOrWhiteSpace(request.Ecosystem) ? null : request.Ecosystem.Trim();
+
+    var components = new List<object>();
+    await using (var cmd = db.CreateCommand("""
+        select id, canonical_name, component_type, primary_purl, primary_cpe23_uri,
+               primary_repository_url, identities
+        from components
+        where ($1 = '%%' or canonical_name ilike $1 or primary_purl ilike $1 or primary_cpe23_uri ilike $1 or $2 = any(identities))
+          and ($3::text is null or primary_purl ilike ('pkg:' || $3 || '/%'))
+        order by updated_at desc
+        limit $4
+        """))
+    {
+        cmd.Parameters.AddWithValue(query);
+        cmd.Parameters.AddWithValue(request.Query?.Trim() ?? "");
+        cmd.Parameters.AddWithValue((object?)ecosystem ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(pageSize);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            components.Add(new
+            {
+                id = reader.GetGuid(0),
+                canonicalName = reader.GetString(1),
+                componentType = reader.GetString(2),
+                primaryPurl = reader.IsDBNull(3) ? null : reader.GetString(3),
+                primaryCpe23Uri = reader.IsDBNull(4) ? null : reader.GetString(4),
+                primaryRepositoryUrl = reader.IsDBNull(5) ? null : reader.GetString(5),
+                identities = reader.GetFieldValue<string[]>(6)
+            });
+        }
+    }
+
+    var registryPackages = new List<object>();
+    await using (var cmd = db.CreateCommand("""
+        select ecosystem, registry_url, namespace, name, latest_version, purl_without_version,
+               homepage_url, repository_url, metadata_json::text, last_seen_at
+        from registry_packages
+        where ($1 = '%%' or name ilike $1 or namespace ilike $1 or purl_without_version ilike $1)
+          and ($2::text is null or lower(ecosystem) = lower($2))
+        order by last_seen_at desc
+        limit $3
+        """))
+    {
+        cmd.Parameters.AddWithValue(query);
+        cmd.Parameters.AddWithValue((object?)ecosystem ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(pageSize);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            registryPackages.Add(new
+            {
+                ecosystem = reader.GetString(0),
+                registryUrl = reader.IsDBNull(1) ? null : reader.GetString(1),
+                namespaceName = reader.IsDBNull(2) ? null : reader.GetString(2),
+                name = reader.GetString(3),
+                latestVersion = reader.IsDBNull(4) ? null : reader.GetString(4),
+                purlWithoutVersion = reader.IsDBNull(5) ? null : reader.GetString(5),
+                homepageUrl = reader.IsDBNull(6) ? null : reader.GetString(6),
+                repositoryUrl = reader.IsDBNull(7) ? null : reader.GetString(7),
+                metadata = JsonOrNull(reader.GetString(8)),
+                lastSeenAt = reader.GetFieldValue<DateTimeOffset>(9)
+            });
+        }
+    }
+
+    return ApiResult.Ok(new { components, registryPackages });
 });
 
 app.Run();
@@ -192,6 +434,54 @@ static string ToNpgsqlConnectionString(string value)
         Password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "",
         SslMode = SslMode.Disable
     }.ConnectionString;
+}
+
+static async Task<IReadOnlyList<Dictionary<string, object?>>> QueryRowsAsync(NpgsqlDataSource db, string sql, Guid id, CancellationToken ct)
+{
+    var rows = new List<Dictionary<string, object?>>();
+    await using var cmd = db.CreateCommand(sql);
+    cmd.Parameters.AddWithValue(id);
+    await using var reader = await cmd.ExecuteReaderAsync(ct);
+    while (await reader.ReadAsync(ct))
+    {
+        var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < reader.FieldCount; i++)
+        {
+            var name = reader.GetName(i);
+            if (reader.IsDBNull(i))
+            {
+                row[name] = null;
+                continue;
+            }
+
+            var value = reader.GetValue(i);
+            row[name] = value switch
+            {
+                string text when (name.Contains("json", StringComparison.OrdinalIgnoreCase) || name == "source_specific" || name == "metadata_json") => JsonOrText(text),
+                string[] array => array,
+                DateTimeOffset dto => dto,
+                DateTime dt => dt,
+                _ => value
+            };
+        }
+        rows.Add(row);
+    }
+
+    return rows;
+}
+
+static object? JsonOrText(string value) => JsonOrNull(value) ?? value;
+
+static JsonNode? JsonOrNull(string value)
+{
+    try
+    {
+        return JsonNode.Parse(value);
+    }
+    catch
+    {
+        return null;
+    }
 }
 
 public partial class Program;

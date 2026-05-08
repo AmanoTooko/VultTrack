@@ -16,6 +16,11 @@ public sealed record ComponentVulnerabilitySearchRequest(
     string? Ecosystem = null,
     int PageSize = 50);
 
+public sealed record ComponentSearchRequest(
+    string? Query = null,
+    string? Ecosystem = null,
+    int PageSize = 50);
+
 public sealed record ComponentVulnerabilitySearchResult(
     string? ComponentName,
     string? Purl,
