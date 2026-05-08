@@ -11,6 +11,14 @@ test('system.health returns ok envelope', async () => {
   assert.equal(body.data.service, 'vultrack-app');
 });
 
+test('frontend shell is served by the app', async () => {
+  const res = await fetch(`${baseUrl}/index.html`);
+  assert.equal(res.status, 200);
+  const html = await res.text();
+  assert.match(html, /<title>VulTrack<\/title>/);
+  assert.match(html, /\/app\.js/);
+});
+
 test('vulnerability.search returns processed NVD records', async () => {
   const res = await fetch(`${baseUrl}/api/v1/vulnerability.search`, {
     method: 'POST',
