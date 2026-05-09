@@ -46,6 +46,8 @@ Recent optimization already implemented:
 - Added `npm run normalize:parallel`.
 - Split canonical lookup into fast identifier-index path and fallback path.
 - Reused one NVD processing connection per batch instead of opening a new connection per record.
+- Reworked NVD normalization to use one transaction per batch with per-record savepoints.
+- Batched NVD `source_raw_index` status updates with `where id = any($1)`.
 - Added PostgreSQL runtime tuning parameters to `docker-compose.yml`.
 - Added indexes:
   - `ix_raw_pending_by_source`
@@ -110,6 +112,12 @@ Impact:
 - PostgreSQL spends time in both CPU and I/O.
 - Small batches keep requests stable but lower throughput.
 - More runner parallelism increases DB pressure quickly.
+
+NVD-specific update:
+
+- NVD now uses one batch transaction instead of one transaction per record.
+- Each record is protected by a savepoint, so a failed record rolls back only its own writes.
+- Successful raw rows are marked `succeeded` with one batched update.
 
 ### 2. Canonical Matching Reads
 
@@ -303,6 +311,12 @@ command:
   - random_page_cost=1.1
   - -c
   - effective_io_concurrency=100
+  - -c
+  - autovacuum_vacuum_scale_factor=0.05
+  - -c
+  - autovacuum_analyze_scale_factor=0.05
+  - -c
+  - autovacuum_vacuum_cost_limit=2000
 ```
 
 For Docker Desktop with 16GB allocated to Docker:

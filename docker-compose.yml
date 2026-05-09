@@ -20,6 +20,12 @@ services:
       - random_page_cost=1.1
       - -c
       - effective_io_concurrency=100
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - autovacuum_analyze_scale_factor=0.05
+      - -c
+      - autovacuum_vacuum_cost_limit=2000
     environment:
       POSTGRES_DB: vultrack
       POSTGRES_USER: vultrack

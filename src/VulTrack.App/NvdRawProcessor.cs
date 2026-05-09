@@ -49,10 +49,13 @@ public sealed class NvdRawProcessor(
             }
         }
 
+        var succeededRawIndexIds = new List<Guid>();
         await using var connection = await db.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
         foreach (var record in records)
         {
-            await using var transaction = await connection.BeginTransactionAsync(ct);
+            var savepointName = $"record_{processed + failed}";
+            await transaction.SaveAsync(savepointName, ct);
             try
             {
                 var vulnerabilityId = await UpsertVulnerabilityAsync(connection, record, ct);
@@ -67,18 +70,20 @@ public sealed class NvdRawProcessor(
                 {
                     await hook.OnAffectedFactsAsync(connection, vulnerabilityId, vulnerabilityRecordId, affectedFacts, ct);
                 }
-                await MarkNormalizedAsync(connection, record.RawIndexId, ct);
-                await transaction.CommitAsync(ct);
+                succeededRawIndexIds.Add(record.RawIndexId);
+                await transaction.ReleaseAsync(savepointName, ct);
                 processed++;
             }
             catch (Exception ex)
             {
-                await transaction.RollbackAsync(ct);
+                await transaction.RollbackAsync(savepointName, ct);
                 logger.LogError(ex, "Failed to normalize NVD CVE {CveId}", record.CveId);
                 failed++;
             }
         }
 
+        await MarkNormalizedAsync(connection, succeededRawIndexIds, ct);
+        await transaction.CommitAsync(ct);
         return new ProcessPendingResult(processed, failed);
     }
 
@@ -265,10 +270,11 @@ public sealed class NvdRawProcessor(
         return facts;
     }
 
-    private static async Task MarkNormalizedAsync(NpgsqlConnection conn, Guid rawIndexId, CancellationToken ct)
+    private static async Task MarkNormalizedAsync(NpgsqlConnection conn, IReadOnlyList<Guid> rawIndexIds, CancellationToken ct)
     {
-        await using var cmd = new NpgsqlCommand("update source_raw_index set normalize_status = 'succeeded', updated_at = now() where id = $1", conn);
-        cmd.Parameters.AddWithValue(rawIndexId);
+        if (rawIndexIds.Count == 0) return;
+        await using var cmd = new NpgsqlCommand("update source_raw_index set normalize_status = 'succeeded', updated_at = now() where id = any($1)", conn);
+        cmd.Parameters.AddWithValue(rawIndexIds.ToArray());
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
