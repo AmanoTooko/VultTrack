@@ -95,6 +95,8 @@ Recent verification records:
   Processed `nvd-cve=500`, `ghsa=500`, `ubuntu-osv=500`, `pypi-advisory=109`,
   `cisa-kev=500`, `nvd-cpe=500`, all with `failed=0`.
 - 2026-05-09: added full pending normalization loop script at `scripts/run-full-normalization.mjs`.
+- 2026-05-09: added database backup/restore scripts at `scripts/backup-db.sh` and `scripts/restore-db.sh`.
+- 2026-05-09: `bash -n scripts/backup-db.sh scripts/restore-db.sh` passed.
 
 Post-batch database snapshot:
 
