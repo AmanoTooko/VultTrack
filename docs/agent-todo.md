@@ -139,6 +139,12 @@ Full normalization loop:
 API_BASE_URL=http://localhost:5099 LIMIT_PER_SOURCE=50 npm run normalize:run
 ```
 
+Parallel source normalization loop:
+
+```bash
+API_BASE_URL=http://localhost:5099 LIMIT_PER_SOURCE=50 NORMALIZE_PARALLELISM=4 npm run normalize:parallel
+```
+
 Useful status checks:
 
 ```bash

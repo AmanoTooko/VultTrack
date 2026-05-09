@@ -97,6 +97,9 @@ create index if not exists ix_raw_identifier_summary
   on source_raw_index using gin(identifier_summary);
 create index if not exists ix_raw_source_modified
   on source_raw_index(source_id, source_modified_at desc);
+create index if not exists ix_raw_pending_by_source
+  on source_raw_index(source_id, updated_at, id)
+  where normalize_status <> 'succeeded';
 
 create table if not exists stg_nvd_cves (
   raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
@@ -334,6 +337,11 @@ create unique index if not exists ux_identifier_normalized_source
   on vulnerability_identifier_index(identifier_type, normalized_value, source_id, raw_index_id);
 create index if not exists ix_identifier_lookup
   on vulnerability_identifier_index(normalized_value, canonical_vulnerability_id);
+create index if not exists ix_identifier_canonical_group
+  on vulnerability_identifier_index(canonical_vulnerability_id)
+  where canonical_vulnerability_id is not null;
+create index if not exists ix_vuln_primary_identifier
+  on vulnerabilities(primary_identifier);
 
 create table if not exists vulnerability_identifier_edges (
   id uuid primary key default gen_random_uuid(),
