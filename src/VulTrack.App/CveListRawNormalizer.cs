@@ -130,7 +130,7 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
                 var rawRange = version?["lessThan"]?.GetValue<string>() is { } lessThan
                     ? $"< {lessThan}"
                     : version?["version"]?.GetValue<string>();
-                yield return new AffectedFactDraft("package", null, name, null, rawRange, "cve-list", affected?.ToJsonString() ?? "{}");
+                yield return new AffectedFactDraft("package", null, name, null, rawRange, "cve-list", version?.ToJsonString() ?? "{}");
             }
         }
     }

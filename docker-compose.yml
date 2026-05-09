@@ -9,7 +9,7 @@ services:
       - -c
       - effective_cache_size=6GB
       - -c
-      - work_mem=8MB
+      - work_mem=128MB
       - -c
       - maintenance_work_mem=512MB
       - -c
@@ -26,6 +26,9 @@ services:
       - autovacuum_analyze_scale_factor=0.05
       - -c
       - autovacuum_vacuum_cost_limit=2000
+      - -c
+      - max_parallel_workers_per_gather=0
+    shm_size: '256m'
     environment:
       POSTGRES_DB: vultrack
       POSTGRES_USER: vultrack
@@ -40,6 +43,31 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
+
+  api:
+    image: mcr.microsoft.com/dotnet/sdk:10.0
+    container_name: vultrack-api
+    restart: unless-stopped
+    working_dir: /workspace/src/VulTrack.App
+    environment:
+      ASPNETCORE_URLS: http://0.0.0.0:8080
+      DATABASE_URL: Host=vultrack-postgres;Port=5432;Database=vultrack;Username=vultrack;Password=vultrack
+    volumes:
+      - .:/workspace
+    command: ["dotnet", "run", "--urls", "http://0.0.0.0:8080"]
+    ports:
+      - "5099:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: vultrack-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
 
   adminer:
     image: adminer:4

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VulTrack</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <h1>VulTrack</h1>
+        <p id="statusLine">Loading pipeline state</p>
+      </div>
+      <button id="refreshButton" class="icon-button" type="button" title="Refresh data" aria-label="Refresh data">
+        <span aria-hidden="true">&#8635;</span>
+      </button>
+    </header>
+
+    <section class="metrics" aria-label="Pipeline metrics">
+      <div><span id="metricVulns">-</span><small>Vulnerabilities</small></div>
+      <div><span id="metricRecords">-</span><small>Source records</small></div>
+      <div><span id="metricAffected">-</span><small>Affected components</small></div>
+      <div><span id="metricComponents">-</span><small>Components</small></div>
+    </section>
+
+    <section class="workspace">
+      <aside class="search-pane">
+        <div class="tabs" role="tablist" aria-label="Search mode">
+          <button class="tab is-active" type="button" data-mode="vulnerability">Vulnerability</button>
+          <button class="tab" type="button" data-mode="component">Component</button>
+        </div>
+
+        <form id="searchForm" class="search-form">
+          <label>
+            <span id="queryLabel">Identifier or keyword</span>
+            <input id="queryInput" name="query" autocomplete="off" placeholder="CVE-2021-44228">
+          </label>
+          <div id="componentFields" class="component-fields" hidden>
+            <label>
+              <span>Version</span>
+              <input id="versionInput" name="version" autocomplete="off" placeholder="2.14.1">
+            </label>
+            <label>
+              <span>Ecosystem</span>
+              <input id="ecosystemInput" name="ecosystem" autocomplete="off" placeholder="maven">
+            </label>
+          </div>
+          <button type="submit" class="primary-button">Search</button>
+        </form>
+
+        <div class="result-list" id="resultList" aria-live="polite"></div>
+      </aside>
+
+      <section class="detail-pane" id="detailPane" aria-live="polite">
+        <div class="empty-state">
+          <h2>No selection</h2>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

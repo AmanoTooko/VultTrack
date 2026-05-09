@@ -132,14 +132,14 @@ HTTP 403 for https://api.github.com/advisories
 ```
 GitHub API 限速。设置 `GITHUB_TOKEN` 环境变量:
 ```bash
-export GITHUB_TOKEN=ghp_xxxxxxxxxxxx
+export GITHUB_TOKEN=<github-token>
 npm run fetch -- --source ghsa
 ```
 
 ### NVD 报 HTTP 429 / Cloudflare 1015
 NVD Cloudflare 限速。设置 `NVD_API_KEY`:
 ```bash
-export NVD_API_KEY=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+export NVD_API_KEY=<nvd-api-key>
 npm run fetch -- --source nvd-cve
 ```
 无 API key 时每页间隔 10 秒。
