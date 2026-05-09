@@ -69,4 +69,4 @@ Common environment variables:
 
 ## License
 
-No license has been selected yet. Until one is added, all rights are reserved by default.
+Apache License 2.0. See `LICENSE`.
