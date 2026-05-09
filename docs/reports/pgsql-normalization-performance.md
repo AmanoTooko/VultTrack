@@ -45,6 +45,8 @@ Recent optimization already implemented:
 - Added `scripts/run-parallel-normalization.mjs`.
 - Added `npm run normalize:parallel`.
 - Split canonical lookup into fast identifier-index path and fallback path.
+- Reused one NVD processing connection per batch instead of opening a new connection per record.
+- Added PostgreSQL runtime tuning parameters to `docker-compose.yml`.
 - Added indexes:
   - `ix_raw_pending_by_source`
   - `ix_identifier_canonical_group`
@@ -186,6 +188,38 @@ Likely effects:
 - Low `maintenance_work_mem` slows index creation and maintenance.
 - `random_page_cost=4` may bias planner decisions as if storage were slow spinning disks.
 
+### 6. NVD Per-Record Connection Churn
+
+The NVD path originally opened a fresh database connection inside the per-record processing loop:
+
+```csharp
+foreach (var record in records)
+{
+    await using var tx = await db.OpenConnectionAsync(ct);
+    await using var transaction = await tx.BeginTransactionAsync(ct);
+    ...
+}
+```
+
+That made the NVD normalizer structurally different from the other normalizers, which receive and reuse a connection from `RawNormalizationService`. The extra connection checkout/open work was hidden behind `NvdRawNormalizer`, because `NvdRawProcessor` injects `NpgsqlDataSource` directly.
+
+Current fix:
+
+```csharp
+await using var connection = await db.OpenConnectionAsync(ct);
+foreach (var record in records)
+{
+    await using var transaction = await connection.BeginTransactionAsync(ct);
+    ...
+}
+```
+
+Expected impact:
+
+- Lower NVD batch overhead.
+- Fewer connection pool operations.
+- More consistent behavior with other normalizers.
+
 ## Docker Resource Assessment
 
 The runner container has no explicit CPU or memory cap:
@@ -248,6 +282,29 @@ limit 20;
 
 ### Phase 1: PostgreSQL Runtime Tuning
 
+This has been added to `docker-compose.yml` for the current 8GB Docker VM profile:
+
+```yaml
+command:
+  - postgres
+  - -c
+  - shared_buffers=2GB
+  - -c
+  - effective_cache_size=6GB
+  - -c
+  - work_mem=8MB
+  - -c
+  - maintenance_work_mem=512MB
+  - -c
+  - checkpoint_timeout=15min
+  - -c
+  - max_wal_size=4GB
+  - -c
+  - random_page_cost=1.1
+  - -c
+  - effective_io_concurrency=100
+```
+
 For Docker Desktop with 16GB allocated to Docker:
 
 ```conf
@@ -261,7 +318,7 @@ random_page_cost = 1.1
 effective_io_concurrency = 200
 ```
 
-For current 8GB Docker VM, use smaller values:
+For current 8GB Docker VM, the selected values are:
 
 ```conf
 shared_buffers = 2GB
@@ -459,4 +516,3 @@ Do not raise parallelism aggressively until PostgreSQL memory/checkpoint tuning 
 - Is full normalization a one-time bootstrap only, or a recurring operation?
 - Is it acceptable to temporarily relax durability for bootstrap, for example `synchronous_commit=off` or an unlogged staging queue?
 - Should failed records be tracked explicitly before enabling same-source parallel workers?
-

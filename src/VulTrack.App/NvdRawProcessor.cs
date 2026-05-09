@@ -49,25 +49,25 @@ public sealed class NvdRawProcessor(
             }
         }
 
+        await using var connection = await db.OpenConnectionAsync(ct);
         foreach (var record in records)
         {
-            await using var tx = await db.OpenConnectionAsync(ct);
-            await using var transaction = await tx.BeginTransactionAsync(ct);
+            await using var transaction = await connection.BeginTransactionAsync(ct);
             try
             {
-                var vulnerabilityId = await UpsertVulnerabilityAsync(tx, record, ct);
-                var vulnerabilityRecordId = await UpsertRecordAsync(tx, vulnerabilityId, record, ct);
-                await UpsertIdentifierAsync(tx, vulnerabilityId, record, ct);
-                await UpsertDescriptionsAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
-                await UpsertSeveritiesAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
-                await UpsertWeaknessesAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
-                await UpsertReferencesAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
-                var affectedFacts = await UpsertAffectedFactsAsync(tx, vulnerabilityId, vulnerabilityRecordId, record, ct);
+                var vulnerabilityId = await UpsertVulnerabilityAsync(connection, record, ct);
+                var vulnerabilityRecordId = await UpsertRecordAsync(connection, vulnerabilityId, record, ct);
+                await UpsertIdentifierAsync(connection, vulnerabilityId, record, ct);
+                await UpsertDescriptionsAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
+                await UpsertSeveritiesAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
+                await UpsertWeaknessesAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
+                await UpsertReferencesAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
+                var affectedFacts = await UpsertAffectedFactsAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
                 foreach (var hook in affectedHooks)
                 {
-                    await hook.OnAffectedFactsAsync(tx, vulnerabilityId, vulnerabilityRecordId, affectedFacts, ct);
+                    await hook.OnAffectedFactsAsync(connection, vulnerabilityId, vulnerabilityRecordId, affectedFacts, ct);
                 }
-                await MarkNormalizedAsync(tx, record.RawIndexId, ct);
+                await MarkNormalizedAsync(connection, record.RawIndexId, ct);
                 await transaction.CommitAsync(ct);
                 processed++;
             }
