@@ -2,7 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 
 const apiBaseUrl = process.env.API_BASE_URL ?? 'http://localhost:5099';
-const limitPerSource = Number.parseInt(process.env.LIMIT_PER_SOURCE ?? '1000', 10) || 1000;
+const limitPerSource = Number.parseInt(process.env.LIMIT_PER_SOURCE ?? '50', 10) || 50;
 const sleepMs = Number.parseInt(process.env.SLEEP_MS ?? '0', 10) || 0;
 const maxCycles = Number.parseInt(process.env.MAX_CYCLES ?? '0', 10) || 0;
 const requestTimeoutMs = Number.parseInt(process.env.REQUEST_TIMEOUT_MS ?? '0', 10) || 0;

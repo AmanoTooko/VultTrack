@@ -136,7 +136,7 @@ API_BASE_URL=http://localhost:5099 SOURCE_SMOKE_LIMIT=500 node scripts/normalize
 Full normalization loop:
 
 ```bash
-API_BASE_URL=http://localhost:5099 LIMIT_PER_SOURCE=1000 npm run normalize:run
+API_BASE_URL=http://localhost:5099 LIMIT_PER_SOURCE=50 npm run normalize:run
 ```
 
 Useful status checks:
