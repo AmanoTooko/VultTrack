@@ -39,7 +39,12 @@ public sealed class SourceScheduler(
         {
             await RunSourceAsync(source.Code, ct);
             var limit = int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_NORMALIZE_LIMIT"), out var parsed) ? parsed : 500;
-            await normalizer.ProcessPendingAsync(limit, ct);
+            var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
+            logger.LogInformation(
+                "Normalizer {Source} completed: processed={Processed}, failed={Failed}",
+                result.SourceCode,
+                result.Processed,
+                result.Failed);
         }
     }
 
@@ -59,6 +64,11 @@ public sealed class SourceScheduler(
         while (await reader.ReadAsync(ct))
         {
             var code = reader.GetString(0);
+            if (!IsSourceAllowed(code))
+            {
+                continue;
+            }
+
             var cron = reader.GetString(1);
             var lastSuccess = reader.IsDBNull(2) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(2);
             if (IsDue(cron, lastSuccess, DateTimeOffset.UtcNow))
@@ -68,6 +78,19 @@ public sealed class SourceScheduler(
         }
 
         return rows;
+    }
+
+    private static bool IsSourceAllowed(string code)
+    {
+        var configured = Environment.GetEnvironmentVariable("SCHEDULER_SOURCE_CODES");
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return true;
+        }
+
+        return configured
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Contains(code, StringComparer.OrdinalIgnoreCase);
     }
 
     private async Task RunSourceAsync(string source, CancellationToken ct)
@@ -83,7 +106,7 @@ public sealed class SourceScheduler(
         psi.ArgumentList.Add("plugins/fetchers/run-fetcher.mjs");
         psi.ArgumentList.Add("--source");
         psi.ArgumentList.Add(source);
-        psi.Environment["DATABASE_URL"] = Environment.GetEnvironmentVariable("DATABASE_URL") ?? "";
+        psi.Environment["DATABASE_URL"] = ToPluginDatabaseUrl(Environment.GetEnvironmentVariable("DATABASE_URL") ?? "");
         if (Environment.GetEnvironmentVariable("SCHEDULER_FETCH_LIMIT") is { Length: > 0 } limit)
         {
             psi.Environment["FETCHER_MAX_RECORDS"] = limit;
@@ -146,6 +169,42 @@ public sealed class SourceScheduler(
         }
 
         return Directory.GetCurrentDirectory();
+    }
+
+    private static string ToPluginDatabaseUrl(string value)
+    {
+        if (value.StartsWith("postgres://", StringComparison.OrdinalIgnoreCase) ||
+            value.StartsWith("postgresql://", StringComparison.OrdinalIgnoreCase) ||
+            string.IsNullOrWhiteSpace(value))
+        {
+            return value;
+        }
+
+        var parts = value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(part => part.Split('=', 2, StringSplitOptions.TrimEntries))
+            .Where(part => part.Length == 2)
+            .ToDictionary(part => part[0], part => part[1], StringComparer.OrdinalIgnoreCase);
+
+        var host = GetPart(parts, "Host", "Server") ?? "localhost";
+        var port = GetPart(parts, "Port") ?? "5432";
+        var database = GetPart(parts, "Database", "Db") ?? "vultrack";
+        var username = GetPart(parts, "Username", "User ID", "UserId", "User") ?? "vultrack";
+        var password = GetPart(parts, "Password") ?? "";
+
+        return $"postgres://{Uri.EscapeDataString(username)}:{Uri.EscapeDataString(password)}@{host}:{port}/{Uri.EscapeDataString(database)}";
+    }
+
+    private static string? GetPart(IReadOnlyDictionary<string, string> parts, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            if (parts.TryGetValue(key, out var value))
+            {
+                return value;
+            }
+        }
+
+        return null;
     }
 
     private sealed record ScheduledSource(string Code, string Cron, DateTimeOffset? LastSuccess);
