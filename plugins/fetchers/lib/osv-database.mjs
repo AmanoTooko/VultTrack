@@ -63,6 +63,7 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
   }
 
   const checkpoint = ctx.source.checkpoint_json ?? {};
+  const fetchConcurrency = Math.max(1, getIntEnv('OSV_FETCH_CONCURRENCY', 8));
   const csvUrl = options.ecosystem ? `${BASE_URL}/${encodeURIComponent(options.ecosystem)}/modified_id.csv` : `${BASE_URL}/modified_id.csv`;
   const csv = await fetchText(csvUrl);
 
@@ -103,12 +104,18 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
   }
 
   let count = 0;
-  for (const itemRef of ids) {
-    const item = await fetchOsvItem(itemRef.rawId, options.ecosystem);
-    if (options.filter && !options.filter(item)) continue;
-    await writeOsvItem(client, ctx, item, options);
-    count++;
-    lastProcessedTimestamp = itemRef.modifiedAt;
+  for (let offset = 0; offset < ids.length; offset += fetchConcurrency) {
+    const batch = ids.slice(offset, offset + fetchConcurrency);
+    const items = await Promise.all(batch.map(async (itemRef) => ({
+      itemRef,
+      item: await fetchOsvItem(itemRef.rawId, options.ecosystem)
+    })));
+    for (const { itemRef, item } of items) {
+      if (options.filter && !options.filter(item)) continue;
+      await writeOsvItem(client, ctx, item, options);
+      count++;
+      lastProcessedTimestamp = itemRef.modifiedAt;
+    }
   }
 
   const processedOffset = resumeOffset + ids.length;
