@@ -7,7 +7,7 @@ import { upsertRegistryPackage } from '../lib/staging.mjs';
 export const sourceCode = 'crates-registry';
 
 export async function run(client, ctx) {
-  const packages = getEnv('CRATES_PACKAGES', 'serde,tokio,rand').split(',').map((x) => x.trim()).filter(Boolean);
+  const packages = getEnv('CRATES_PACKAGES', '').split(',').map((x) => x.trim()).filter(Boolean);
   let count = 0;
   for (const name of packages) {
     const item = await fetchJson(`https://crates.io/api/v1/crates/${encodeURIComponent(name)}`);

@@ -7,7 +7,7 @@ import { upsertRegistryPackage } from '../lib/staging.mjs';
 export const sourceCode = 'packagist-registry';
 
 export async function run(client, ctx) {
-  const packages = getEnv('PACKAGIST_PACKAGES', 'laravel/framework,symfony/symfony,monolog/monolog').split(',').map((x) => x.trim()).filter(Boolean);
+  const packages = getEnv('PACKAGIST_PACKAGES', '').split(',').map((x) => x.trim()).filter(Boolean);
   let count = 0;
   for (const name of packages) {
     const item = await fetchJson(`https://repo.packagist.org/p2/${encodeURIComponent(name)}.json`);

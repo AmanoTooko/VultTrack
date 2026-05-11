@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { getIntEnv, getRootPath } from '../lib/env.mjs';
+import { getBoolEnv, getCsvEnv, getIntEnv, getRootPath } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
 import { upsertOsv } from '../lib/staging.mjs';
@@ -12,8 +12,9 @@ const UBUNTU_OSV_URL = 'https://security-metadata.canonical.com/osv/osv-all.tar.
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
-  if (max < Number.MAX_SAFE_INTEGER) {
-    return runBoundedApi(client, ctx, max);
+  const explicitIds = getCsvEnv('UBUNTU_OSV_IDS');
+  if (explicitIds.length || getBoolEnv('FETCHER_SMOKE')) {
+    return runBoundedApi(client, ctx, max, explicitIds.length ? explicitIds : ['UBUNTU-CVE-2002-2443', 'UBUNTU-CVE-2004-2771']);
   }
   const checkpoint = ctx.source.checkpoint_json ?? {};
   const metadata = await fetchMetadata(UBUNTU_OSV_URL);
@@ -78,11 +79,7 @@ async function fetchMetadata(url) {
   }
 }
 
-async function runBoundedApi(client, ctx, max) {
-  const ids = (process.env.UBUNTU_OSV_IDS ?? 'UBUNTU-CVE-2002-2443,UBUNTU-CVE-2004-2771')
-    .split(',')
-    .map((x) => x.trim())
-    .filter(Boolean);
+async function runBoundedApi(client, ctx, max, ids) {
   let count = 0;
   for (const id of ids) {
     if (count >= max) break;

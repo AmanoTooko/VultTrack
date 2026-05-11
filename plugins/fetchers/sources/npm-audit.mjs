@@ -9,10 +9,17 @@ export const sourceCode = 'npm-audit';
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
-  const specs = getEnv('NPM_AUDIT_PACKAGES', getEnv('NPM_PACKAGES', 'lodash@4.17.20,express@4.17.1,react@16.0.0'))
+  const specs = getEnv('NPM_AUDIT_PACKAGES', getEnv('NPM_PACKAGES', ''))
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean);
+  if (!specs.length) {
+    return {
+      fetchedCount: 0,
+      parsedCount: 0,
+      checkpoint: { skipped: true, reason: 'NPM_AUDIT_PACKAGES or NPM_PACKAGES is required for targeted npm audit lookup', lastFetched: new Date().toISOString() }
+    };
+  }
 
   const auditPayload = {};
   for (const spec of specs) {

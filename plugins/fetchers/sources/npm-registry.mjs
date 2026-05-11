@@ -7,7 +7,7 @@ import { upsertRegistryPackage } from '../lib/staging.mjs';
 export const sourceCode = 'npm-registry';
 
 export async function run(client, ctx) {
-  const packages = getEnv('NPM_PACKAGES', 'lodash,express,react').split(',').map((x) => x.trim()).filter(Boolean);
+  const packages = getEnv('NPM_PACKAGES', '').split(',').map((x) => x.trim()).filter(Boolean);
   let count = 0;
   for (const name of packages) {
     const item = await fetchJson(`https://registry.npmjs.org/${encodeURIComponent(name)}`);

@@ -18,6 +18,19 @@ export function getIntEnv(name, fallback = undefined) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+export function getBoolEnv(name, fallback = false) {
+  const value = getEnv(name);
+  if (value === undefined) return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(value.toLowerCase());
+}
+
+export function getCsvEnv(name, fallback = '') {
+  return getEnv(name, fallback)
+    .split(',')
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
+
 export function getRootPath(...parts) {
   return path.resolve(__dirname, '../../..', ...parts);
 }

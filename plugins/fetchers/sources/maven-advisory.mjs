@@ -8,11 +8,18 @@ export const sourceCode = 'maven-advisory';
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
-  const components = getEnv('MAVEN_COMPONENTS', 'org.apache.logging.log4j:log4j-core@2.14.1,org.springframework:spring-core@5.3.17')
+  const components = getEnv('MAVEN_COMPONENTS', '')
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean)
     .map(parseCoordinate);
+  if (!components.length) {
+    return {
+      fetchedCount: 0,
+      parsedCount: 0,
+      checkpoint: { skipped: true, reason: 'MAVEN_COMPONENTS is required for targeted Maven advisory lookup', lastFetched: new Date().toISOString() }
+    };
+  }
 
   const ossUser = process.env.OSS_INDEX_USERNAME;
   const ossToken = process.env.OSS_INDEX_TOKEN ?? process.env.OSS_INDEX_PASSWORD;

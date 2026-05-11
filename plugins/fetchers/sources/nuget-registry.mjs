@@ -7,7 +7,7 @@ import { upsertRegistryPackage } from '../lib/staging.mjs';
 export const sourceCode = 'nuget-registry';
 
 export async function run(client, ctx) {
-  const packages = getEnv('NUGET_PACKAGES', 'Newtonsoft.Json,NuGet.Protocol,Serilog').split(',').map((x) => x.trim()).filter(Boolean);
+  const packages = getEnv('NUGET_PACKAGES', '').split(',').map((x) => x.trim()).filter(Boolean);
   let count = 0;
   for (const name of packages) {
     const lower = name.toLowerCase();

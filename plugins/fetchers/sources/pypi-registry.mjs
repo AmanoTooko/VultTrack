@@ -7,7 +7,7 @@ import { upsertRegistryPackage } from '../lib/staging.mjs';
 export const sourceCode = 'pypi-registry';
 
 export async function run(client, ctx) {
-  const packages = getEnv('PYPI_PACKAGES', 'django,requests,urllib3').split(',').map((x) => x.trim()).filter(Boolean);
+  const packages = getEnv('PYPI_PACKAGES', '').split(',').map((x) => x.trim()).filter(Boolean);
   let count = 0;
   for (const name of packages) {
     const item = await fetchJson(`https://pypi.org/pypi/${encodeURIComponent(name)}/json`);

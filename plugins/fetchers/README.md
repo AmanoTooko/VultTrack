@@ -55,7 +55,7 @@ FETCHER_MAX_RECORDS=1 npm run fetch -- --source <source-code>
 
 ## 单个 Fetcher 调试
 
-推荐先用 bounded/smoke 模式：
+推荐先用 bounded 模式。`FETCHER_MAX_RECORDS` 只限制真实来源处理条数，不应该让 fetcher 自动改用内置示例数据：
 
 ```bash
 DATABASE_URL=postgres://vultrack:vultrack@localhost:5432/vultrack \
@@ -73,7 +73,7 @@ OSS_INDEX_USERNAME=...
 OSS_INDEX_TOKEN=...
 ```
 
-部分大源在 `FETCHER_MAX_RECORDS` 有值时会使用 API smoke 路径，避免扫描完整 archive，例如 `android-osv`、`ubuntu-osv`、`maven-osv`、`google-osv`。
+需要显式 smoke 时，使用 `FETCHER_SMOKE=1`，或提供 source 专属 ID/组件环境变量，例如 `OSV_IDS`、`MAVEN_OSV_IDS`、`ANDROID_OSV_IDS`、`GOOGLE_OSV_IDS`、`UBUNTU_OSV_IDS`、`MAVEN_COMPONENTS`。这些变量表示“按指定对象查询”，不表示全量或日常增量。
 
 初始化/基线源默认不参与日常全量或定时更新。镜像、archive、仓库全量重放类任务用 `runMode = 'init'`，通常命名为 `<source>-init`；日常 source 只做 API 或 `modified_id.csv` 等增量。
 
@@ -92,6 +92,8 @@ google-osv-init    # Google-maintained OSV baseline subset
 google-osv         # Google-maintained OSV modified_id.csv incremental
 cve-list-v5        # CVE List v5 baseline/init-only
 ```
+
+`maven-advisory` 是组件定向查询 fetcher，依赖 `MAVEN_COMPONENTS`，没有独立的 Maven 全量漏洞流。Maven 生态全量/增量来源使用 `maven-osv-init` 和 `maven-osv`。
 
 需要显式跑初始化时：
 

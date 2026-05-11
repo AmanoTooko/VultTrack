@@ -1,4 +1,4 @@
-import { getIntEnv } from '../lib/env.mjs';
+import { getCsvEnv } from '../lib/env.mjs';
 import { runOsvModifiedIdIncremental } from '../lib/osv-database.mjs';
 
 export const sourceCode = 'google-osv';
@@ -6,11 +6,12 @@ export const sourceCode = 'google-osv';
 const GOOGLE_ECOSYSTEMS = ['Android', 'OSS-Fuzz'];
 
 export async function run(client, ctx) {
-  const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
-  if (max < Number.MAX_SAFE_INTEGER) {
+  const explicitIds = getCsvEnv('GOOGLE_OSV_IDS');
+  if (explicitIds.length) {
     return runOsvModifiedIdIncremental(client, ctx, {
       ecosystem: 'Android',
-      smokeIds: (process.env.GOOGLE_OSV_IDS ?? 'ASB-A-111893654,ASB-A-112551163').split(',').map((x) => x.trim()).filter(Boolean)
+      androidTable: true,
+      ids: explicitIds
     });
   }
 
@@ -28,7 +29,8 @@ export async function run(client, ctx) {
     };
     const result = await runOsvModifiedIdIncremental(client, childCtx, {
       ecosystem,
-      androidTable: ecosystem === 'Android'
+      androidTable: ecosystem === 'Android',
+      smokeIds: ecosystem === 'Android' ? ['ASB-A-111893654', 'ASB-A-112551163'] : []
     });
     results.push([ecosystem, result.checkpoint]);
     fetchedCount += result.fetchedCount;

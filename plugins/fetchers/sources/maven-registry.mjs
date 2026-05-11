@@ -8,7 +8,7 @@ import { mavenPurl } from '../lib/advisory.mjs';
 export const sourceCode = 'maven-registry';
 
 export async function run(client, ctx) {
-  const coordinates = getEnv('MAVEN_COMPONENTS', 'org.apache.logging.log4j:log4j-core@2.14.1,org.springframework:spring-core@5.3.17')
+  const coordinates = getEnv('MAVEN_COMPONENTS', '')
     .split(',')
     .map((x) => x.trim())
     .filter(Boolean)

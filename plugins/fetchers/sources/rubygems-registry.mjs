@@ -7,7 +7,7 @@ import { upsertRegistryPackage } from '../lib/staging.mjs';
 export const sourceCode = 'rubygems-registry';
 
 export async function run(client, ctx) {
-  const packages = getEnv('RUBYGEMS_PACKAGES', 'rails,rack,nokogiri').split(',').map((x) => x.trim()).filter(Boolean);
+  const packages = getEnv('RUBYGEMS_PACKAGES', '').split(',').map((x) => x.trim()).filter(Boolean);
   let count = 0;
   for (const name of packages) {
     const item = await fetchJson(`https://rubygems.org/api/v1/gems/${encodeURIComponent(name)}.json`);

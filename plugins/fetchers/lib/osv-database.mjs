@@ -3,7 +3,7 @@ import { createWriteStream, existsSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { spawnSync } from 'node:child_process';
-import { getIntEnv, getRootPath } from './env.mjs';
+import { getBoolEnv, getIntEnv, getRootPath } from './env.mjs';
 import { sha256, stableJson } from './hash.mjs';
 import { writeRecord } from './db.mjs';
 import { upsertAndroidOsv, upsertOsv } from './staging.mjs';
@@ -53,7 +53,11 @@ export async function runOsvAllZipInit(client, ctx, options = {}) {
 
 export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
-  if (max < Number.MAX_SAFE_INTEGER && options.smokeIds?.length) {
+  const explicitIds = options.ids ?? [];
+  if (explicitIds.length) {
+    return runOsvIds(client, ctx, explicitIds.slice(0, max), options);
+  }
+  if (getBoolEnv('FETCHER_SMOKE') && options.smokeIds?.length) {
     return runOsvIds(client, ctx, options.smokeIds.slice(0, max), options);
   }
 
@@ -68,15 +72,34 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
   const ids = [];
   let latestSeen = null;
   let lastProcessedTimestamp = null;
+  let eligibleSeen = 0;
+  let hitLimit = false;
+  let reachedWatermark = false;
+  let resumeOffset = 0;
 
   for (const line of csv.split(/\r?\n/)) {
     if (!line.trim()) continue;
     const [modifiedAt, rawId] = line.split(',', 2);
     if (!modifiedAt || !rawId) continue;
     latestSeen ??= modifiedAt;
+    const partial = checkpoint.partial;
+    if (
+      max < Number.MAX_SAFE_INTEGER &&
+      partial?.latestSeen === latestSeen &&
+      partial?.watermark === watermark &&
+      Number.isInteger(partial.offset) &&
+      !process.env.FETCHER_FORCE
+    ) {
+      resumeOffset = partial.offset;
+    }
     if (modifiedAt <= watermark) break;
     if (options.idFilter && !options.idFilter(rawId)) continue;
+    if (eligibleSeen < resumeOffset) {
+      eligibleSeen++;
+      continue;
+    }
     ids.push({ modifiedAt, rawId });
+    eligibleSeen++;
     if (ids.length >= max) break;
   }
 
@@ -89,11 +112,33 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
     lastProcessedTimestamp = itemRef.modifiedAt;
   }
 
+  const processedOffset = resumeOffset + ids.length;
+  hitLimit = ids.length >= max && max < Number.MAX_SAFE_INTEGER;
+  reachedWatermark = !hitLimit;
+
+  if (hitLimit) {
+    return {
+      fetchedCount: count,
+      parsedCount: count,
+      checkpoint: {
+        lastModifiedWatermark: watermark,
+        latestSeen,
+        partial: {
+          latestSeen,
+          watermark,
+          offset: processedOffset,
+          lastProcessedTimestamp
+        },
+        lastFetched: new Date().toISOString()
+      }
+    };
+  }
+
   return {
     fetchedCount: count,
     parsedCount: count,
     checkpoint: {
-      lastModifiedWatermark: lastProcessedTimestamp ?? checkpoint.lastModifiedWatermark ?? latestSeen ?? watermark,
+      lastModifiedWatermark: reachedWatermark ? (latestSeen ?? watermark) : (lastProcessedTimestamp ?? checkpoint.lastModifiedWatermark ?? latestSeen ?? watermark),
       latestSeen,
       lastFetched: new Date().toISOString()
     }
