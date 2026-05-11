@@ -337,12 +337,18 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             limit 100
             """, id, ct),
         references = await QueryRowsAsync(db, """
-            select s.code, url, ref_type, tags
-            from vulnerability_references r
-            left join sources s on s.id = r.source_id
-            where r.vulnerability_id = $1
-            order by s.code nulls last, url
-            limit 100
+            with ranked as (
+              select s.code, url, ref_type, tags,
+                     row_number() over (partition by s.code order by url) as source_rank
+              from vulnerability_references r
+              left join sources s on s.id = r.source_id
+              where r.vulnerability_id = $1
+            )
+            select code, url, ref_type, tags
+            from ranked
+            where source_rank <= 50
+            order by code nulls last, source_rank, url
+            limit 300
             """, id, ct)
     });
 });

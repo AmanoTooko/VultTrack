@@ -4,22 +4,38 @@ using Npgsql;
 namespace VulTrack.App;
 
 public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer)
-    : NormalizerBase(affectedHooks, canonicalizer), IRawNormalizer
+    : NormalizerBase(affectedHooks, canonicalizer), ISourceScopedRawNormalizer
 {
     public string SourceCode => "ecosystem-advisories";
+    public IReadOnlySet<string> SupportedSourceCodes { get; } = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "maven-advisory",
+        "nuget-advisory",
+        "redhat-csaf",
+        "suse-csaf"
+    };
 
     public async Task<NormalizeBatchResult> ProcessPendingAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
+        => await ProcessSourcePendingCoreAsync(connection, null, limit, ct);
+
+    public async Task<NormalizeBatchResult> ProcessSourcePendingAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
+        => await ProcessSourcePendingCoreAsync(connection, sourceCode, limit, ct);
+
+    private async Task<NormalizeBatchResult> ProcessSourcePendingCoreAsync(NpgsqlConnection connection, string? sourceCode, int limit, CancellationToken ct)
     {
         await using var select = new NpgsqlCommand("""
             select s.raw_index_id, s.provider, s.ecosystem, s.advisory_id, s.identifiers,
                    s.package_name, s.purl, s.vulnerable_ranges, s.severity_label, s.published_at,
-                   s.modified_at, s.payload, r.source_id
+                   s.modified_at, s.references_json, s.payload, r.source_id
             from stg_ecosystem_advisories s
             join source_raw_index r on r.id = s.raw_index_id
+            join sources src on src.id = r.source_id
             where r.normalize_status <> 'succeeded'
+              and ($1::text is null or src.code = $1)
             order by r.updated_at
-            limit $1
+            limit $2
             """, connection);
+        select.Parameters.AddWithValue((object?)sourceCode ?? DBNull.Value);
         select.Parameters.AddWithValue(limit);
 
         var rows = new List<Row>();
@@ -40,7 +56,8 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
                     reader.IsDBNull(9) ? null : reader.GetFieldValue<DateTimeOffset>(9),
                     reader.IsDBNull(10) ? null : reader.GetFieldValue<DateTimeOffset>(10),
                     reader.GetString(11),
-                    reader.GetGuid(12)));
+                    reader.GetString(12),
+                    reader.GetGuid(13)));
             }
         }
 
@@ -60,7 +77,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
                 await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, payload?["vulnerability"]?["details"]?.GetValue<string>()), ct);
                 var severities = SourceFactExtractor.CvssSeverities(payload?["cvss"]).Concat(SourceFactExtractor.LabelSeverity(row.SeverityLabel, row.Payload)).ToList();
                 await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, severities, ct);
-                await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(payload?["references"] ?? payload?["references_json"]), ct);
+                await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(JsonNode.Parse(row.ReferencesJson)), ct);
                 var facts = ExtractAffectedFacts(row).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                 await MarkNormalizedAsync(connection, row.RawIndexId, ct);
@@ -72,7 +89,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
             }
         }
 
-        return new NormalizeBatchResult(SourceCode, processed, failed);
+        return new NormalizeBatchResult(sourceCode ?? SourceCode, processed, failed);
     }
 
     private static IEnumerable<AffectedFactDraft> ExtractAffectedFacts(Row row)
@@ -90,5 +107,5 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
         }
     }
 
-    private sealed record Row(Guid RawIndexId, string Provider, string? Ecosystem, string AdvisoryId, string[] Identifiers, string? PackageName, string? Purl, string VulnerableRanges, string? SeverityLabel, DateTimeOffset? PublishedAt, DateTimeOffset? ModifiedAt, string Payload, Guid SourceId);
+    private sealed record Row(Guid RawIndexId, string Provider, string? Ecosystem, string AdvisoryId, string[] Identifiers, string? PackageName, string? Purl, string VulnerableRanges, string? SeverityLabel, DateTimeOffset? PublishedAt, DateTimeOffset? ModifiedAt, string ReferencesJson, string Payload, Guid SourceId);
 }
