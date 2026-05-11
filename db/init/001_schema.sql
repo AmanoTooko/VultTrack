@@ -656,8 +656,19 @@ create index if not exists ix_vuln_source_property_key on vulnerability_source_p
 create index if not exists ix_vuln_detail_blocks on vulnerability_detail_blocks(vulnerability_id, display_order);
 create index if not exists ix_component_identity_lookup on component_identity_index(identity_type, normalized_value);
 create index if not exists ix_component_identity_trgm on component_identity_index using gin(normalized_value gin_trgm_ops);
+create index if not exists ix_components_canonical_trgm on components using gin(canonical_name gin_trgm_ops);
+create index if not exists ix_components_primary_purl_trgm on components using gin(primary_purl gin_trgm_ops) where primary_purl is not null;
+create index if not exists ix_components_primary_cpe_trgm on components using gin(primary_cpe23_uri gin_trgm_ops) where primary_cpe23_uri is not null;
+create index if not exists ix_components_identities_gin on components using gin(identities);
+create index if not exists ix_registry_packages_name_trgm on registry_packages using gin(name gin_trgm_ops);
+create index if not exists ix_registry_packages_namespace_trgm on registry_packages using gin(namespace gin_trgm_ops) where namespace is not null;
+create index if not exists ix_registry_packages_purl_trgm on registry_packages using gin(purl_without_version gin_trgm_ops) where purl_without_version is not null;
+create index if not exists ix_registry_packages_ecosystem_seen on registry_packages(lower(ecosystem), last_seen_at desc);
 create index if not exists ix_affected_components_vuln on vulnerability_affected_components(vulnerability_id, ecosystem, display_name);
 create index if not exists ix_affected_components_component on vulnerability_affected_components(component_id, vulnerability_id);
+create index if not exists ix_affected_components_package_lower on vulnerability_affected_components(lower(package_name), lower(ecosystem), vulnerability_id) where package_name is not null;
+create index if not exists ix_affected_components_display_lower on vulnerability_affected_components(lower(display_name), lower(ecosystem), vulnerability_id);
+create index if not exists ix_affected_components_purl_prefix on vulnerability_affected_components(primary_purl text_pattern_ops, lower(ecosystem), vulnerability_id) where primary_purl is not null;
 create index if not exists ix_affected_facts_vuln on vulnerability_affected_facts(vulnerability_id, ecosystem, normalized_package_name);
 create table if not exists stg_android_osv (
   raw_index_id uuid primary key references source_raw_index(id) on delete cascade,

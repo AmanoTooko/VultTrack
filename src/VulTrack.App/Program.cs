@@ -74,9 +74,11 @@ app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken 
 app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToken ct) =>
 {
     var normalizeStatus = new List<object>();
+    var nonSucceededRaw = 0L;
     await using (var cmd = db.CreateCommand("""
         select normalize_status, count(*)
         from source_raw_index
+        where normalize_status <> 'succeeded'
         group by normalize_status
         order by normalize_status
         """))
@@ -84,9 +86,14 @@ app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToke
     {
         while (await reader.ReadAsync(ct))
         {
-            normalizeStatus.Add(new { status = reader.GetString(0), count = reader.GetInt64(1) });
+            var count = reader.GetInt64(1);
+            nonSucceededRaw += count;
+            normalizeStatus.Add(new { status = reader.GetString(0), count });
         }
     }
+
+    var totalRaw = await EstimateTableCountAsync(db, "source_raw_index", ct);
+    normalizeStatus.Add(new { status = "succeeded", count = Math.Max(0, totalRaw - nonSucceededRaw), estimated = true });
 
     var pendingBySource = new List<object>();
     await using (var cmd = db.CreateCommand("""
@@ -106,25 +113,24 @@ app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToke
         }
     }
 
-    await using var totals = db.CreateCommand("""
-        select
-          (select count(*) from vulnerabilities),
-          (select count(*) from vulnerability_records),
-          (select count(*) from vulnerability_affected_components),
-          (select count(*) from components),
-          (select count(*) from registry_packages),
-          (select count(*) from cpe_entries)
-        """);
-    await using var totalReader = await totals.ExecuteReaderAsync(ct);
-    await totalReader.ReadAsync(ct);
+    var totals = await EstimateTableCountsAsync(db, [
+        "vulnerabilities",
+        "vulnerability_records",
+        "vulnerability_affected_components",
+        "components",
+        "registry_packages",
+        "cpe_entries"
+    ], ct);
+
     return ApiResult.Ok(new
     {
-        vulnerabilities = totalReader.GetInt64(0),
-        vulnerabilityRecords = totalReader.GetInt64(1),
-        affectedComponents = totalReader.GetInt64(2),
-        components = totalReader.GetInt64(3),
-        registryPackages = totalReader.GetInt64(4),
-        cpeEntries = totalReader.GetInt64(5),
+        vulnerabilities = totals["vulnerabilities"],
+        vulnerabilityRecords = totals["vulnerability_records"],
+        affectedComponents = totals["vulnerability_affected_components"],
+        components = totals["components"],
+        registryPackages = totals["registry_packages"],
+        cpeEntries = totals["cpe_entries"],
+        countsEstimated = true,
         normalizeStatus,
         pendingBySource
     });
@@ -358,7 +364,7 @@ app.MapPost("/api/v1/component.search", async (NpgsqlDataSource db, ComponentSea
         select id, canonical_name, component_type, primary_purl, primary_cpe23_uri,
                primary_repository_url, identities
         from components
-        where ($1 = '%%' or canonical_name ilike $1 or primary_purl ilike $1 or primary_cpe23_uri ilike $1 or $2 = any(identities))
+        where ($1 = '%%' or canonical_name ilike $1 or primary_purl ilike $1 or primary_cpe23_uri ilike $1 or identities @> array[$2])
           and ($3::text is null or primary_purl ilike ('pkg:' || $3 || '/%'))
         order by updated_at desc
         limit $4
@@ -441,6 +447,35 @@ static string ToNpgsqlConnectionString(string value)
         Password = userInfo.Length > 1 ? Uri.UnescapeDataString(userInfo[1]) : "",
         SslMode = SslMode.Disable
     }.ConnectionString;
+}
+
+static async Task<long> EstimateTableCountAsync(NpgsqlDataSource db, string tableName, CancellationToken ct)
+{
+    await using var cmd = db.CreateCommand("""
+        select greatest(reltuples, 0)::bigint
+        from pg_class
+        where relname = $1
+        """);
+    cmd.Parameters.AddWithValue(tableName);
+    return (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
+}
+
+static async Task<IReadOnlyDictionary<string, long>> EstimateTableCountsAsync(NpgsqlDataSource db, IReadOnlyList<string> tableNames, CancellationToken ct)
+{
+    var estimates = tableNames.ToDictionary(x => x, _ => 0L, StringComparer.Ordinal);
+    await using var cmd = db.CreateCommand("""
+        select relname, greatest(reltuples, 0)::bigint
+        from pg_class
+        where relname = any($1)
+        """);
+    cmd.Parameters.AddWithValue(tableNames.ToArray());
+    await using var reader = await cmd.ExecuteReaderAsync(ct);
+    while (await reader.ReadAsync(ct))
+    {
+        estimates[reader.GetString(0)] = reader.GetInt64(1);
+    }
+
+    return estimates;
 }
 
 static async Task<IReadOnlyList<Dictionary<string, object?>>> QueryRowsAsync(NpgsqlDataSource db, string sql, Guid id, CancellationToken ct)
