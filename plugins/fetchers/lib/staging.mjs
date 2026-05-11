@@ -304,7 +304,19 @@ export async function upsertPypiAdvisory(client, rawIndexId, item) {
        (raw_index_id, pysec_id, aliases, ecosystem, package_name, summary, details, affected,
         severity, references_json, published_at, modified_at, payload)
      values ($1,$2,$3,'PyPI',$4,$5,$6,$7,$8,$9,$10,$11,$12)
-     on conflict (raw_index_id) do update set payload = excluded.payload`,
+     on conflict (raw_index_id) do update set
+       pysec_id = excluded.pysec_id,
+       aliases = excluded.aliases,
+       ecosystem = excluded.ecosystem,
+       package_name = excluded.package_name,
+       summary = excluded.summary,
+       details = excluded.details,
+       affected = excluded.affected,
+       severity = excluded.severity,
+       references_json = excluded.references_json,
+       published_at = excluded.published_at,
+       modified_at = excluded.modified_at,
+       payload = excluded.payload`,
     [
       rawIndexId,
       item.id,
