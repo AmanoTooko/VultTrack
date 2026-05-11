@@ -650,8 +650,10 @@ create index if not exists ix_vuln_search_text on vulnerabilities using gin(sear
 create index if not exists ix_vuln_identifiers on vulnerabilities using gin(identifiers);
 create index if not exists ix_vuln_affected_names on vulnerabilities using gin(affected_component_names);
 create index if not exists ix_vuln_title_trgm on vulnerabilities using gin(title gin_trgm_ops);
+create index if not exists ix_records_vulnerability_detail on vulnerability_records(vulnerability_id, source_id, updated_at desc);
 create index if not exists ix_severity_vuln_system_version on vulnerability_severity_scores(vulnerability_id, scoring_system, scoring_version);
 create index if not exists ix_severity_selected on vulnerability_severity_scores(vulnerability_id) where is_selected = true;
+create index if not exists ix_weaknesses_vulnerability on vulnerability_weaknesses(vulnerability_id, source_id);
 create index if not exists ix_vuln_source_property_key on vulnerability_source_properties(source_id, property_namespace, property_key);
 create index if not exists ix_vuln_detail_blocks on vulnerability_detail_blocks(vulnerability_id, display_order);
 create index if not exists ix_component_identity_lookup on component_identity_index(identity_type, normalized_value);
