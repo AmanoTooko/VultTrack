@@ -17,13 +17,7 @@ const COMMON_HEADERS = {
 };
 
 export async function fetchJson(url, options = {}) {
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      ...COMMON_HEADERS,
-      ...(options.headers ?? {})
-    }
-  });
+  const res = await fetchWithTimeout(url, options);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`HTTP ${res.status} for ${url}: ${text.slice(0, 500)}`);
@@ -32,11 +26,29 @@ export async function fetchJson(url, options = {}) {
 }
 
 export async function fetchBuffer(url, options = {}) {
+  const res = await fetchWithTimeout(url, options);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status} for ${url}: ${text.slice(0, 500)}`);
+  }
+  return Buffer.from(await res.arrayBuffer());
+}
+
+export async function fetchText(url, options = {}) {
+  const res = await fetchWithTimeout(url, options);
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status} for ${url}: ${text.slice(0, 500)}`);
+  }
+  return res.text();
+}
+
+async function fetchWithTimeout(url, options = {}) {
   const timeoutMs = getIntEnv('FETCHER_TIMEOUT_MS', 120000);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const res = await fetch(url, {
+    return await fetch(url, {
       ...options,
       signal: controller.signal,
       headers: {
@@ -44,11 +56,6 @@ export async function fetchBuffer(url, options = {}) {
         ...(options.headers ?? {})
       }
     });
-    if (!res.ok) {
-      const text = await res.text().catch(() => '');
-      throw new Error(`HTTP ${res.status} for ${url}: ${text.slice(0, 500)}`);
-    }
-    return Buffer.from(await res.arrayBuffer());
   } finally {
     clearTimeout(timer);
   }

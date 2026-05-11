@@ -4,6 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { spawnSync } from 'node:child_process';
 import { getBoolEnv, getIntEnv, getRootPath } from './env.mjs';
+import { fetchJson, fetchText } from './http.mjs';
 import { sha256, stableJson } from './hash.mjs';
 import { writeRecord } from './db.mjs';
 import { upsertAndroidOsv, upsertOsv } from './staging.mjs';
@@ -63,9 +64,7 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
 
   const checkpoint = ctx.source.checkpoint_json ?? {};
   const csvUrl = options.ecosystem ? `${BASE_URL}/${encodeURIComponent(options.ecosystem)}/modified_id.csv` : `${BASE_URL}/modified_id.csv`;
-  const csvResp = await fetch(csvUrl, { headers: { 'user-agent': 'VulTrack/0.1' } });
-  if (!csvResp.ok) throw new Error(`HTTP ${csvResp.status} for ${csvUrl}`);
-  const csv = await csvResp.text();
+  const csv = await fetchText(csvUrl);
 
   const fallbackSince = new Date(Date.now() - getIntEnv('OSV_INCREMENTAL_LOOKBACK_DAYS', 2) * 86400000).toISOString();
   const watermark = checkpoint.lastModifiedWatermark ?? fallbackSince;
@@ -158,9 +157,7 @@ async function runOsvIds(client, ctx, ids, options) {
 
 async function fetchOsvItem(rawId, ecosystem) {
   const path = ecosystem ? `${encodeURIComponent(ecosystem)}/${encodeURIComponent(rawId)}.json` : `${rawId}.json`;
-  const resp = await fetch(`${BASE_URL}/${path}`, { headers: { 'user-agent': 'VulTrack/0.1' } });
-  if (!resp.ok) throw new Error(`HTTP ${resp.status} for OSV record ${rawId}`);
-  return resp.json();
+  return fetchJson(`${BASE_URL}/${path}`);
 }
 
 async function writeOsvItem(client, ctx, item, options) {
