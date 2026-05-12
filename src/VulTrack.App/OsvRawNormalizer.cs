@@ -27,6 +27,7 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
         ("stg_ubuntu_osv", "ubuntu-osv"),
         ("stg_android_osv", "android-osv"),
         ("stg_android_osv", "android-osv-init"),
+        ("stg_android_osv", "google-osv"),
         ("stg_osv_vulnerabilities", "google-osv"),
         ("stg_osv_vulnerabilities", "google-osv-init"),
         ("stg_osv_vulnerabilities", "go-advisory"),
