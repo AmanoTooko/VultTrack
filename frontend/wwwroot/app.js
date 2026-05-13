@@ -253,14 +253,35 @@ function renderSourceContent(data, source) {
 }
 
 function vulnerabilityResult(item) {
+  const names = (item.affectedComponentNames || []).slice(0, 3);
   return `
     <button class="result-item" type="button" data-vulnerability-id="${escapeAttr(item.id)}">
       <div class="result-main">
         <span class="result-title">${escapeHtml(item.primaryIdentifier)}</span>
         ${severityBadge(item.severityLabel, item.maxCvssScore)}
       </div>
-      <div class="muted">${escapeHtml(item.title || '')}</div>
-      <div class="chips"><span class="badge">${fmt(item.affectedComponentCount)} affected</span></div>
+      <div class="result-meta">
+        ${names.length ? `<span class="badge" title="${escapeHtml(names.join(', '))}">${escapeHtml(names.join(', '))}</span>` : ''}
+        ${item.affectedComponentCount ? `<span class="badge muted">${fmt(item.affectedComponentCount)} affected</span>` : ''}
+      </div>
+    </button>
+  `;
+}
+
+function componentVulnerabilityResult(item) {
+  const match = item.versionMatched === true ? 'match' : item.versionMatched === false ? 'miss' : 'unknown';
+  const matchKlass = match === 'match' ? 'risk' : match === 'miss' ? 'muted' : '';
+  const hasRange = item.versionRange;
+  return `
+    <button class="result-item" type="button" data-vulnerability-id="${escapeAttr(item.vulnerabilityId)}">
+      <div class="result-main">
+        <span class="result-title">${escapeHtml(item.primaryIdentifier)}</span>
+        ${severityBadge(item.severityLabel, item.cvssScore)}
+      </div>
+      <div class="result-meta">
+        <span class="badge">${escapeHtml(item.packageName || item.purl || item.ecosystem || '')}</span>
+        ${hasRange ? `<span class="badge ${matchKlass}">${escapeHtml(match)}: ${escapeHtml(item.versionRange)}</span>` : '<span class="badge">no range</span>'}
+      </div>
     </button>
   `;
 }
@@ -332,8 +353,13 @@ function rawSection(title, value) {
 function severityBadge(label, score) {
   if (!label && score == null) return '';
   const numeric = Number(score ?? 0);
-  const klass = numeric >= 9 || String(label).toLowerCase() === 'critical' ? 'risk' : numeric >= 7 ? 'warn' : '';
-  return `<span class="badge ${klass}">${escapeHtml(label || 'CVSS')} ${score ?? ''}</span>`;
+  const tag = (String(label || '')).toLowerCase();
+  const klass = tag === 'critical' || numeric >= 9 ? 'critical' :
+                tag === 'high' || numeric >= 7 ? 'high' :
+                tag === 'medium' || numeric >= 4 ? 'medium' :
+                tag === 'low' || numeric > 0 ? 'low' : 'none';
+  const text = `${escapeHtml(label || 'CVSS')} ${score != null ? score : ''}`;
+  return `<span class="badge ${klass}">${text}</span>`;
 }
 
 function fmt(value) {
