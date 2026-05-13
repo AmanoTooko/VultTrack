@@ -44,6 +44,7 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
         var processed = 0;
         var failed = 0;
         var succeededIds = new List<Guid>();
+        var affectedVulnIds = new List<Guid>();
         foreach (var row in rows)
         {
             try
@@ -58,6 +59,7 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
                 await UpsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, cna?["references"], ct);
                 var facts = ExtractAffectedFacts(cna).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
+                if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
                 succeededIds.Add(row.RawIndexId);
                 processed++;
             }
@@ -67,6 +69,7 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
             }
         }
 
+        await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
         await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult(SourceCode, processed, failed);

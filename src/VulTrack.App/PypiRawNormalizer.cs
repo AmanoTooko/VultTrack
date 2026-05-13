@@ -50,6 +50,7 @@ public sealed class PypiRawNormalizer(IEnumerable<IAffectedComponentHook> affect
         var processed = 0;
         var failed = 0;
         var succeededIds = new List<Guid>();
+        var affectedVulnIds = new List<Guid>();
         foreach (var row in rows)
         {
             try
@@ -66,6 +67,7 @@ public sealed class PypiRawNormalizer(IEnumerable<IAffectedComponentHook> affect
                 await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(payload?["references"]), ct);
                 var facts = ExtractAffectedFacts(row).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
+                if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
                 succeededIds.Add(row.RawIndexId);
                 processed++;
             }
@@ -75,6 +77,7 @@ public sealed class PypiRawNormalizer(IEnumerable<IAffectedComponentHook> affect
             }
         }
 
+        await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
         await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult(SourceCode, processed, failed);

@@ -298,6 +298,15 @@ public abstract class NormalizerBase(
         await batchCmd.ExecuteNonQueryAsync(ct);
     }
 
+    protected async Task FlushAffectedProjectionsAsync(NpgsqlConnection connection, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)
+    {
+        if (vulnerabilityIds.Count == 0) return;
+        foreach (var hook in affectedHooks)
+        {
+            await hook.FlushProjectionsAsync(connection, vulnerabilityIds.ToList(), ct);
+        }
+    }
+
     protected static async Task MarkNormalizedAsync(NpgsqlConnection connection, Guid rawIndexId, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand("update source_raw_index set normalize_status = 'succeeded', updated_at = now() where id = $1", connection);

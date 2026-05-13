@@ -52,6 +52,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
         var processed = 0;
         var failed = 0;
         var succeededIds = new List<Guid>();
+        var affectedVulnIds = new List<Guid>();
         foreach (var row in rows)
         {
             try
@@ -105,6 +106,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
         var processed = 0;
         var failed = 0;
         var succeededIds = new List<Guid>();
+        var affectedVulnIds = new List<Guid>();
         foreach (var row in rows)
         {
             try

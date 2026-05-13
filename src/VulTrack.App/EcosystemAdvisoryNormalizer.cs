@@ -64,6 +64,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
         var processed = 0;
         var failed = 0;
         var succeededIds = new List<Guid>();
+        var affectedVulnIds = new List<Guid>();
 
         var drafts = new List<(Row Row, VulnerabilityCanonicalDraft Draft)>();
         foreach (var row in rows)
@@ -95,6 +96,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
                 await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(JsonNode.Parse(row.ReferencesJson)), ct);
                 var facts = ExtractAffectedFacts(row, payload, isCsaf).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
+                if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
                 succeededIds.Add(row.RawIndexId);
                 processed++;
             }
@@ -105,6 +107,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
             }
         }
 
+        await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
         await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult(sourceCode ?? SourceCode, processed, failed);

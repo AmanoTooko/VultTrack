@@ -79,6 +79,7 @@ public sealed class GhsaRawNormalizer(
             }
 
             var succeededIds = new List<Guid>();
+            var affectedVulnIds = new List<Guid>();
             foreach (var row in rows)
             {
                 try
@@ -96,6 +97,7 @@ public sealed class GhsaRawNormalizer(
                     await InsertWeaknessesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Weaknesses(JsonNode.Parse(row.Cwes)), ct);
                     var facts = ExtractAffectedFacts(row).ToList();
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
+                    if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
                     succeededIds.Add(row.RawIndexId);
                     processed++;
                 }
@@ -106,6 +108,7 @@ public sealed class GhsaRawNormalizer(
                 }
             }
 
+            await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
             await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
             if (processed >= limit) break;

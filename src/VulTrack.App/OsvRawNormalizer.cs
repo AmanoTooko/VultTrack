@@ -83,6 +83,7 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
             }
 
             var succeededIds = new List<Guid>();
+            var affectedVulnIds = new List<Guid>();
             foreach (var row in rows)
             {
                 try
@@ -100,6 +101,7 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                     await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(payload?["references"]), ct);
                     var facts = ExtractAffectedFacts(payload).ToList();
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
+                    if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
                     succeededIds.Add(row.RawIndexId);
                     processed++;
                 }
@@ -109,6 +111,7 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                 }
             }
 
+            await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
             await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
             if (processed >= limit) break;

@@ -23,6 +23,7 @@ public interface IRawNormalizationService
 public interface IAffectedComponentHook
 {
     Task OnAffectedFactsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid vulnerabilityRecordId, IReadOnlyList<AffectedFactDraft> facts, CancellationToken ct);
+    Task FlushProjectionsAsync(NpgsqlConnection connection, IReadOnlyList<Guid> vulnerabilityIds, CancellationToken ct);
 }
 
 public interface IVulnerabilityCanonicalizer

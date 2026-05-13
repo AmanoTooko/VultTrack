@@ -66,6 +66,7 @@ public sealed class NvdRawProcessor(
                 await UpsertWeaknessesAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
                 await UpsertReferencesAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
                 var affectedFacts = await UpsertAffectedFactsAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
+                var hookVulnIds = affectedFacts.Count > 0 ? new List<Guid> { vulnerabilityId } : new List<Guid>();
                 foreach (var hook in affectedHooks)
                 {
                     await hook.OnAffectedFactsAsync(connection, vulnerabilityId, vulnerabilityRecordId, affectedFacts, ct);
