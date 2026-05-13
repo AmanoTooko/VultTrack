@@ -158,34 +158,85 @@ app.MapPost("/api/v1/raw.normalizeSource", async (IRawNormalizationService proce
 app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, VulnerabilitySearchRequest request, CancellationToken ct) =>
 {
     var rows = new List<object>();
-    var query = $"%{request.Query ?? ""}%";
-    await using var cmd = db.CreateCommand("""
-        select id, primary_identifier, title, severity_label, max_cvss_score,
-               affected_component_count, affected_component_names, published_at, modified_at
-        from vulnerabilities
-        where ($1 = '%%' or primary_identifier ilike $1 or title ilike $1 or $2 = any(identifiers))
-        order by coalesce(max_cvss_score, 0) desc, modified_at desc nulls last
-        limit $3
-        """);
-    cmd.Parameters.AddWithValue(query);
-    cmd.Parameters.AddWithValue(request.Query ?? "");
-    cmd.Parameters.AddWithValue(request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200));
-    await using var reader = await cmd.ExecuteReaderAsync(ct);
-    while (await reader.ReadAsync(ct))
+    var rawQuery = (request.Query ?? "").Trim();
+    var pattern = $"%{rawQuery}%";
+    var exact = string.IsNullOrWhiteSpace(rawQuery) ? "" : rawQuery;
+
+    var ecosystemVersion = ParseEcosystemVersion(rawQuery);
+
+    if (ecosystemVersion is not null)
     {
-        rows.Add(new
+        await using var cmd = db.CreateCommand("""
+            select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                   v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+            from vulnerabilities v
+            where v.id in (
+                select c.vulnerability_id
+                from vulnerability_affected_components c
+                where lower(c.ecosystem) = lower($1)
+                  and (c.display_name is not null or c.package_name is not null)
+            )
+            order by coalesce(v.max_cvss_score, 0) desc, v.modified_at desc nulls last
+            limit $2
+            """);
+        cmd.Parameters.AddWithValue(ecosystemVersion.Value.Ecosystem);
+        cmd.Parameters.AddWithValue(request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
         {
-            id = reader.GetGuid(0),
-            primaryIdentifier = reader.GetString(1),
-            title = reader.IsDBNull(2) ? null : reader.GetString(2),
-            severityLabel = reader.IsDBNull(3) ? null : reader.GetString(3),
-            maxCvssScore = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
-            affectedComponentCount = reader.GetInt32(5),
-            affectedComponentNames = reader.GetFieldValue<string[]>(6),
-            publishedAt = reader.IsDBNull(7) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(7),
-            modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8)
-        });
+            rows.Add(new
+            {
+                id = reader.GetGuid(0),
+                primaryIdentifier = reader.GetString(1),
+                title = reader.IsDBNull(2) ? null : reader.GetString(2),
+                severityLabel = reader.IsDBNull(3) ? null : reader.GetString(3),
+                maxCvssScore = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
+                affectedComponentCount = reader.GetInt32(5),
+                affectedComponentNames = reader.GetFieldValue<string[]>(6),
+                publishedAt = reader.IsDBNull(7) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(7),
+                modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8),
+                matchedByEcosystem = true,
+                matchedVersion = ecosystemVersion.Value.Version
+            });
+        }
     }
+    else
+    {
+        await using var cmd = db.CreateCommand("""
+            select id, primary_identifier, title, severity_label, max_cvss_score,
+                   affected_component_count, affected_component_names, published_at, modified_at
+            from vulnerabilities
+            where ($1 = '%%'
+              or primary_identifier ilike $1
+              or title ilike $1
+              or $2 = any(identifiers)
+              or $2 = any(affected_component_names)
+              or search_text @@ plainto_tsquery('simple', $3))
+            order by coalesce(max_cvss_score, 0) desc, modified_at desc nulls last
+            limit $4
+            """);
+        cmd.Parameters.AddWithValue(pattern);
+        cmd.Parameters.AddWithValue(exact);
+        cmd.Parameters.AddWithValue(rawQuery);
+        cmd.Parameters.AddWithValue(request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200));
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new
+            {
+                id = reader.GetGuid(0),
+                primaryIdentifier = reader.GetString(1),
+                title = reader.IsDBNull(2) ? null : reader.GetString(2),
+                severityLabel = reader.IsDBNull(3) ? null : reader.GetString(3),
+                maxCvssScore = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
+                affectedComponentCount = reader.GetInt32(5),
+                affectedComponentNames = reader.GetFieldValue<string[]>(6),
+                publishedAt = reader.IsDBNull(7) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(7),
+                modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8)
+            });
+        }
+    }
+
     return ApiResult.Ok(new { items = rows, page = 1, pageSize = request.PageSize <= 0 ? 50 : request.PageSize });
 });
 
@@ -530,6 +581,45 @@ static JsonNode? JsonOrNull(string value)
     {
         return null;
     }
+}
+
+static (string Ecosystem, string? Version)? ParseEcosystemVersion(string query)
+{
+    if (string.IsNullOrWhiteSpace(query)) return null;
+    var lower = query.ToLowerInvariant().Trim();
+
+    var ecosystemKeywords = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["go"] = "go", ["golang"] = "go",
+        ["npm"] = "npm", ["node"] = "npm", ["nodejs"] = "npm",
+        ["pypi"] = "PyPI", ["pip"] = "PyPI", ["python"] = "PyPI",
+        ["maven"] = "maven", ["java"] = "maven",
+        ["nuget"] = "nuget", [".net"] = "nuget", ["dotnet"] = "nuget",
+        ["cargo"] = "cargo", ["rust"] = "cargo", ["crates"] = "cargo",
+        ["rubygems"] = "RubyGems", ["ruby"] = "RubyGems", ["gem"] = "RubyGems",
+        ["packagist"] = "Packagist", ["php"] = "Packagist", ["composer"] = "Packagist",
+        ["alpine"] = "alpine",
+        ["debian"] = "debian",
+        ["ubuntu"] = "ubuntu",
+        ["rpm"] = "rpm", ["suse"] = "rpm", ["redhat"] = "rpm", ["rhel"] = "rpm", ["centos"] = "rpm"
+    };
+
+    var versionPattern = @"(\d+\.\d+(?:\.\d+)?(?:[-.]\w+)*)";
+    var match = System.Text.RegularExpressions.Regex.Match(lower, versionPattern);
+    var version = match.Success ? match.Groups[1].Value : null;
+
+    string? foundEcosystem = null;
+    foreach (var kv in ecosystemKeywords)
+    {
+        if (System.Text.RegularExpressions.Regex.IsMatch(lower, $@"\b{System.Text.RegularExpressions.Regex.Escape(kv.Key)}\b"))
+        {
+            foundEcosystem = kv.Value;
+            break;
+        }
+    }
+
+    if (foundEcosystem is null) return null;
+    return (foundEcosystem, version);
 }
 
 public partial class Program;

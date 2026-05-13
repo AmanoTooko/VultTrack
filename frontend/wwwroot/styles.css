@@ -150,6 +150,22 @@ h1 {
   background: #edf7f3;
 }
 
+.source-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 12px 0 0;
+  margin: 0;
+}
+
+.source-tabs .tab {
+  height: 32px;
+  padding: 0 12px;
+  font-size: 13px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+
 .search-form {
   padding: 16px;
   display: grid;

@@ -92,11 +92,58 @@ async function walk(dir, files) {
   }
 }
 
+function parseCpeToProductName(cpe) {
+  if (!cpe || typeof cpe !== 'string') return null;
+  const parts = cpe.split(':');
+  if (parts.length < 5) return null;
+  const vendor = parts[3] || '';
+  const product = parts[4] || '';
+  if (!product) return null;
+  return vendor && vendor !== '*' ? `${vendor}/${product}` : product;
+}
+
+function extractCvssFromScores(scores) {
+  if (!Array.isArray(scores)) return null;
+  for (const entry of scores) {
+    const cvss = entry?.cvss_v3 ?? entry?.cvss_v3_1 ?? entry?.cvss_v3_0 ?? entry?.cvss_v2;
+    if (cvss) return cvss;
+  }
+  return null;
+}
+
+function extractAffectedProducts(vulnerabilities) {
+  const products = [];
+  for (const vuln of vulnerabilities ?? []) {
+    const cve = vuln.cve ?? null;
+    const affected = vuln.product_status?.known_affected ?? [];
+    const cvss = extractCvssFromScores(vuln.scores);
+    for (const cpe of affected) {
+      const name = parseCpeToProductName(cpe);
+      if (!name) continue;
+      products.push({
+        cve,
+        packageName: name,
+        ecosystem: 'rpm',
+        cpe,
+        severity: cvss?.baseSeverity ?? null,
+        baseScore: cvss?.baseScore ?? null
+      });
+    }
+  }
+  return products;
+}
+
 async function writeSuseItem(client, ctx, item, url, fallbackId) {
   const doc = item.document ?? {};
   const tracking = doc.tracking ?? {};
   const advisoryId = tracking.id ?? fallbackId;
   const identifiers = [...new Set([advisoryId, ...extractIdentifiers(JSON.stringify(item.vulnerabilities ?? []), doc.title)])];
+  const affectedProducts = extractAffectedProducts(item.vulnerabilities);
+  const firstProduct = affectedProducts[0] ?? null;
+  const severityLabel = firstProduct?.severity
+    ?? item.vulnerabilities?.[0]?.scores?.[0]?.cvss_v3?.baseSeverity
+    ?? null;
+
   const rawIndexId = await writeRecord(client, ctx, {
     externalKey: advisoryId,
     externalId: advisoryId,
@@ -112,10 +159,14 @@ async function writeSuseItem(client, ctx, item, url, fallbackId) {
     ecosystem: 'rpm',
     advisoryId,
     identifiers,
-    severityLabel: item.vulnerabilities?.[0]?.scores?.[0]?.cvss_v3?.baseSeverity ?? null,
+    packageName: firstProduct?.packageName ?? null,
+    purl: null,
+    vulnerableRanges: [],
+    severityLabel,
     references: [{ url }],
     publishedAt: tracking.initial_release_date ?? null,
     modifiedAt: tracking.current_release_date ?? null,
-    payload: item
+    payload: item,
+    affectedProducts
   });
 }

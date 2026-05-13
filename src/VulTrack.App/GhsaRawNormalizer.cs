@@ -78,6 +78,7 @@ public sealed class GhsaRawNormalizer(
                 }
             }
 
+            var succeededIds = new List<Guid>();
             foreach (var row in rows)
             {
                 try
@@ -95,7 +96,7 @@ public sealed class GhsaRawNormalizer(
                     await InsertWeaknessesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Weaknesses(JsonNode.Parse(row.Cwes)), ct);
                     var facts = ExtractAffectedFacts(row).ToList();
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
-                    await MarkNormalizedAsync(connection, row.RawIndexId, ct);
+                    succeededIds.Add(row.RawIndexId);
                     processed++;
                 }
                 catch (Exception ex)
@@ -104,6 +105,8 @@ public sealed class GhsaRawNormalizer(
                     failed++;
                 }
             }
+
+            await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
             if (processed >= limit) break;
         }

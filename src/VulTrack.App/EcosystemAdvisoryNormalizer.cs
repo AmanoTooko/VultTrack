@@ -3,7 +3,7 @@ using Npgsql;
 
 namespace VulTrack.App;
 
-public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer)
+public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer, ILogger<EcosystemAdvisoryNormalizer> logger)
     : NormalizerBase(affectedHooks, canonicalizer), ISourceScopedRawNormalizer
 {
     public string SourceCode => "ecosystem-advisories";
@@ -63,37 +63,138 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
 
         var processed = 0;
         var failed = 0;
+        var succeededIds = new List<Guid>();
+
+        var drafts = new List<(Row Row, VulnerabilityCanonicalDraft Draft)>();
         foreach (var row in rows)
+        {
+            var identifiers = IdentifiersFrom([row.AdvisoryId], row.Identifiers);
+            var primary = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? row.AdvisoryId;
+            drafts.Add((row, new VulnerabilityCanonicalDraft(primary, null, null, "active", row.PublishedAt, row.ModifiedAt, identifiers, row.SourceId, row.RawIndexId)));
+        }
+
+        var cache = await canonicalizer.ResolveCanonicalIdsBatchAsync(connection, drafts.Select(d => d.Draft).ToList(), ct);
+
+        foreach (var (row, draft) in drafts)
         {
             try
             {
-                var identifiers = IdentifiersFrom([row.AdvisoryId], row.Identifiers);
-                var primary = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? row.AdvisoryId;
+                var identifiers = draft.Identifiers;
+                var primary = draft.PreferredIdentifier;
                 var payload = JsonNode.Parse(row.Payload);
-                var title = payload?["vulnerability"]?["summary"]?.GetValue<string>() ?? row.AdvisoryId;
-                var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, primary, title, title, "active", row.PublishedAt, row.ModifiedAt, identifiers, ct);
-                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.AdvisoryId, title, title, "active", row.Payload, ct);
+                var isCsaf = row.Provider is "suse-csaf" or "redhat-csaf";
+                var title = ExtractTitle(payload, isCsaf, row.AdvisoryId);
+                var description = ExtractDescription(payload, isCsaf, title);
+                var fullDraft = new VulnerabilityCanonicalDraft(primary, title, description, "active", row.PublishedAt, row.ModifiedAt, identifiers, row.SourceId, row.RawIndexId);
+                var vulnerabilityId = await canonicalizer.GetOrCreateCanonicalAsync(connection, fullDraft, cache, ct);
+                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.AdvisoryId, title, description, "active", row.Payload, ct);
                 await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
-                await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, payload?["vulnerability"]?["details"]?.GetValue<string>()), ct);
-                var severities = SourceFactExtractor.CvssSeverities(payload?["cvss"]).Concat(SourceFactExtractor.LabelSeverity(row.SeverityLabel, row.Payload)).ToList();
+                await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, description), ct);
+                var severities = ExtractSeverities(payload, isCsaf, row.SeverityLabel, row.Payload).ToList();
                 await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, severities, ct);
                 await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(JsonNode.Parse(row.ReferencesJson)), ct);
-                var facts = ExtractAffectedFacts(row).ToList();
+                var facts = ExtractAffectedFacts(row, payload, isCsaf).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
-                await MarkNormalizedAsync(connection, row.RawIndexId, ct);
+                succeededIds.Add(row.RawIndexId);
                 processed++;
             }
-            catch
+            catch (Exception ex)
             {
+                logger.LogError(ex, "Failed to normalize ecosystem advisory {AdvisoryId} from raw {RawIndexId}", row.AdvisoryId, row.RawIndexId);
                 failed++;
             }
         }
 
+        await MarkNormalizedBatchAsync(connection, succeededIds, ct);
+
         return new NormalizeBatchResult(sourceCode ?? SourceCode, processed, failed);
     }
 
-    private static IEnumerable<AffectedFactDraft> ExtractAffectedFacts(Row row)
+    private static string ExtractTitle(JsonNode? payload, bool isCsaf, string fallback)
     {
+        if (!isCsaf) return payload?["vulnerability"]?["summary"]?.GetValue<string>() ?? fallback;
+        return payload?["document"]?["title"]?.GetValue<string>() ?? fallback;
+    }
+
+    private static string? ExtractDescription(JsonNode? payload, bool isCsaf, string title)
+    {
+        if (!isCsaf) return payload?["vulnerability"]?["details"]?.GetValue<string>() ?? title;
+        var notes = payload?["document"]?["notes"]?.AsArray();
+        if (notes is not null)
+        {
+            foreach (var note in notes)
+            {
+                var category = note?["category"]?.GetValue<string>();
+                if (category is "description" or "summary" or "general")
+                    return note?["text"]?.GetValue<string>() ?? title;
+            }
+        }
+        return title;
+    }
+
+    private static IEnumerable<SeverityScoreDraft> ExtractSeverities(JsonNode? payload, bool isCsaf, string? severityLabel, string payloadJson)
+    {
+        if (!isCsaf)
+        {
+            foreach (var s in SourceFactExtractor.CvssSeverities(payload?["cvss"])) yield return s;
+            foreach (var s in SourceFactExtractor.LabelSeverity(severityLabel, payloadJson)) yield return s;
+            yield break;
+        }
+
+        var seen = false;
+        foreach (var vuln in payload?["vulnerabilities"]?.AsArray() ?? [])
+        {
+            foreach (var scoreEntry in vuln?["scores"]?.AsArray() ?? [])
+            {
+                var cvss = scoreEntry?["cvss_v3"] ?? scoreEntry?["cvss_v3_1"] ?? scoreEntry?["cvss_v3_0"] ?? scoreEntry?["cvss_v2"];
+                if (cvss is null) continue;
+                var vector = cvss["vectorString"]?.GetValue<string>();
+                var score = cvss["baseScore"]?.GetValue<decimal?>();
+                var label = cvss["baseSeverity"]?.GetValue<string>();
+                if (vector is null && score is null && label is null) continue;
+                seen = true;
+                var version = vector?.StartsWith("CVSS:", StringComparison.OrdinalIgnoreCase) == true
+                    ? vector["CVSS:".Length..vector.IndexOf('/')]
+                    : cvss["version"]?.GetValue<string>();
+                yield return new SeverityScoreDraft("cvss", version, "base", vector, score, label, cvss.ToJsonString());
+            }
+        }
+
+        if (!seen && !string.IsNullOrWhiteSpace(severityLabel))
+        {
+            foreach (var s in SourceFactExtractor.LabelSeverity(severityLabel, payloadJson)) yield return s;
+        }
+    }
+
+    private static IEnumerable<AffectedFactDraft> ExtractAffectedFacts(Row row, JsonNode? payload, bool isCsaf)
+    {
+        if (isCsaf)
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var productSeen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var vuln in payload?["vulnerabilities"]?.AsArray() ?? [])
+            {
+                var cve = vuln?["cve"]?.GetValue<string>();
+                var productStatus = vuln?["product_status"];
+                var products = productStatus?["known_affected"]?.AsArray()
+                    ?? productStatus?["recommended"]?.AsArray()
+                    ?? productStatus?["first_fixed"]?.AsArray()
+                    ?? [];
+                foreach (var product in products)
+                {
+                    var productStr = product?.GetValue<string>();
+                    if (string.IsNullOrWhiteSpace(productStr)) continue;
+                    var productName = ParseSuseProductName(productStr);
+                    if (string.IsNullOrWhiteSpace(productName)) continue;
+                    var dedupeKey = productName;
+                    if (!productSeen.Add(dedupeKey)) continue;
+                    var ecosystem = DetectSuseEcosystem(productStr);
+                    yield return new AffectedFactDraft("package", ecosystem, productName, null, productStr, "csaf-product", $"{{\"product\":{System.Text.Json.JsonSerializer.Serialize(productStr)}}}");
+                }
+            }
+            yield break;
+        }
+
         if (string.IsNullOrWhiteSpace(row.PackageName) && string.IsNullOrWhiteSpace(row.Purl)) yield break;
         var ranges = JsonNode.Parse(row.VulnerableRanges)?.AsArray().Select(x => x?.GetValue<string>()).Where(x => !string.IsNullOrWhiteSpace(x)).ToArray() ?? [];
         if (ranges.Length == 0)
@@ -105,6 +206,30 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
         {
             yield return new AffectedFactDraft("package", row.Ecosystem, row.PackageName, row.Purl, range, "vendor", row.Payload);
         }
+    }
+
+    private static string ParseSuseProductName(string product)
+    {
+        if (string.IsNullOrWhiteSpace(product)) return product;
+        var colonIdx = product.IndexOf(':');
+        var name = colonIdx > 0 && colonIdx < product.Length - 1 ? product[(colonIdx + 1)..] : product;
+        var parts = name.Split('-', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length <= 1) return name;
+        var result = new List<string>();
+        foreach (var part in parts)
+        {
+            if (char.IsDigit(part[0]) && part.Contains('.'))
+                break;
+            result.Add(part);
+        }
+        return result.Count > 0 ? string.Join("-", result) : name;
+    }
+
+    private static string DetectSuseEcosystem(string product)
+    {
+        var lower = product.ToLowerInvariant();
+        if (lower.Contains("suse") || lower.Contains("opensuse") || lower.Contains("sles")) return "rpm";
+        return "rpm";
     }
 
     private sealed record Row(Guid RawIndexId, string Provider, string? Ecosystem, string AdvisoryId, string[] Identifiers, string? PackageName, string? Purl, string VulnerableRanges, string? SeverityLabel, DateTimeOffset? PublishedAt, DateTimeOffset? ModifiedAt, string ReferencesJson, string Payload, Guid SourceId);

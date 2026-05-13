@@ -112,17 +112,22 @@ async function runVulnerabilitySearch(query) {
 async function runComponentSearch(query) {
   const version = el.versionInput.value.trim();
   const ecosystem = el.ecosystemInput.value.trim();
+
+  const versionRegex = /^v?\d+\.\d+(?:\.\d+)?(?:[-.+]\w+)*$/;
+  const detectedVersion = version || (versionRegex.test(query) ? query : null);
+  const compName = versionRegex.test(query) ? null : (query && !query.startsWith('pkg:') ? query : null);
+
   const catalog = await api('/api/v1/component.search', {
     method: 'POST',
-    body: JSON.stringify({ query, ecosystem, pageSize: 25 })
+    body: JSON.stringify({ query: compName ?? query, ecosystem, pageSize: 25 })
   });
   const vulns = await api('/api/v1/component.vulnerabilitySearch', {
     method: 'POST',
     body: JSON.stringify({
-      componentName: query && !query.startsWith('pkg:') ? query : null,
+      componentName: compName,
       purl: query.startsWith('pkg:') ? query : null,
       ecosystem: ecosystem || null,
-      version: version || null,
+      version: detectedVersion || null,
       pageSize: 25
     })
   });
@@ -159,6 +164,8 @@ async function loadVulnerabilityDetail(id) {
 
 function renderDetail(data) {
   const v = data.vulnerability;
+  const sources = [...new Set((data.records || []).map(r => r.code || 'unknown').filter(Boolean))];
+
   el.detailPane.innerHTML = `
     <header class="detail-header">
       <div class="detail-title">
@@ -172,25 +179,14 @@ function renderDetail(data) {
       <div class="chips">${(v.identifiers || []).slice(0, 20).map((id) => `<span class="badge">${escapeHtml(id)}</span>`).join('')}</div>
     </header>
 
+    <div class="tabs source-tabs" role="tablist" aria-label="Source view">
+      <button class="tab is-active" type="button" data-source="all">All sources (${fmt(v.sourceCount)})</button>
+      ${sources.map(s => `<button class="tab" type="button" data-source="${escapeAttr(s)}">${escapeHtml(s)} (${fmt((data.records||[]).filter(r=>r.code===s).length)})</button>`).join('')}
+    </div>
+
     <div class="detail-grid">
-      <div>
-        ${tableSection('Affected components', ['Ecosystem', 'Name', 'Range', 'Evidence'], data.affectedComponents.map((item) => [
-          item.ecosystem,
-          item.display_name || item.package_name,
-          item.normalized_range || item.primary_cpe23_uri || item.primary_purl,
-          item.evidence_count
-        ]))}
-        ${tableSection('Source records', ['Source', 'Record', 'Status', 'Confidence'], data.records.map((item) => [
-          item.code,
-          item.source_record_id,
-          item.status,
-          item.confidence
-        ]))}
-        ${tableSection('References', ['Source', 'URL', 'Tags'], data.references.map((item) => [
-          item.code,
-          item.url ? `<a href="${escapeAttr(item.url)}" target="_blank" rel="noreferrer">${escapeHtml(item.url)}</a>` : '',
-          Array.isArray(item.tags) ? item.tags.join(', ') : ''
-        ]), true)}
+      <div id="detailContent">
+        ${renderSourceContent(data, 'all')}
       </div>
       <aside>
         <section class="section">
@@ -202,16 +198,58 @@ function renderDetail(data) {
             <div>Affected</div><div>${fmt(v.affectedComponentCount)}</div>
           </div>
         </section>
-        ${tableSection('Severity facts', ['Source', 'System', 'Vector', 'Score'], data.severities.map((item) => [
-          item.code,
-          `${item.scoring_system || ''} ${item.scoring_version || ''}`,
-          item.vector_string || '-',
-          item.score ?? item.severity_label ?? ''
+        ${tableSection('Severity facts', ['Source', 'System', 'Vector', 'Score'], (data.severities||[]).map((item) => [
+          item.code, item.scoring_system + ' ' + (item.scoring_version||''), item.vector_string || '-', item.score ?? item.severity_label ?? ''
         ]))}
-        ${rawSection('Source payload sample', data.records[0]?.source_specific)}
+        ${rawSection('Source payload sample', (data.records||[])[0]?.source_specific)}
       </aside>
     </div>
   `;
+
+  el.detailPane.querySelectorAll('.source-tabs .tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      el.detailPane.querySelectorAll('.source-tabs .tab').forEach(t => t.classList.remove('is-active'));
+      tab.classList.add('is-active');
+      const source = tab.dataset.source;
+      const content = document.getElementById('detailContent');
+      if (content) content.innerHTML = renderSourceContent(data, source);
+    });
+  });
+}
+
+function renderSourceContent(data, source) {
+  const isAll = source === 'all';
+  const records = isAll ? (data.records||[]) : (data.records||[]).filter(r => r.code === source);
+  const severities = isAll ? (data.severities||[]) : (data.severities||[]).filter(r => r.code === source);
+  const refs = isAll ? (data.references||[]) : (data.references||[]).filter(r => r.code === source);
+  const descriptions = isAll ? (data.descriptions||[]) : (data.descriptions||[]).filter(r => r.code === source);
+  const affected = isAll ? (data.affectedComponents||[]) : (data.affectedComponents||[]);
+
+  let html = '';
+
+  if (descriptions.length) {
+    html += tableSection('Descriptions', ['Source', 'Type', 'Value'], descriptions.map(d => [d.code, d.description_type, (d.value||'').substring(0, 300)]));
+  }
+
+  if (records.length) {
+    html += tableSection('Source records', ['Source', 'Record ID', 'Status'], records.map(r => [r.code, r.source_record_id, r.status]));
+  }
+
+  if (affected.length) {
+    html += tableSection('Affected components', ['Ecosystem', 'Name', 'Version Range', 'Range Type'], affected.map(c => [c.ecosystem, c.display_name || c.package_name, c.normalized_range || c.primary_purl || '', c.range_type || '']));
+  }
+
+  if (severities.length) {
+    html += tableSection('CVSS / Severity', ['Source', 'System', 'Vector', 'Score'], severities.map(s => [s.code, (s.scoring_system||'')+' '+(s.scoring_version||''), s.vector_string||'-', s.score??s.severity_label??'']));
+  }
+
+  if (refs.length) {
+    html += tableSection('References', ['Source', 'URL', 'Tags'], refs.map(r => [
+      r.code, r.url ? `<a href=\"${escapeAttr(r.url)}\" target=\"_blank\" rel=\"noreferrer\">${escapeHtml(r.url.substring(0,80))}</a>` : '', Array.isArray(r.tags) ? r.tags.join(', ') : ''
+    ]), true);
+  }
+
+  return html || '<div class="empty-state"><p>No data for this source</p></div>';
 }
 
 function vulnerabilityResult(item) {

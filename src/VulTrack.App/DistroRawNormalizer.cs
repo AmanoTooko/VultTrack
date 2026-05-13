@@ -51,6 +51,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
 
         var processed = 0;
         var failed = 0;
+        var succeededIds = new List<Guid>();
         foreach (var row in rows)
         {
             try
@@ -65,7 +66,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                 }
 
-                await MarkNormalizedAsync(connection, row.RawIndexId, ct);
+                succeededIds.Add(row.RawIndexId);
                 processed++;
             }
             catch
@@ -73,6 +74,8 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                 failed++;
             }
         }
+
+        await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult("alpine-secdb", processed, failed);
     }
@@ -101,6 +104,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
 
         var processed = 0;
         var failed = 0;
+        var succeededIds = new List<Guid>();
         foreach (var row in rows)
         {
             try
@@ -110,7 +114,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                 var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", row.Payload, ct);
                 var facts = ExtractDebianFacts(row).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
-                await MarkNormalizedAsync(connection, row.RawIndexId, ct);
+                succeededIds.Add(row.RawIndexId);
                 processed++;
             }
             catch
@@ -118,6 +122,8 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                 failed++;
             }
         }
+
+        await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult("debian-security-tracker", processed, failed);
     }

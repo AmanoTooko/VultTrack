@@ -82,6 +82,7 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                 }
             }
 
+            var succeededIds = new List<Guid>();
             foreach (var row in rows)
             {
                 try
@@ -99,7 +100,7 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                     await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(payload?["references"]), ct);
                     var facts = ExtractAffectedFacts(payload).ToList();
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
-                    await MarkNormalizedAsync(connection, row.RawIndexId, ct);
+                    succeededIds.Add(row.RawIndexId);
                     processed++;
                 }
                 catch
@@ -107,6 +108,8 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                     failed++;
                 }
             }
+
+            await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
             if (processed >= limit) break;
         }
@@ -127,7 +130,15 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                 var events = range?["events"]?.AsArray();
                 var introduced = events?.FirstOrDefault(x => x?["introduced"] is not null)?["introduced"]?.GetValue<string>();
                 var fixedVersion = events?.FirstOrDefault(x => x?["fixed"] is not null)?["fixed"]?.GetValue<string>();
-                var rawRange = fixedVersion is not null ? $"< {fixedVersion}" : introduced is not null ? $">= {introduced}" : range?.ToJsonString();
+                string? rawRange;
+                if (introduced is not null && fixedVersion is not null)
+                    rawRange = $">= {introduced}, < {fixedVersion}";
+                else if (fixedVersion is not null)
+                    rawRange = $"< {fixedVersion}";
+                else if (introduced is not null)
+                    rawRange = $">= {introduced}";
+                else
+                    rawRange = range?.ToJsonString();
                 yield return new AffectedFactDraft("package", ecosystem, name, purl, rawRange, range?["type"]?.GetValue<string>(), affected?.ToJsonString() ?? "{}");
             }
             if (affected?["ranges"] is null && !string.IsNullOrWhiteSpace(name))

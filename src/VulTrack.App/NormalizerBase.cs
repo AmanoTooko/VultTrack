@@ -44,8 +44,16 @@ public abstract class NormalizerBase(
 
     protected async Task InsertAffectedFactsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, Guid rawIndexId, IReadOnlyList<AffectedFactDraft> facts, CancellationToken ct)
     {
-        foreach (var fact in facts)
+        if (facts.Count == 0)
         {
+            foreach (var hook in affectedHooks)
+                await hook.OnAffectedFactsAsync(connection, vulnerabilityId, recordId, facts, ct);
+            return;
+        }
+
+        if (facts.Count == 1)
+        {
+            var fact = facts[0];
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_affected_facts
                   (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
@@ -67,6 +75,34 @@ public abstract class NormalizerBase(
             cmd.Parameters.AddWithValue(fact.SourceSpecificJson);
             await cmd.ExecuteNonQueryAsync(ct);
         }
+        else
+        {
+            var values = new List<string>();
+            var paramIdx = 1;
+            var cmdParams = new List<object>();
+            foreach (var fact in facts)
+            {
+                values.Add($"(${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},lower(${paramIdx - 1}),${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},true,${paramIdx++}::jsonb)");
+                cmdParams.Add(vulnerabilityId);
+                cmdParams.Add(recordId);
+                cmdParams.Add(sourceId);
+                cmdParams.Add(rawIndexId);
+                cmdParams.Add(fact.FactType);
+                cmdParams.Add((object?)fact.Ecosystem ?? DBNull.Value);
+                cmdParams.Add((object?)fact.PackageName ?? DBNull.Value);
+                cmdParams.Add((object?)fact.Purl ?? DBNull.Value);
+                cmdParams.Add((object?)PurlWithoutVersion(fact.Purl) ?? DBNull.Value);
+                cmdParams.Add((object?)fact.VersionRange ?? DBNull.Value);
+                cmdParams.Add((object?)fact.RangeType ?? DBNull.Value);
+                cmdParams.Add(fact.SourceSpecificJson);
+            }
+
+            await using var batchCmd = new NpgsqlCommand(
+                $"insert into vulnerability_affected_facts (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem, package_name, normalized_package_name, purl, purl_without_version, version_range_raw, range_type, vulnerable, source_specific) values {string.Join(",", values)}",
+                connection);
+            for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
+            await batchCmd.ExecuteNonQueryAsync(ct);
+        }
 
         foreach (var hook in affectedHooks)
         {
@@ -76,8 +112,12 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertDescriptionsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, IReadOnlyList<DescriptionDraft> descriptions, CancellationToken ct)
     {
-        foreach (var description in descriptions.Where(x => !string.IsNullOrWhiteSpace(x.Value)))
+        var valid = descriptions.Where(x => !string.IsNullOrWhiteSpace(x.Value)).ToList();
+        if (valid.Count == 0) return;
+
+        if (valid.Count == 1)
         {
+            var d = valid[0];
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_descriptions
                   (vulnerability_id, vulnerability_record_id, source_id, lang, description_type, value, is_selected)
@@ -86,12 +126,34 @@ public abstract class NormalizerBase(
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
             cmd.Parameters.AddWithValue(sourceId);
-            cmd.Parameters.AddWithValue((object?)description.Lang ?? DBNull.Value);
-            cmd.Parameters.AddWithValue(description.DescriptionType);
-            cmd.Parameters.AddWithValue(description.Value);
-            cmd.Parameters.AddWithValue(description.IsSelected);
+            cmd.Parameters.AddWithValue((object?)d.Lang ?? DBNull.Value);
+            cmd.Parameters.AddWithValue(d.DescriptionType);
+            cmd.Parameters.AddWithValue(d.Value);
+            cmd.Parameters.AddWithValue(d.IsSelected);
             await cmd.ExecuteNonQueryAsync(ct);
+            return;
         }
+
+        var values = new List<string>();
+        var paramIdx = 1;
+        var cmdParams = new List<object>();
+        foreach (var d in valid)
+        {
+            values.Add($"(${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++})");
+            cmdParams.Add(vulnerabilityId);
+            cmdParams.Add(recordId);
+            cmdParams.Add(sourceId);
+            cmdParams.Add((object?)d.Lang ?? DBNull.Value);
+            cmdParams.Add(d.DescriptionType);
+            cmdParams.Add(d.Value);
+            cmdParams.Add(d.IsSelected);
+        }
+
+        await using var batchCmd = new NpgsqlCommand(
+            $"insert into vulnerability_descriptions (vulnerability_id, vulnerability_record_id, source_id, lang, description_type, value, is_selected) values {string.Join(",", values)}",
+            connection);
+        for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
+        await batchCmd.ExecuteNonQueryAsync(ct);
     }
 
     protected static async Task InsertSeverityScoresAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, Guid rawIndexId, IReadOnlyList<SeverityScoreDraft> scores, CancellationToken ct)
@@ -148,8 +210,12 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertReferencesAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, IReadOnlyList<ReferenceDraft> references, CancellationToken ct)
     {
-        foreach (var reference in references.Where(x => !string.IsNullOrWhiteSpace(x.Url)).DistinctBy(x => x.Url))
+        var valid = references.Where(x => !string.IsNullOrWhiteSpace(x.Url)).DistinctBy(x => x.Url).ToList();
+        if (valid.Count == 0) return;
+
+        if (valid.Count == 1)
         {
+            var r = valid[0];
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_references
                   (vulnerability_id, vulnerability_record_id, source_id, url, normalized_url, ref_type, tags, source_json_path)
@@ -158,18 +224,44 @@ public abstract class NormalizerBase(
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
             cmd.Parameters.AddWithValue(sourceId);
-            cmd.Parameters.AddWithValue(reference.Url);
-            cmd.Parameters.AddWithValue((object?)reference.RefType ?? DBNull.Value);
-            cmd.Parameters.AddWithValue(reference.Tags);
-            cmd.Parameters.AddWithValue((object?)reference.SourceJsonPath ?? DBNull.Value);
+            cmd.Parameters.AddWithValue(r.Url);
+            cmd.Parameters.AddWithValue((object?)r.RefType ?? DBNull.Value);
+            cmd.Parameters.AddWithValue(r.Tags);
+            cmd.Parameters.AddWithValue((object?)r.SourceJsonPath ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
+            return;
         }
+
+        var values = new List<string>();
+        var paramIdx = 1;
+        var cmdParams = new List<object>();
+        foreach (var r in valid)
+        {
+            values.Add($"(${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},lower(${paramIdx - 1}),${paramIdx++},${paramIdx++},${paramIdx++})");
+            cmdParams.Add(vulnerabilityId);
+            cmdParams.Add(recordId);
+            cmdParams.Add(sourceId);
+            cmdParams.Add(r.Url);
+            cmdParams.Add((object?)r.RefType ?? DBNull.Value);
+            cmdParams.Add(r.Tags);
+            cmdParams.Add((object?)r.SourceJsonPath ?? DBNull.Value);
+        }
+
+        await using var batchCmd = new NpgsqlCommand(
+            $"insert into vulnerability_references (vulnerability_id, vulnerability_record_id, source_id, url, normalized_url, ref_type, tags, source_json_path) values {string.Join(",", values)}",
+            connection);
+        for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
+        await batchCmd.ExecuteNonQueryAsync(ct);
     }
 
     protected static async Task InsertWeaknessesAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, IReadOnlyList<WeaknessDraft> weaknesses, CancellationToken ct)
     {
-        foreach (var weakness in weaknesses.Where(x => !string.IsNullOrWhiteSpace(x.WeaknessId) || !string.IsNullOrWhiteSpace(x.Description)))
+        var valid = weaknesses.Where(x => !string.IsNullOrWhiteSpace(x.WeaknessId) || !string.IsNullOrWhiteSpace(x.Description)).ToList();
+        if (valid.Count == 0) return;
+
+        if (valid.Count == 1)
         {
+            var w = valid[0];
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_weaknesses
                   (vulnerability_id, vulnerability_record_id, source_id, weakness_type, weakness_id, description)
@@ -178,17 +270,46 @@ public abstract class NormalizerBase(
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
             cmd.Parameters.AddWithValue(sourceId);
-            cmd.Parameters.AddWithValue(weakness.WeaknessType);
-            cmd.Parameters.AddWithValue((object?)weakness.WeaknessId ?? DBNull.Value);
-            cmd.Parameters.AddWithValue((object?)weakness.Description ?? DBNull.Value);
+            cmd.Parameters.AddWithValue(w.WeaknessType);
+            cmd.Parameters.AddWithValue((object?)w.WeaknessId ?? DBNull.Value);
+            cmd.Parameters.AddWithValue((object?)w.Description ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);
+            return;
         }
+
+        var values = new List<string>();
+        var paramIdx = 1;
+        var cmdParams = new List<object>();
+        foreach (var w in valid)
+        {
+            values.Add($"(${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++})");
+            cmdParams.Add(vulnerabilityId);
+            cmdParams.Add(recordId);
+            cmdParams.Add(sourceId);
+            cmdParams.Add(w.WeaknessType);
+            cmdParams.Add((object?)w.WeaknessId ?? DBNull.Value);
+            cmdParams.Add((object?)w.Description ?? DBNull.Value);
+        }
+
+        await using var batchCmd = new NpgsqlCommand(
+            $"insert into vulnerability_weaknesses (vulnerability_id, vulnerability_record_id, source_id, weakness_type, weakness_id, description) values {string.Join(",", values)}",
+            connection);
+        for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
+        await batchCmd.ExecuteNonQueryAsync(ct);
     }
 
     protected static async Task MarkNormalizedAsync(NpgsqlConnection connection, Guid rawIndexId, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand("update source_raw_index set normalize_status = 'succeeded', updated_at = now() where id = $1", connection);
         cmd.Parameters.AddWithValue(rawIndexId);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    protected static async Task MarkNormalizedBatchAsync(NpgsqlConnection connection, IReadOnlyList<Guid> rawIndexIds, CancellationToken ct)
+    {
+        if (rawIndexIds.Count == 0) return;
+        await using var cmd = new NpgsqlCommand("update source_raw_index set normalize_status = 'succeeded', updated_at = now() where id = any($1)", connection);
+        cmd.Parameters.AddWithValue(rawIndexIds.ToArray());
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

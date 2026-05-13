@@ -62,6 +62,7 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
 
         var processed = 0;
         var failed = 0;
+        var succeededIds = new List<Guid>();
         foreach (var row in rows)
         {
             try
@@ -74,7 +75,7 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
                     ct);
                 await UpsertRecordAsync(connection, vulnerabilityId, row, title, ct);
                 await UpdateThreatProjectionAsync(connection, vulnerabilityId, row, payload, ct);
-                await MarkNormalizedAsync(connection, row.RawIndexId, ct);
+                succeededIds.Add(row.RawIndexId);
                 processed++;
             }
             catch
@@ -82,6 +83,8 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
                 failed++;
             }
         }
+
+        await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult(SourceCode, processed, failed);
     }
@@ -127,10 +130,11 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
-    private static async Task MarkNormalizedAsync(NpgsqlConnection connection, Guid rawIndexId, CancellationToken ct)
+    private static async Task MarkNormalizedBatchAsync(NpgsqlConnection connection, IReadOnlyList<Guid> rawIndexIds, CancellationToken ct)
     {
-        await using var cmd = new NpgsqlCommand("update source_raw_index set normalize_status = 'succeeded', updated_at = now() where id = $1", connection);
-        cmd.Parameters.AddWithValue(rawIndexId);
+        if (rawIndexIds.Count == 0) return;
+        await using var cmd = new NpgsqlCommand("update source_raw_index set normalize_status = 'succeeded', updated_at = now() where id = any($1)", connection);
+        cmd.Parameters.AddWithValue(rawIndexIds.ToArray());
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

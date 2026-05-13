@@ -28,6 +28,8 @@ public interface IAffectedComponentHook
 public interface IVulnerabilityCanonicalizer
 {
     Task<Guid> UpsertCanonicalAsync(NpgsqlConnection connection, VulnerabilityCanonicalDraft draft, CancellationToken ct);
+    Task<Dictionary<string, Guid>> ResolveCanonicalIdsBatchAsync(NpgsqlConnection connection, IReadOnlyList<VulnerabilityCanonicalDraft> drafts, CancellationToken ct);
+    Task<Guid> GetOrCreateCanonicalAsync(NpgsqlConnection connection, VulnerabilityCanonicalDraft draft, Dictionary<string, Guid>? cache, CancellationToken ct);
 }
 
 public sealed record NormalizeBatchResult(string SourceCode, int Processed, int Failed);

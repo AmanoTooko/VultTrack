@@ -58,6 +58,16 @@ public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
                     select array_agg(distinct c.display_name)
                     from vulnerability_affected_components c where c.vulnerability_id = $1
                 ), '{}'),
+                search_text = to_tsvector('simple',
+                    coalesce(primary_identifier,'') || ' ' ||
+                    coalesce(title,'') || ' ' ||
+                    coalesce(description,'') || ' ' ||
+                    coalesce(replace(
+                        array_to_string(
+                            coalesce((
+                                select array_agg(distinct c.display_name)
+                                from vulnerability_affected_components c where c.vulnerability_id = $1
+                            ), '{}'), ' '), '/', ' '), '')),
                 updated_at = now()
             where id = $1
             """, connection);

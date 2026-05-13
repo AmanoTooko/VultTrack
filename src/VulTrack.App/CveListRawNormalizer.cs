@@ -43,6 +43,7 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
 
         var processed = 0;
         var failed = 0;
+        var succeededIds = new List<Guid>();
         foreach (var row in rows)
         {
             try
@@ -57,7 +58,7 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
                 await UpsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, cna?["references"], ct);
                 var facts = ExtractAffectedFacts(cna).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
-                await MarkNormalizedAsync(connection, row.RawIndexId, ct);
+                succeededIds.Add(row.RawIndexId);
                 processed++;
             }
             catch
@@ -65,6 +66,8 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
                 failed++;
             }
         }
+
+        await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult(SourceCode, processed, failed);
     }
@@ -127,9 +130,22 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
                 var status = version?["status"]?.GetValue<string>();
                 var vulnerable = string.Equals(status, "affected", StringComparison.OrdinalIgnoreCase);
                 if (!vulnerable) continue;
-                var rawRange = version?["lessThan"]?.GetValue<string>() is { } lessThan
-                    ? $"< {lessThan}"
-                    : version?["version"]?.GetValue<string>();
+                var lessThan = version?["lessThan"]?.GetValue<string>();
+                var lessThanOrEqual = version?["lessThanOrEqual"]?.GetValue<string>();
+                var exactVersion = version?["version"]?.GetValue<string>();
+                string? rawRange;
+                if (exactVersion is not null && lessThan is not null)
+                    rawRange = $">= {exactVersion}, < {lessThan}";
+                else if (exactVersion is not null && lessThanOrEqual is not null)
+                    rawRange = $">= {exactVersion}, <= {lessThanOrEqual}";
+                else if (lessThan is not null)
+                    rawRange = $"< {lessThan}";
+                else if (lessThanOrEqual is not null)
+                    rawRange = $"<= {lessThanOrEqual}";
+                else if (exactVersion is not null)
+                    rawRange = $"= {exactVersion}";
+                else
+                    rawRange = version?.ToJsonString();
                 yield return new AffectedFactDraft("package", null, name, null, rawRange, "cve-list", version?.ToJsonString() ?? "{}");
             }
         }
