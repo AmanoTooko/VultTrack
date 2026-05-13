@@ -38,14 +38,38 @@ public sealed class SourceScheduler(
         foreach (var source in dueSources)
         {
             await RunSourceAsync(source.Code, ct);
-            var limit = int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_NORMALIZE_LIMIT"), out var parsed) ? parsed : 500;
-            var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
-            logger.LogInformation(
-                "Normalizer {Source} completed: processed={Processed}, failed={Failed}",
-                result.SourceCode,
-                result.Processed,
-                result.Failed);
         }
+
+        var limit = int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_NORMALIZE_LIMIT"), out var parsed) ? parsed : 500;
+        var allSources = await LoadAllSourcesAsync(ct);
+        foreach (var source in allSources)
+        {
+            var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
+            if (result.Processed > 0 || result.Failed > 0)
+            {
+                logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
+                    result.SourceCode, result.Processed, result.Failed);
+            }
+        }
+    }
+
+    private async Task<IReadOnlyList<ScheduledSource>> LoadAllSourcesAsync(CancellationToken ct)
+    {
+        var rows = new List<ScheduledSource>();
+        await using var cmd = db.CreateCommand("""
+            select s.code
+            from sources s
+            where s.enabled = true
+            order by s.code
+            """);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var code = reader.GetString(0);
+            if (IsSourceAllowed(code))
+                rows.Add(new ScheduledSource(code, "", null));
+        }
+        return rows;
     }
 
     private async Task<IReadOnlyList<ScheduledSource>> LoadDueSourcesAsync(CancellationToken ct)
