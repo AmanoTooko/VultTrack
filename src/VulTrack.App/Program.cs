@@ -413,23 +413,36 @@ app.MapPost("/api/v1/component.vulnerabilitySearch", async (ComponentVulnerabili
 app.MapPost("/api/v1/component.search", async (NpgsqlDataSource db, ComponentSearchRequest request, CancellationToken ct) =>
 {
     var pageSize = request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200);
-    var query = $"%{request.Query?.Trim() ?? ""}%";
-    var ecosystem = string.IsNullOrWhiteSpace(request.Ecosystem) ? null : request.Ecosystem.Trim();
+    var lookup = ComponentQuery.Normalize(request.Name ?? request.Query, request.Vendor, request.Purl, request.Ecosystem);
+    var queryText = request.Query?.Trim() ?? request.Name?.Trim() ?? "";
+    var query = $"%{queryText}%";
 
     var components = new List<object>();
     await using (var cmd = db.CreateCommand("""
         select id, canonical_name, component_type, primary_purl, primary_cpe23_uri,
                primary_repository_url, identities
         from components
-        where ($1 = '%%' or canonical_name ilike $1 or primary_purl ilike $1 or primary_cpe23_uri ilike $1 or identities @> array[$2])
-          and ($3::text is null or primary_purl ilike ('pkg:' || $3 || '/%'))
+        where (
+            $1 = '%%'
+            or canonical_name ilike $1
+            or primary_purl ilike $1
+            or primary_cpe23_uri ilike $1
+            or identities @> array[$2]
+            or (cardinality($3::text[]) > 0 and lower(canonical_name) = any($3))
+            or (cardinality($4::text[]) > 0 and lower(coalesce(primary_purl, '')) = any($4))
+            or ($5::text is not null and lower(coalesce(primary_purl, '')) like $5 || '%')
+        )
+          and ($6::text is null or primary_purl ilike ('pkg:' || $6 || '/%'))
         order by updated_at desc
-        limit $4
+        limit $7
         """))
     {
         cmd.Parameters.AddWithValue(query);
-        cmd.Parameters.AddWithValue(request.Query?.Trim() ?? "");
-        cmd.Parameters.AddWithValue((object?)ecosystem ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(queryText);
+        cmd.Parameters.AddWithValue(lookup.NameCandidates);
+        cmd.Parameters.AddWithValue(lookup.PurlCandidates);
+        cmd.Parameters.AddWithValue((object?)lookup.PurlWithoutVersionLower ?? DBNull.Value);
+        cmd.Parameters.AddWithValue((object?)lookup.Ecosystem ?? DBNull.Value);
         cmd.Parameters.AddWithValue(pageSize);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -452,14 +465,25 @@ app.MapPost("/api/v1/component.search", async (NpgsqlDataSource db, ComponentSea
         select ecosystem, registry_url, namespace, name, latest_version, purl_without_version,
                homepage_url, repository_url, metadata_json::text, last_seen_at
         from registry_packages
-        where ($1 = '%%' or name ilike $1 or namespace ilike $1 or purl_without_version ilike $1)
-          and ($2::text is null or lower(ecosystem) = lower($2))
+        where (
+            $1 = '%%'
+            or name ilike $1
+            or namespace ilike $1
+            or purl_without_version ilike $1
+            or (cardinality($2::text[]) > 0 and lower(name) = any($2))
+            or (cardinality($3::text[]) > 0 and lower(coalesce(purl_without_version, '')) = any($3))
+            or ($4::text is not null and lower(coalesce(purl_without_version, '')) like $4 || '%')
+        )
+          and ($5::text is null or lower(ecosystem) = lower($5))
         order by last_seen_at desc
-        limit $3
+        limit $6
         """))
     {
         cmd.Parameters.AddWithValue(query);
-        cmd.Parameters.AddWithValue((object?)ecosystem ?? DBNull.Value);
+        cmd.Parameters.AddWithValue(lookup.NameCandidates);
+        cmd.Parameters.AddWithValue(lookup.PurlCandidates);
+        cmd.Parameters.AddWithValue((object?)lookup.PurlWithoutVersionLower ?? DBNull.Value);
+        cmd.Parameters.AddWithValue((object?)lookup.Ecosystem ?? DBNull.Value);
         cmd.Parameters.AddWithValue(pageSize);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))

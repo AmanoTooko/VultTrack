@@ -202,7 +202,7 @@ input:focus {
 
 .component-fields {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -459,6 +459,35 @@ pre {
   background: #fbfcfa;
   border-radius: 8px;
   font-size: 12px;
+}
+
+.source-card-list {
+  display: grid;
+  gap: 10px;
+}
+
+.source-card {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.source-card-head {
+  display: grid;
+  gap: 6px;
+}
+
+.source-card strong {
+  overflow-wrap: anywhere;
+}
+
+.source-card p {
+  color: #3f473d;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 a {

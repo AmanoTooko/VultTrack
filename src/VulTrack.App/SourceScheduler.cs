@@ -34,12 +34,6 @@ public sealed class SourceScheduler(
 
     public async Task RunDueSourcesAsync(CancellationToken ct)
     {
-        var dueSources = await LoadDueSourcesAsync(ct);
-        foreach (var source in dueSources)
-        {
-            await RunSourceAsync(source.Code, ct);
-        }
-
         var limit = int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_NORMALIZE_LIMIT"), out var parsed) ? parsed : 500;
         var allSources = await LoadAllSourcesAsync(ct);
         foreach (var source in allSources)
@@ -49,6 +43,19 @@ public sealed class SourceScheduler(
             {
                 logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
                     result.SourceCode, result.Processed, result.Failed);
+            }
+        }
+
+        var dueSources = await LoadDueSourcesAsync(ct);
+        foreach (var source in dueSources)
+        {
+            try
+            {
+                await RunSourceAsync(source.Code, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Fetcher {Source} failed; continuing scheduled normalization.", source.Code);
             }
         }
     }
@@ -121,6 +128,11 @@ public sealed class SourceScheduler(
     {
         var repoRoot = ResolveRepoRoot();
         var node = Environment.GetEnvironmentVariable("PLUGIN_NODE_BIN") ?? "node";
+        var timeout = TimeSpan.FromSeconds(int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_FETCH_TIMEOUT_SECONDS"), out var timeoutSeconds)
+            ? Math.Max(30, timeoutSeconds)
+            : 600);
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(timeout);
         var psi = new ProcessStartInfo(node)
         {
             WorkingDirectory = repoRoot,
@@ -140,9 +152,20 @@ public sealed class SourceScheduler(
         using var process = Process.Start(psi);
         if (process is null) throw new InvalidOperationException($"Failed to start fetcher process for {source}.");
 
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-        var stderrTask = process.StandardError.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        try
+        {
+            await process.WaitForExitAsync(timeoutCts.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            TryKill(process);
+            await process.WaitForExitAsync(CancellationToken.None);
+            var timeoutStderr = await stderrTask;
+            throw new TimeoutException($"Fetcher {source} timed out after {timeout.TotalSeconds:n0}s. {timeoutStderr}");
+        }
+
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
 
@@ -152,6 +175,21 @@ public sealed class SourceScheduler(
         }
 
         logger.LogInformation("Fetcher {Source} completed: {Output}", source, stdout);
+    }
+
+    private static void TryKill(Process process)
+    {
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch
+        {
+            // Best effort: the scheduler logs the timeout and continues with the next cycle.
+        }
     }
 
     private static bool IsDue(string cron, DateTimeOffset? lastSuccess, DateTimeOffset now)

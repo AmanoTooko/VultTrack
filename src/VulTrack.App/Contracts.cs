@@ -14,6 +14,7 @@ public sealed record NormalizeSourceRequest(
 
 public sealed record ComponentVulnerabilitySearchRequest(
     string? ComponentName = null,
+    string? Name = null,
     string? Version = null,
     string? Vendor = null,
     string? Purl = null,
@@ -22,6 +23,10 @@ public sealed record ComponentVulnerabilitySearchRequest(
 
 public sealed record ComponentSearchRequest(
     string? Query = null,
+    string? Name = null,
+    string? Vendor = null,
+    string? Version = null,
+    string? Purl = null,
     string? Ecosystem = null,
     int PageSize = 50);
 

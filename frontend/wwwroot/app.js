@@ -13,6 +13,7 @@ const el = {
   tabs: [...document.querySelectorAll('.tab')],
   searchForm: document.querySelector('#searchForm'),
   queryInput: document.querySelector('#queryInput'),
+  vendorInput: document.querySelector('#vendorInput'),
   versionInput: document.querySelector('#versionInput'),
   ecosystemInput: document.querySelector('#ecosystemInput'),
   queryLabel: document.querySelector('#queryLabel'),
@@ -31,7 +32,7 @@ el.tabs.forEach((tab) => {
     state.mode = tab.dataset.mode;
     el.tabs.forEach((item) => item.classList.toggle('is-active', item === tab));
     el.componentFields.hidden = state.mode !== 'component';
-    el.queryLabel.textContent = state.mode === 'component' ? 'Component, vendor, or purl' : 'Identifier or keyword';
+    el.queryLabel.textContent = state.mode === 'component' ? 'Component name or purl' : 'Identifier or keyword';
     el.queryInput.placeholder = state.mode === 'component' ? 'pkg:maven/org.apache.logging.log4j/log4j-core' : 'CVE-2021-44228';
     runSearch();
   });
@@ -110,22 +111,36 @@ async function runVulnerabilitySearch(query) {
 }
 
 async function runComponentSearch(query) {
+  const vendor = el.vendorInput.value.trim();
   const version = el.versionInput.value.trim();
   const ecosystem = el.ecosystemInput.value.trim();
 
   const versionRegex = /^v?\d+\.\d+(?:\.\d+)?(?:[-.+]\w+)*$/;
   const detectedVersion = version || (versionRegex.test(query) ? query : null);
-  const compName = versionRegex.test(query) ? null : (query && !query.startsWith('pkg:') ? query : null);
+  const inferred = inferComponentInput(query, vendor);
+  const compName = versionRegex.test(query) ? null : inferred.name;
+  const inferredVendor = inferred.vendor || vendor || null;
+  const purl = query.startsWith('pkg:') ? query : null;
 
   const catalog = await api('/api/v1/component.search', {
     method: 'POST',
-    body: JSON.stringify({ query: compName ?? query, ecosystem, pageSize: 25 })
+    body: JSON.stringify({
+      query: compName ?? query,
+      name: compName,
+      vendor: inferredVendor,
+      purl,
+      ecosystem: ecosystem || null,
+      version: detectedVersion || null,
+      pageSize: 25
+    })
   });
   const vulns = await api('/api/v1/component.vulnerabilitySearch', {
     method: 'POST',
     body: JSON.stringify({
       componentName: compName,
-      purl: query.startsWith('pkg:') ? query : null,
+      name: compName,
+      vendor: inferredVendor,
+      purl,
       ecosystem: ecosystem || null,
       version: detectedVersion || null,
       pageSize: 25
@@ -165,6 +180,7 @@ async function loadVulnerabilityDetail(id) {
 function renderDetail(data) {
   const v = data.vulnerability;
   const sources = [...new Set((data.records || []).map(r => r.code || 'unknown').filter(Boolean))];
+  const sourceTotal = Math.max(Number(v.sourceCount || 0), sources.length);
 
   el.detailPane.innerHTML = `
     <header class="detail-header">
@@ -180,7 +196,7 @@ function renderDetail(data) {
     </header>
 
     <div class="tabs source-tabs" role="tablist" aria-label="Source view">
-      <button class="tab is-active" type="button" data-source="all">All sources (${fmt(v.sourceCount)})</button>
+      <button class="tab is-active" type="button" data-source="all">All sources (${fmt(sourceTotal)})</button>
       ${sources.map(s => `<button class="tab" type="button" data-source="${escapeAttr(s)}">${escapeHtml(s)} (${fmt((data.records||[]).filter(r=>r.code===s).length)})</button>`).join('')}
     </div>
 
@@ -192,7 +208,7 @@ function renderDetail(data) {
         <section class="section">
           <h3>Overview</h3>
           <div class="kv">
-            <div>Sources</div><div>${fmt(v.sourceCount)}</div>
+            <div>Sources</div><div>${fmt(sourceTotal)}</div>
             <div>Published</div><div>${date(v.publishedAt)}</div>
             <div>Modified</div><div>${date(v.modifiedAt)}</div>
             <div>Affected</div><div>${fmt(v.affectedComponentCount)}</div>
@@ -223,30 +239,50 @@ function renderSourceContent(data, source) {
   const severities = isAll ? (data.severities||[]) : (data.severities||[]).filter(r => r.code === source);
   const refs = isAll ? (data.references||[]) : (data.references||[]).filter(r => r.code === source);
   const descriptions = isAll ? (data.descriptions||[]) : (data.descriptions||[]).filter(r => r.code === source);
-  const affected = isAll ? (data.affectedComponents||[]) : (data.affectedComponents||[]);
+  const affected = isAll
+    ? (data.affectedComponents||[]).map(item => ({ ...item, code: 'merged' }))
+    : (data.affectedFacts||[]).filter(r => r.code === source);
 
   let html = '';
 
-  if (descriptions.length) {
-    html += tableSection('Descriptions', ['Source', 'Type', 'Value'], descriptions.map(d => [d.code, d.description_type, (d.value||'').substring(0, 300)]));
-  }
-
   if (records.length) {
-    html += tableSection('Source records', ['Source', 'Record ID', 'Status'], records.map(r => [r.code, r.source_record_id, r.status]));
+    html += cardSection('Source records', records.map(r => ({
+      title: r.source_record_id || r.id || r.code,
+      meta: [r.code, r.status].filter(Boolean),
+      body: r.title || r.description || ''
+    })));
   }
 
-  if (affected.length) {
-    html += tableSection('Affected components', ['Ecosystem', 'Name', 'Version Range', 'Range Type'], affected.map(c => [c.ecosystem, c.display_name || c.package_name, c.normalized_range || c.primary_purl || '', c.range_type || '']));
+  if (descriptions.length) {
+    html += cardSection('Descriptions', descriptions.map(d => ({
+      title: d.description_type || d.code,
+      meta: [d.code, d.lang].filter(Boolean),
+      body: d.value || ''
+    })));
   }
 
   if (severities.length) {
-    html += tableSection('CVSS / Severity', ['Source', 'System', 'Vector', 'Score'], severities.map(s => [s.code, (s.scoring_system||'')+' '+(s.scoring_version||''), s.vector_string||'-', s.score??s.severity_label??'']));
+    html += cardSection('Severity', severities.map(s => ({
+      title: `${s.scoring_system || 'severity'} ${s.score ?? s.severity_label ?? ''}`.trim(),
+      meta: [s.code, s.scoring_version].filter(Boolean),
+      body: s.vector_string || ''
+    })));
+  }
+
+  if (affected.length) {
+    html += cardSection('Affected', affected.slice(0, 80).map(c => ({
+      title: c.display_name || c.package_name || c.purl || c.primary_purl || c.cpe23_uri || c.primary_cpe23_uri || 'component',
+      meta: [c.code, c.ecosystem, c.range_type].filter(Boolean),
+      body: c.version_range_raw || c.normalized_range || c.purl || c.primary_purl || c.cpe23_uri || c.primary_cpe23_uri || ''
+    })));
   }
 
   if (refs.length) {
-    html += tableSection('References', ['Source', 'URL', 'Tags'], refs.map(r => [
-      r.code, r.url ? `<a href=\"${escapeAttr(r.url)}\" target=\"_blank\" rel=\"noreferrer\">${escapeHtml(r.url.substring(0,80))}</a>` : '', Array.isArray(r.tags) ? r.tags.join(', ') : ''
-    ]), true);
+    html += cardSection('References', refs.map(r => ({
+      title: r.url ? `<a href="${escapeAttr(r.url)}" target="_blank" rel="noreferrer">${escapeHtml(shortUrl(r.url))}</a>` : 'reference',
+      meta: [r.code, r.ref_type, ...(Array.isArray(r.tags) ? r.tags.slice(0, 3) : [])].filter(Boolean),
+      body: ''
+    })), true);
   }
 
   return html || '<div class="empty-state"><p>No data for this source</p></div>';
@@ -269,25 +305,8 @@ function vulnerabilityResult(item) {
 }
 
 function componentVulnerabilityResult(item) {
-  const match = item.versionMatched === true ? 'match' : item.versionMatched === false ? 'miss' : 'unknown';
-  const matchKlass = match === 'match' ? 'risk' : match === 'miss' ? 'muted' : '';
-  const hasRange = item.versionRange;
-  return `
-    <button class="result-item" type="button" data-vulnerability-id="${escapeAttr(item.vulnerabilityId)}">
-      <div class="result-main">
-        <span class="result-title">${escapeHtml(item.primaryIdentifier)}</span>
-        ${severityBadge(item.severityLabel, item.cvssScore)}
-      </div>
-      <div class="result-meta">
-        <span class="badge">${escapeHtml(item.packageName || item.purl || item.ecosystem || '')}</span>
-        ${hasRange ? `<span class="badge ${matchKlass}">${escapeHtml(match)}: ${escapeHtml(item.versionRange)}</span>` : '<span class="badge">no range</span>'}
-      </div>
-    </button>
-  `;
-}
-
-function componentVulnerabilityResult(item) {
   const match = item.versionMatched === true ? 'version match' : item.versionMatched === false ? 'range miss' : 'range unknown';
+  const matchKlass = item.versionMatched === true ? 'low' : item.versionMatched === false ? 'none' : '';
   return `
     <button class="result-item" type="button" data-vulnerability-id="${escapeAttr(item.vulnerabilityId)}">
       <div class="result-main">
@@ -295,7 +314,7 @@ function componentVulnerabilityResult(item) {
         ${severityBadge(item.severityLabel, item.cvssScore)}
       </div>
       <div class="muted">${escapeHtml(item.packageName || item.purl || '')}</div>
-      <div class="chips"><span class="badge">${escapeHtml(match)}</span><span class="badge">${escapeHtml(item.versionRange || 'no range')}</span></div>
+      <div class="chips"><span class="badge ${matchKlass}">${escapeHtml(match)}</span><span class="badge">${escapeHtml(item.versionRange || 'no range')}</span></div>
     </button>
   `;
 }
@@ -348,6 +367,46 @@ function rawSection(title, value) {
       <pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>
     </section>
   `;
+}
+
+function cardSection(title, items, allowHtml = false) {
+  if (!items.length) return '';
+  return `
+    <section class="section">
+      <h3>${escapeHtml(title)}</h3>
+      <div class="source-card-list">
+        ${items.map(item => `
+          <article class="source-card">
+            <div class="source-card-head">
+              <strong>${allowHtml ? item.title : escapeHtml(item.title || '')}</strong>
+              <div class="chips">${(item.meta || []).map(x => `<span class="badge">${escapeHtml(x)}</span>`).join('')}</div>
+            </div>
+            ${item.body ? `<p>${escapeHtml(item.body).slice(0, 1200)}</p>` : ''}
+          </article>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function inferComponentInput(query, vendor) {
+  const trimmed = query.trim();
+  if (!trimmed || trimmed.startsWith('pkg:')) return { name: null, vendor: vendor || null };
+  if (!vendor && trimmed.includes(':')) {
+    const [left, ...rest] = trimmed.split(':');
+    const name = rest.join(':');
+    if (left && name) return { vendor: left, name };
+  }
+  return { name: trimmed, vendor: vendor || null };
+}
+
+function shortUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}${parsed.pathname}`.slice(0, 90);
+  } catch {
+    return String(url).slice(0, 90);
+  }
 }
 
 function severityBadge(label, score) {
