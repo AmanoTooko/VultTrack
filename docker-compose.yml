@@ -56,10 +56,9 @@ services:
       DATABASE_URL: postgres://vultrack:vultrack@vultrack-postgres:5432/vultrack
       VULTRACK_REPO_ROOT: /workspace
       VULTRACK_SCHEDULER_ENABLED: "true"
-      SCHEDULER_INTERVAL_SECONDS: "60"
+      SCHEDULER_INTERVAL_SECONDS: "5"
       SCHEDULER_FETCH_LIMIT:
-      SCHEDULER_FETCH_TIMEOUT_SECONDS: "600"
-      SCHEDULER_NORMALIZE_LIMIT: "200"
+      SCHEDULER_NORMALIZE_LIMIT: "500"
       SCHEDULER_SOURCE_CODES:
     volumes:
       - .:/workspace
