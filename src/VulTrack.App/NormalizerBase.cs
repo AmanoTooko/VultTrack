@@ -122,7 +122,6 @@ public abstract class NormalizerBase(
                 insert into vulnerability_descriptions
                   (vulnerability_id, vulnerability_record_id, source_id, lang, description_type, value, is_selected)
                 values ($1,$2,$3,$4,$5,$6,$7)
-                on conflict (vulnerability_id, source_id, coalesce(lang,''), description_type, md5(value)) do nothing
                 """, connection);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
@@ -172,7 +171,6 @@ public abstract class NormalizerBase(
                    score_type, vector_string, score, severity_label, normalized_severity, source_severity_label,
                    metric_json, is_selected)
                 values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,$10,$11::jsonb,$12)
-                on conflict (vulnerability_id, source_id, scoring_system, coalesce(scoring_version,''), coalesce(vector_string,'')) do nothing
                 """, connection);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
@@ -222,7 +220,6 @@ public abstract class NormalizerBase(
                 insert into vulnerability_references
                   (vulnerability_id, vulnerability_record_id, source_id, url, normalized_url, ref_type, tags, source_json_path)
                 values ($1,$2,$3,$4,lower($4),$5,$6,$7)
-                on conflict (vulnerability_id, source_id, url) do nothing
                 """, connection);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
@@ -269,7 +266,6 @@ public abstract class NormalizerBase(
                 insert into vulnerability_weaknesses
                   (vulnerability_id, vulnerability_record_id, source_id, weakness_type, weakness_id, description)
                 values ($1,$2,$3,$4,$5,$6)
-                on conflict (vulnerability_id, source_id, coalesce(weakness_id,'')) do nothing
                 """, connection);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
