@@ -34,6 +34,8 @@ public sealed class SourceScheduler(
 
     public async Task RunDueSourcesAsync(CancellationToken ct)
     {
+        await DedupEpssPendingAsync(ct);
+
         var limit = int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_NORMALIZE_LIMIT"), out var parsed) ? parsed : 500;
         var allSources = await LoadAllSourcesAsync(ct);
         foreach (var source in allSources)
@@ -269,5 +271,20 @@ public sealed class SourceScheduler(
         return null;
     }
 
+    private async Task DedupEpssPendingAsync(CancellationToken ct)
+    {
+        try
+        {
+            await using var cmd = db.CreateCommand("SELECT dedup_epss_pending()");
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+        catch
+        {
+            // Function might not exist yet - ignore
+        }
+    }
+
     private sealed record ScheduledSource(string Code, string Cron, DateTimeOffset? LastSuccess);
 }
+  
+// Add dedup logic in the normalize loop
