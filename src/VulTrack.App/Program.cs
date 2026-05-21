@@ -203,30 +203,43 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     else
     {
         var hasQuery = !string.IsNullOrWhiteSpace(rawQuery);
+        if (hasQuery && !string.IsNullOrWhiteSpace(exact))
+        {
+            await using var fastCmd = db.CreateCommand("""
+                select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                from vulnerability_identifier_index i
+                join vulnerabilities v on v.id = i.canonical_vulnerability_id
+                where i.normalized_value = $1
+                order by coalesce(v.max_cvss_score, 0) desc
+                limit $2
+                """);
+            fastCmd.Parameters.AddWithValue(exact);
+            fastCmd.Parameters.AddWithValue(request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200));
+            await using var fastReader = await fastCmd.ExecuteReaderAsync(ct);
+            var found = 0;
+            while (await fastReader.ReadAsync(ct))
+            {
+                rows.Add(MakeResult(fastReader));
+                found++;
+            }
+            if (found > 0)
+            {
+                return ApiResult.Ok(new { items = rows, page = 1, pageSize = request.PageSize <= 0 ? 50 : request.PageSize });
+            }
+        }
+
         await using var cmd = hasQuery
             ? db.CreateCommand("""
                 select id, primary_identifier, title, severity_label, max_cvss_score,
-                       affected_component_count, affected_component_names, published_at, modified_at, priority
-                from (
-                    select v.*, 1 as priority
-                    from vulnerabilities v
-                    where $2 = any(identifiers)
-                    limit $4
-                    union all
-                    select v.*, 2 as priority
-                    from vulnerabilities v
-                    where search_text @@ plainto_tsquery('simple', $3)
-                      and not ($2 = any(identifiers))
-                    limit $4
-                    union all
-                    select v.*, 3 as priority
-                    from vulnerabilities v
-                    where (primary_identifier ilike $1 or title ilike $1 or $2 = any(affected_component_names))
-                      and not ($2 = any(identifiers))
-                      and not (search_text @@ plainto_tsquery('simple', $3))
-                    limit $4
-                ) t
-                order by priority, coalesce(max_cvss_score, 0) desc, modified_at desc nulls last
+                       affected_component_count, affected_component_names, published_at, modified_at
+                from vulnerabilities
+                where ($1 = any(identifiers))
+                   or (search_text @@ plainto_tsquery('simple', $3))
+                   or (primary_identifier ilike $2)
+                   or (title ilike $2)
+                   or ($1 = any(affected_component_names))
+                order by coalesce(max_cvss_score, 0) desc, modified_at desc nulls last
                 limit $4
                 """)
             : db.CreateCommand("""
@@ -236,25 +249,14 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 inner join (select id from vulnerabilities order by modified_at desc nulls last limit $4) t on t.id = v.id
                 order by v.modified_at desc nulls last
                 """);
-        cmd.Parameters.AddWithValue(pattern);
         cmd.Parameters.AddWithValue(exact);
+        cmd.Parameters.AddWithValue(pattern);
         cmd.Parameters.AddWithValue(rawQuery);
         cmd.Parameters.AddWithValue(request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200));
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
-            rows.Add(new
-            {
-                id = reader.GetGuid(0),
-                primaryIdentifier = reader.GetString(1),
-                title = reader.IsDBNull(2) ? null : reader.GetString(2),
-                severityLabel = reader.IsDBNull(3) ? null : reader.GetString(3),
-                maxCvssScore = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
-                affectedComponentCount = reader.GetInt32(5),
-                affectedComponentNames = TruncateNames(reader.GetFieldValue<string[]>(6)),
-                publishedAt = reader.IsDBNull(7) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(7),
-                modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8)
-            });
+            rows.Add(MakeResult(reader));
         }
     }
 
@@ -627,6 +629,19 @@ static JsonNode? JsonOrNull(string value)
         return null;
     }
 }
+
+static object MakeResult(NpgsqlDataReader reader) => new
+{
+    id = reader.GetGuid(0),
+    primaryIdentifier = reader.GetString(1),
+    title = reader.IsDBNull(2) ? null : reader.GetString(2),
+    severityLabel = reader.IsDBNull(3) ? null : reader.GetString(3),
+    maxCvssScore = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
+    affectedComponentCount = reader.GetInt32(5),
+    affectedComponentNames = TruncateNames(reader.GetFieldValue<string[]>(6)),
+    publishedAt = reader.IsDBNull(7) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(7),
+    modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8)
+};
 
 static string[] TruncateNames(string[] names) =>
     names is { Length: > 15 } ? names[..15].Append($"+{names.Length - 15} more").ToArray() : names;
