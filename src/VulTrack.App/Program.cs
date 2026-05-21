@@ -202,19 +202,40 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     }
     else
     {
-        await using var cmd = db.CreateCommand("""
-            select id, primary_identifier, title, severity_label, max_cvss_score,
-                   affected_component_count, affected_component_names, published_at, modified_at
-            from vulnerabilities
-            where ($1 = '%%'
-              or primary_identifier ilike $1
-              or title ilike $1
-              or $2 = any(identifiers)
-              or $2 = any(affected_component_names)
-              or search_text @@ plainto_tsquery('simple', $3))
-            order by coalesce(max_cvss_score, 0) desc, modified_at desc nulls last
-            limit $4
-            """);
+        var hasQuery = !string.IsNullOrWhiteSpace(rawQuery);
+        await using var cmd = hasQuery
+            ? db.CreateCommand("""
+                select id, primary_identifier, title, severity_label, max_cvss_score,
+                       affected_component_count, affected_component_names, published_at, modified_at, priority
+                from (
+                    select v.*, 1 as priority
+                    from vulnerabilities v
+                    where $2 = any(identifiers)
+                    limit $4
+                    union all
+                    select v.*, 2 as priority
+                    from vulnerabilities v
+                    where search_text @@ plainto_tsquery('simple', $3)
+                      and not ($2 = any(identifiers))
+                    limit $4
+                    union all
+                    select v.*, 3 as priority
+                    from vulnerabilities v
+                    where (primary_identifier ilike $1 or title ilike $1 or $2 = any(affected_component_names))
+                      and not ($2 = any(identifiers))
+                      and not (search_text @@ plainto_tsquery('simple', $3))
+                    limit $4
+                ) t
+                order by priority, coalesce(max_cvss_score, 0) desc, modified_at desc nulls last
+                limit $4
+                """)
+            : db.CreateCommand("""
+                select id, primary_identifier, title, severity_label, max_cvss_score,
+                       affected_component_count, affected_component_names, published_at, modified_at
+                from vulnerabilities
+                order by coalesce(max_cvss_score, 0) desc, modified_at desc nulls last
+                limit $4
+                """);
         cmd.Parameters.AddWithValue(pattern);
         cmd.Parameters.AddWithValue(exact);
         cmd.Parameters.AddWithValue(rawQuery);
