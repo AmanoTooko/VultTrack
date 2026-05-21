@@ -179,8 +179,12 @@ async function loadVulnerabilityDetail(id) {
 
 function renderDetail(data) {
   const v = data.vulnerability;
-  const sources = [...new Set((data.records || []).map(r => r.code || 'unknown').filter(Boolean))];
-  const sourceTotal = Math.max(Number(v.sourceCount || 0), sources.length);
+  const records = data.records || [];
+  const severities = data.severities || [];
+  const refs = data.references || [];
+  const descriptions = data.descriptions || [];
+  const affected = data.affectedComponents || [];
+  const sourceTags = [...new Set(records.map(r => r.code).filter(Boolean))];
 
   el.detailPane.innerHTML = `
     <header class="detail-header">
@@ -192,100 +196,113 @@ function renderDetail(data) {
       </div>
       ${v.maxCvssVector ? cvssVectorBlock(v.maxCvssVersion, v.maxCvssVector) : ''}
       <p class="summary">${escapeHtml(v.title || v.description || '')}</p>
-      <div class="chips">${(v.identifiers || []).slice(0, 20).map((id) => `<span class="badge">${escapeHtml(id)}</span>`).join('')}</div>
+      <div class="detail-meta-row">
+        <span class="kv-inline">Published <b>${date(v.publishedAt)}</b></span>
+        <span class="kv-inline">Modified <b>${date(v.modifiedAt)}</b></span>
+        <span class="kv-inline">Sources <b>${fmt(records.length)}</b></span>
+        <span class="kv-inline">Affected <b>${fmt(v.affectedComponentCount)}</b></span>
+      </div>
+      <div class="chips" style="margin-top:8px">
+        <span class="chip-label">Sources:</span>
+        ${sourceTags.map(s => `<span class="badge tag-${escapeAttr(s)}">${escapeHtml(s)}</span>`).join('')}
+      </div>
     </header>
 
-    <div class="tabs source-tabs" role="tablist" aria-label="Source view">
-      <button class="tab is-active" type="button" data-source="all">All sources (${fmt(sourceTotal)})</button>
-      ${sources.map(s => `<button class="tab" type="button" data-source="${escapeAttr(s)}">${escapeHtml(s)} (${fmt((data.records||[]).filter(r=>r.code===s).length)})</button>`).join('')}
-    </div>
-
-    <div class="detail-grid">
-      <div id="detailContent">
-        ${renderSourceContent(data, 'all')}
-      </div>
-      <aside>
-        <section class="section">
-          <h3>Overview</h3>
-          <div class="kv">
-            <div>Sources</div><div>${fmt(sourceTotal)}</div>
-            <div>Published</div><div>${date(v.publishedAt)}</div>
-            <div>Modified</div><div>${date(v.modifiedAt)}</div>
-            <div>Affected</div><div>${fmt(v.affectedComponentCount)}</div>
-          </div>
-        </section>
-        ${tableSection('Severity facts', ['Source', 'System', 'Vector', 'Score'], (data.severities||[]).map((item) => [
-          item.code, item.scoring_system + ' ' + (item.scoring_version||''), item.vector_string || '-', item.score ?? item.severity_label ?? ''
-        ]))}
-        ${rawSection('Source payload sample', (data.records||[])[0]?.source_specific)}
-      </aside>
+    <div class="detail-sections">
+      ${descriptions.length ? renderDescriptionCards(descriptions) : ''}
+      ${severities.length ? renderSeverityCards(severities) : ''}
+      ${affected.length ? renderAffectedCards(affected) : ''}
+      ${refs.length ? renderReferenceCards(refs) : ''}
     </div>
   `;
-
-  el.detailPane.querySelectorAll('.source-tabs .tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      el.detailPane.querySelectorAll('.source-tabs .tab').forEach(t => t.classList.remove('is-active'));
-      tab.classList.add('is-active');
-      const source = tab.dataset.source;
-      const content = document.getElementById('detailContent');
-      if (content) content.innerHTML = renderSourceContent(data, source);
-    });
-  });
 }
 
-function renderSourceContent(data, source) {
-  const isAll = source === 'all';
-  const records = isAll ? (data.records||[]) : (data.records||[]).filter(r => r.code === source);
-  const severities = isAll ? (data.severities||[]) : (data.severities||[]).filter(r => r.code === source);
-  const refs = isAll ? (data.references||[]) : (data.references||[]).filter(r => r.code === source);
-  const descriptions = isAll ? (data.descriptions||[]) : (data.descriptions||[]).filter(r => r.code === source);
-  const affected = isAll
-    ? (data.affectedComponents||[]).map(item => ({ ...item, code: 'merged' }))
-    : (data.affectedFacts||[]).filter(r => r.code === source);
+function sourceTag(code) {
+  return `<span class="badge tag-source">${escapeHtml(code || '?')}</span>`;
+}
 
-  let html = '';
+function renderDescriptionCards(descriptions) {
+  if (!descriptions.length) return '';
+  return `
+    <section class="detail-section">
+      <h3 class="section-h">Description</h3>
+      <div class="card-stack">
+        ${descriptions.map(d => `
+          <div class="info-card">
+            <p class="info-card-body">${escapeHtml(d.value || '')}</p>
+            <div class="chips">${sourceTag(d.code)} ${d.lang ? `<span class="badge">${escapeHtml(d.lang)}</span>` : ''}</div>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
 
-  if (records.length) {
-    html += cardSection('Source records', records.map(r => ({
-      title: r.source_record_id || r.id || r.code,
-      meta: [r.code, r.status].filter(Boolean),
-      body: r.title || r.description || ''
-    })));
-  }
+function renderSeverityCards(severities) {
+  if (!severities.length) return '';
+  return `
+    <section class="detail-section">
+      <h3 class="section-h">CVSS / Severity</h3>
+      <div class="card-stack">
+        ${severities.map(s => `
+          <div class="info-card">
+            <div class="info-card-row">
+              <strong>${s.scoring_system || 'severity'} ${s.scoring_version || ''}</strong>
+              ${s.score != null ? severityBadge(s.severity_label, s.score) : `<span class="badge">${escapeHtml(s.severity_label || 'N/A')}</span>`}
+            </div>
+            ${s.vector_string ? `<code class="cvss-vector-string">${escapeHtml(s.vector_string)}</code>` : ''}
+            <div class="chips">${sourceTag(s.code)}</div>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
 
-  if (descriptions.length) {
-    html += cardSection('Descriptions', descriptions.map(d => ({
-      title: d.description_type || d.code,
-      meta: [d.code, d.lang].filter(Boolean),
-      body: d.value || ''
-    })));
-  }
+function renderAffectedCards(affected) {
+  if (!affected.length) return '';
+  const display = affected.slice(0, 50);
+  return `
+    <section class="detail-section">
+      <h3 class="section-h">Affected Components (${fmt(affected.length)})</h3>
+      <div class="card-stack">
+        ${display.map(c => `
+          <div class="info-card">
+            <div class="info-card-row">
+              <strong>${escapeHtml(c.display_name || c.package_name || c.primary_purl || 'component')}</strong>
+              ${c.normalized_range ? `<span class="badge high">${escapeHtml(c.normalized_range)}</span>` : ''}
+            </div>
+            <div class="chips">
+              ${c.ecosystem ? `<span class="badge">${escapeHtml(c.ecosystem)}</span>` : ''}
+              ${c.range_type ? `<span class="badge">${escapeHtml(c.range_type)}</span>` : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
 
-  if (severities.length) {
-    html += cardSection('Severity', severities.map(s => ({
-      title: `${s.scoring_system || 'severity'} ${s.score ?? s.severity_label ?? ''}`.trim(),
-      meta: [s.code, s.scoring_version].filter(Boolean),
-      body: s.vector_string || ''
-    })));
-  }
-
-  if (affected.length) {
-    html += cardSection('Affected', affected.slice(0, 80).map(c => ({
-      title: c.display_name || c.package_name || c.purl || c.primary_purl || c.cpe23_uri || c.primary_cpe23_uri || 'component',
-      meta: [c.code, c.ecosystem, c.range_type].filter(Boolean),
-      body: c.version_range_raw || c.normalized_range || c.purl || c.primary_purl || c.cpe23_uri || c.primary_cpe23_uri || ''
-    })));
-  }
-
-  if (refs.length) {
-    html += cardSection('References', refs.map(r => ({
-      title: r.url ? `<a href="${escapeAttr(r.url)}" target="_blank" rel="noreferrer">${escapeHtml(shortUrl(r.url))}</a>` : 'reference',
-      meta: [r.code, r.ref_type, ...(Array.isArray(r.tags) ? r.tags.slice(0, 3) : [])].filter(Boolean),
-      body: ''
-    })), true);
-  }
-
-  return html || '<div class="empty-state"><p>No data for this source</p></div>';
+function renderReferenceCards(refs) {
+  if (!refs.length) return '';
+  const display = refs.slice(0, 30);
+  return `
+    <section class="detail-section">
+      <h3 class="section-h">References (${fmt(refs.length)})</h3>
+      <div class="card-stack">
+        ${display.map(r => `
+          <div class="info-card">
+            <a href="${escapeAttr(r.url)}" target="_blank" rel="noreferrer" class="ref-link">${escapeHtml(shortUrl(r.url))}</a>
+            <div class="chips">
+              ${sourceTag(r.code)}
+              ${r.ref_type ? `<span class="badge">${escapeHtml(r.ref_type)}</span>` : ''}
+              ${Array.isArray(r.tags) ? r.tags.slice(0, 3).map(t => `<span class="badge">${escapeHtml(t)}</span>`).join('') : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
 }
 
 function vulnerabilityResult(item) {
