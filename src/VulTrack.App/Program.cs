@@ -192,7 +192,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 severityLabel = reader.IsDBNull(3) ? null : reader.GetString(3),
                 maxCvssScore = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
                 affectedComponentCount = reader.GetInt32(5),
-                affectedComponentNames = reader.GetFieldValue<string[]>(6),
+                affectedComponentNames = TruncateNames(reader.GetFieldValue<string[]>(6)),
                 publishedAt = reader.IsDBNull(7) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(7),
                 modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8),
                 matchedByEcosystem = true,
@@ -230,11 +230,11 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 limit $4
                 """)
             : db.CreateCommand("""
-                select id, primary_identifier, title, severity_label, max_cvss_score,
-                       affected_component_count, affected_component_names, published_at, modified_at
-                from vulnerabilities
-                order by coalesce(max_cvss_score, 0) desc, modified_at desc nulls last
-                limit $4
+                select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                from vulnerabilities v
+                inner join (select id from vulnerabilities order by modified_at desc nulls last limit $4) t on t.id = v.id
+                order by v.modified_at desc nulls last
                 """);
         cmd.Parameters.AddWithValue(pattern);
         cmd.Parameters.AddWithValue(exact);
@@ -251,7 +251,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 severityLabel = reader.IsDBNull(3) ? null : reader.GetString(3),
                 maxCvssScore = reader.IsDBNull(4) ? (decimal?)null : reader.GetDecimal(4),
                 affectedComponentCount = reader.GetInt32(5),
-                affectedComponentNames = reader.GetFieldValue<string[]>(6),
+                affectedComponentNames = TruncateNames(reader.GetFieldValue<string[]>(6)),
                 publishedAt = reader.IsDBNull(7) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(7),
                 modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8)
             });
@@ -363,16 +363,16 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             left join sources s on s.id = i.source_id
             where i.canonical_vulnerability_id = $1
             order by i.identifier_type, i.identifier_value
-            limit 200
+            limit 50
             """, id, ct),
         records = await QueryRowsAsync(db, """
             select vr.id::text, s.code, s.name, vr.source_record_id, vr.title, vr.description,
-                   vr.status, vr.confidence, vr.source_specific::text, vr.updated_at
+                   vr.status, vr.confidence, left(vr.source_specific::text, 2000) as source_specific, vr.updated_at
             from vulnerability_records vr
             join sources s on s.id = vr.source_id
             where vr.vulnerability_id = $1
             order by s.code, vr.updated_at desc
-            limit 100
+            limit 50
             """, id, ct),
         affectedComponents = await QueryRowsAsync(db, """
             select ecosystem, package_name, display_name, primary_purl, primary_cpe23_uri,
@@ -380,24 +380,24 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             from vulnerability_affected_components
             where vulnerability_id = $1
             order by ecosystem nulls last, display_name
-            limit 200
+            limit 50
             """, id, ct),
         affectedFacts = await QueryRowsAsync(db, """
             select s.code, fact_type, ecosystem, package_name, purl, cpe23_uri,
-                   version_range_raw, range_type, vulnerable, source_specific::text
+                   version_range_raw, range_type, vulnerable, left(source_specific::text, 500) as source_specific
             from vulnerability_affected_facts f
             left join sources s on s.id = f.source_id
             where f.vulnerability_id = $1
             order by s.code, ecosystem nulls last, package_name nulls last
-            limit 200
+            limit 100
             """, id, ct),
         descriptions = await QueryRowsAsync(db, """
-            select s.code, lang, description_type, value, is_selected
+            select s.code, lang, description_type, left(value, 2000) as value, is_selected
             from vulnerability_descriptions d
             left join sources s on s.id = d.source_id
             where d.vulnerability_id = $1
             order by is_selected desc, s.code nulls last
-            limit 100
+            limit 30
             """, id, ct),
         severities = await QueryRowsAsync(db, """
             select s.code, scoring_system, scoring_version, score_type, vector_string,
@@ -406,7 +406,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             left join sources s on s.id = vss.source_id
             where vss.vulnerability_id = $1
             order by is_selected desc, score desc nulls last
-            limit 100
+            limit 30
             """, id, ct),
         references = await QueryRowsAsync(db, """
             with ranked as (
@@ -418,9 +418,9 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             )
             select code, url, ref_type, tags
             from ranked
-            where source_rank <= 50
+            where source_rank <= 20
             order by code nulls last, source_rank, url
-            limit 300
+            limit 100
             """, id, ct)
     });
 });
@@ -627,6 +627,9 @@ static JsonNode? JsonOrNull(string value)
         return null;
     }
 }
+
+static string[] TruncateNames(string[] names) =>
+    names is { Length: > 15 } ? names[..15].Append($"+{names.Length - 15} more").ToArray() : names;
 
 static (string Ecosystem, string? Version)? ParseEcosystemVersion(string query)
 {

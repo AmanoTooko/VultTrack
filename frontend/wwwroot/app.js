@@ -96,7 +96,7 @@ async function runSearch() {
 async function runVulnerabilitySearch(query) {
   const data = await api('/api/v1/vulnerability.search', {
     method: 'POST',
-    body: JSON.stringify({ query, pageSize: 50 })
+    body: JSON.stringify({ query, pageSize: query ? 50 : 10 })
   });
 
   if (!data.items.length) {
@@ -104,7 +104,10 @@ async function runVulnerabilitySearch(query) {
     return;
   }
 
-  el.resultList.innerHTML = data.items.map((item) => vulnerabilityResult(item)).join('');
+  if (!query) {
+    el.resultList.innerHTML = '<div class="muted result-item" style="font-weight:600">Recently updated</div>';
+  }
+  el.resultList.innerHTML += data.items.map((item) => vulnerabilityResult(item)).join('');
   el.resultList.querySelectorAll('[data-vulnerability-id]').forEach((button) => {
     button.addEventListener('click', () => loadVulnerabilityDetail(button.dataset.vulnerabilityId));
   });
@@ -524,4 +527,6 @@ function escapeAttr(value) {
 }
 
 loadStatus();
-runSearch();
+// Initial load: show latest 10 vulnerabilities
+el.queryInput.value = '';
+setTimeout(() => runSearch(), 100);
