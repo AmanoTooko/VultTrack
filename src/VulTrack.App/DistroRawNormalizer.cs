@@ -59,7 +59,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             {
                 foreach (var identifier in row.Identifiers.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase))
                 {
-                    var ids = IdentifiersFrom([identifier]);
+                    var ids = ExtractAllIdentifiers(identifier);
                     var title = $"{identifier} affects Alpine package {row.PackageName}";
                     var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, identifier, title, title, "active", null, null, ids, ct);
                     var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, $"{identifier}:{row.DistroRelease}:{row.PackageName}", title, title, "active", row.Payload, ct);
@@ -112,7 +112,8 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             try
             {
                 var title = $"{row.CveId} Debian security tracker";
-                var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", null, null, [row.CveId], ct);
+                var identifiers = ExtractAllIdentifiers(row.CveId);
+                var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", null, null, identifiers, ct);
                 var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", row.Payload, ct);
                 var facts = ExtractDebianFacts(row).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
@@ -139,6 +140,16 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             if (string.IsNullOrWhiteSpace(name)) continue;
             yield return new AffectedFactDraft("package", "debian", name, null, null, "security-tracker", value?.ToJsonString() ?? "{}");
         }
+    }
+
+    private static string[] ExtractAllIdentifiers(string rawId)
+    {
+        var ids = new List<string> { rawId };
+        // Extract CVE from DEBIAN-CVE-XXXX, UBUNTU-CVE-XXXX, ALPINE-CVE-XXXX etc
+        var match = System.Text.RegularExpressions.Regex.Match(rawId, @"\b(CVE-\d{4}-\d{4,})\b", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
+        if (match.Success && !ids.Contains(match.Groups[1].Value, StringComparer.OrdinalIgnoreCase))
+            ids.Add(match.Groups[1].Value);
+        return IdentifiersFrom(ids);
     }
 
     private sealed record AlpineRow(Guid RawIndexId, string DistroRelease, string PackageName, string[] Identifiers, string Secfixes, string Payload, Guid SourceId);
