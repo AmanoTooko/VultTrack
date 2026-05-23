@@ -52,7 +52,20 @@ async function runArchiveImport(client, ctx, checkpoint) {
   const mirrorDir = getRootPath('data/mirrors');
   await fs.mkdir(mirrorDir, { recursive: true });
   const archive = path.join(mirrorDir, 'suse-csaf.tar.bz2');
+
+  // Check existing file hash before re-downloading
+  try {
+    const existingHash = sha256(await fs.readFile(archive));
+    if (checkpoint.archiveHash === existingHash && !process.env.FETCHER_FORCE) {
+      console.error('[suse-csaf] archive unchanged, skipping download.');
+      return { fetchedCount: 0, parsedCount: 0, checkpoint: { archiveHash: existingHash, skipped: true } };
+    }
+  } catch {
+    // File doesn't exist yet, proceed with download
+  }
+
   const timeoutMs = getIntEnv('FETCHER_TIMEOUT_MS', 600000);
+  console.error('[suse-csaf] downloading SUSE CSAF archive...');
   const download = spawnSync('curl', ['-fL', '--retry', '3', '--retry-delay', '2', '-o', archive, ARCHIVE_URL], {
     encoding: 'utf8',
     timeout: timeoutMs

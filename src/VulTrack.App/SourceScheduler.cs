@@ -16,19 +16,67 @@ public sealed class SourceScheduler(
             return;
         }
 
-        var interval = TimeSpan.FromSeconds(int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_INTERVAL_SECONDS"), out var seconds) ? seconds : 3600);
-        while (!stoppingToken.IsCancellationRequested)
+        var normalizeInterval = TimeSpan.FromSeconds(30);
+        var fetchInterval = TimeSpan.FromHours(12);
+
+        _ = Task.Run(() => RunFetchLoopAsync(fetchInterval, stoppingToken), stoppingToken);
+        await RunNormalizeLoopAsync(normalizeInterval, stoppingToken);
+    }
+
+    private async Task RunNormalizeLoopAsync(TimeSpan interval, CancellationToken ct)
+    {
+        var limit = int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_NORMALIZE_LIMIT"), out var parsed) ? parsed : 500;
+        while (!ct.IsCancellationRequested)
         {
             try
             {
-                await RunDueSourcesAsync(stoppingToken);
+                await DedupEpssPendingAsync(ct);
+                var allSources = await LoadAllSourcesAsync(ct);
+                foreach (var source in allSources)
+                {
+                    if (ct.IsCancellationRequested) break;
+                    var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
+                    if (result.Processed > 0 || result.Failed > 0)
+                    {
+                        logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
+                            result.SourceCode, result.Processed, result.Failed);
+                    }
+                }
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Scheduled source cycle failed.");
+                logger.LogError(ex, "Normalize cycle failed.");
             }
+            await Task.Delay(interval, ct);
+        }
+    }
 
-            await Task.Delay(interval, stoppingToken);
+    private async Task RunFetchLoopAsync(TimeSpan interval, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                var dueSources = await LoadDueSourcesAsync(ct);
+                foreach (var source in dueSources)
+                {
+                    if (ct.IsCancellationRequested) break;
+                    try
+                    {
+                        logger.LogInformation("Starting fetcher {Source}", source.Code);
+                        await RunSourceAsync(source.Code, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Fetcher {Source} failed", source.Code);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Fetch cycle failed.");
+            }
+            await Task.Delay(interval, ct);
         }
     }
 
