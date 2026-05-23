@@ -211,6 +211,7 @@ public sealed class NvdRawProcessor(
                     insert into vulnerability_weaknesses
                       (vulnerability_id, vulnerability_record_id, source_id, weakness_type, weakness_id, description)
                     values ($1,$2,$3,'CWE',$4,$5)
+                    on conflict (vulnerability_id, source_id, coalesce(weakness_id,'')) do nothing
                     """, conn);
                 cmd.Parameters.AddWithValue(vulnerabilityId);
                 cmd.Parameters.AddWithValue(recordId);
