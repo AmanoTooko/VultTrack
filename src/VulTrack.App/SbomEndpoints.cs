@@ -45,20 +45,30 @@ public static class SbomEndpoints
 
             if (comps.Count > 0)
             {
+                var deduped = comps
+                    .GroupBy(x => (x.Item1, x.Name ?? "", x.Version ?? "", x.Eco ?? ""))
+                    .Select(g => g.First())
+                    .ToList();
+
                 var p = 1;
                 var vals = new List<string>();
                 var pl = new List<object>();
-                foreach (var (purl, cname, cver, eco) in comps)
+                foreach (var item in deduped)
                 {
                     vals.Add($"(${p++},${p++},${p++},${p++},${p++},${p++},${p++})");
-                    pl.Add(sid); pl.Add(purl); pl.Add((object?)cname ?? DBNull.Value);
-                    pl.Add((object?)cver ?? DBNull.Value); pl.Add((object?)eco ?? DBNull.Value);
+                    pl.Add(sid); pl.Add(item.Item1); pl.Add((object?)item.Name ?? DBNull.Value);
+                    pl.Add((object?)item.Version ?? DBNull.Value); pl.Add((object?)item.Eco ?? DBNull.Value);
                     pl.Add((object?)null ?? DBNull.Value); pl.Add("{}");
                 }
                 await using var ic = db.CreateCommand(
                     $"INSERT INTO sbom_components(sbom_id,purl,name,version,ecosystem,component_type,metadata) VALUES {string.Join(",", vals)}");
                 foreach (var v in pl) ic.Parameters.AddWithValue(v);
                 await ic.ExecuteNonQueryAsync(ct);
+
+                await using var uc = db.CreateCommand("UPDATE sbom_uploads SET component_count=$1 WHERE id=$2");
+                uc.Parameters.AddWithValue(deduped.Count);
+                uc.Parameters.AddWithValue(sid);
+                await uc.ExecuteNonQueryAsync(ct);
             }
 
             return ApiResult.Ok(new { id = sid, name, componentCount = comps.Count });
@@ -100,7 +110,7 @@ public static class SbomEndpoints
 
         var vulns = new List<object>();
         await using (var vc = db.CreateCommand(
-            "SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT 500"))
+            "SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT 2000"))
         { vc.Parameters.AddWithValue(id); await using var r = await vc.ExecuteReaderAsync(ct);
           while (await r.ReadAsync(ct)) vulns.Add(new { id = r.GetGuid(0), componentId = r.GetGuid(1),
               vulnerabilityId = r.GetGuid(2), primaryIdentifier = r.GetString(3),
@@ -165,8 +175,11 @@ public static class SbomEndpoints
                 await using var ins = new NpgsqlCommand(@"
                     INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched)
                     VALUES($1,$2,$3,$4,$5,$6,$7)
-                    ON CONFLICT(sbom_component_id,vulnerability_id,COALESCE(normalized_range,''))
-                    DO UPDATE SET version_matched=excluded.version_matched, display_name=excluded.display_name, ecosystem=excluded.ecosystem", conn);
+                    ON CONFLICT(sbom_component_id,vulnerability_id)
+                    DO UPDATE SET version_matched = coalesce(excluded.version_matched, sbom_vulnerabilities.version_matched),
+                                  normalized_range = coalesce(excluded.normalized_range, sbom_vulnerabilities.normalized_range),
+                                  display_name = coalesce(excluded.display_name, sbom_vulnerabilities.display_name),
+                                  ecosystem = coalesce(excluded.ecosystem, sbom_vulnerabilities.ecosystem)", conn);
                 ins.Parameters.AddWithValue(cid); ins.Parameters.AddWithValue(vid); ins.Parameters.AddWithValue(purl);
                 ins.Parameters.AddWithValue((object?)dname ?? DBNull.Value); ins.Parameters.AddWithValue((object?)ecosys ?? DBNull.Value);
                 ins.Parameters.AddWithValue((object?)range ?? DBNull.Value); ins.Parameters.AddWithValue((object?)vm ?? DBNull.Value);

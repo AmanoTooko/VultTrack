@@ -532,6 +532,27 @@ app.MapPost("/api/v1/component.search", async (NpgsqlDataSource db, ComponentSea
     return ApiResult.Ok(new { components, registryPackages });
 });
 SbomEndpoints.Map(app);
+
+app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (NpgsqlDataSource db, string? ecosystem, string? package, CancellationToken ct) =>
+{
+    var limit = string.IsNullOrWhiteSpace(package) ? "WHERE c.ecosystem = $1" : "WHERE lower(c.ecosystem) = lower($1) AND lower(c.package_name) = lower($2)";
+    await using var cmd = db.CreateCommand($"""
+        SELECT c.ecosystem, c.package_name, count(DISTINCT c.vulnerability_id) as cve_count, count(*) as fact_count
+        FROM vulnerability_affected_components c
+        {limit}
+        GROUP BY c.ecosystem, c.package_name
+        ORDER BY cve_count DESC
+        LIMIT 50
+        """);
+    cmd.Parameters.AddWithValue((object?)ecosystem ?? "go");
+    if (!string.IsNullOrWhiteSpace(package)) cmd.Parameters.AddWithValue(package);
+    var items = new List<object>();
+    await using var r = await cmd.ExecuteReaderAsync(ct);
+    while (await r.ReadAsync(ct))
+        items.Add(new { ecosystem = r.GetString(0), package = r.GetString(1), cveCount = r.GetInt32(2), factCount = r.GetInt32(3) });
+    return ApiResult.Ok(new { items });
+});
+
 app.Run();
 
 static string ToNpgsqlConnectionString(string value)

@@ -658,8 +658,8 @@ function renderSbomDetail(data, sbomId) {
   });
 
   const sorted = comps
-    .map(c => ({ ...c, vulns: grouped[c.id] || [], confirmedCount: (grouped[c.id] || []).filter(v => v.versionMatched === true || v.versionMatched == null).length }))
-    .sort((a, b) => (b.confirmedCount - a.confirmedCount) || (a.name || '').localeCompare(b.name || ''));
+    .map(c => ({ ...c, storeVulns: grouped[c.id] || [] }))
+    .sort((a, b) => ((b.vulnCount || 0) - (a.vulnCount || 0)) || (a.name || '').localeCompare(b.name || ''));
 
   el.detailPane.innerHTML = `
     <header class="detail-header">
@@ -679,13 +679,14 @@ function renderSbomDetail(data, sbomId) {
         <h3 class="section-h">Components (${sorted.length})</h3>
         <div class="card-stack">
           ${sorted.map(c => {
-            const hasVulns = c.confirmedCount > 0;
+            const hasVulns = (c.vulnCount || 0) > 0;
+            const displayVulns = c.storeVulns || [];
             return `
               <div class="info-card" style="border-left:3px solid ${hasVulns ? 'var(--risk)' : 'var(--line)'}">
                 <div class="info-card-row" ${hasVulns ? `style="cursor:pointer" data-expand="${escapeAttr(c.id)}"` : ''}>
                   <strong>${escapeHtml(c.name || c.purl)}</strong>
                   ${c.version ? `<span class="badge">${escapeHtml(c.version)}</span>` : ''}
-                  <span class="badge ${hasVulns ? 'risk' : ''}">${c.confirmedCount} affected</span>
+                  <span class="badge ${hasVulns ? 'risk' : ''}">${c.vulnCount || 0} affected</span>
                   ${hasVulns ? '<span class="badge" style="font-size:10px">&#9660;</span>' : ''}
                 </div>
                 <div class="chips">
@@ -697,7 +698,7 @@ function renderSbomDetail(data, sbomId) {
                   <table class="table" style="border:none;margin:0"><thead><tr>
                     <th>CVE</th><th>Severity</th><th>Range</th><th>Status</th>
                   </tr></thead><tbody>
-                  ${c.vulns.map(v => {
+                  ${displayVulns.map(v => {
                     const status = v.versionMatched === true ? 'AFFECTED' : v.versionMatched === false ? 'NOT AFFECTED' : '?';
                     const kl = v.versionMatched === true ? 'risk' : v.versionMatched === false ? 'none' : '';
                     return `<tr data-vuln-id="${escapeAttr(v.vulnerabilityId)}" class="finding-row" style="cursor:pointer">
@@ -706,6 +707,7 @@ function renderSbomDetail(data, sbomId) {
                       <td><code style="font-size:11px">${escapeHtml(v.versionRange || 'no range')}</code></td>
                       <td><span class="badge ${kl}">${status}</span></td></tr>`;
                   }).join('')}
+                  ${displayVulns.length < (c.vulnCount || 0) ? `<tr><td colspan="4" class="muted" style="text-align:center">+${(c.vulnCount || 0) - displayVulns.length} more CVEs (increase limit)</td></tr>` : ''}
                   </tbody></table>
                 </div>` : ''}
               </div>`;
