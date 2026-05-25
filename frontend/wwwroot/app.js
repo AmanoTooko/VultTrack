@@ -292,32 +292,35 @@ function renderSeverityCards(severities) {
 
 function renderAffectedGrouped(affected) {
   if (!affected.length) return '<p class="muted">No affected components</p>';
-  const byEco = {};
-  affected.forEach(a => {
-    const eco = a.ecosystem || 'unknown';
-    if (!byEco[eco]) byEco[eco] = [];
-    byEco[eco].push(a);
-  });
-  return Object.entries(byEco).sort((a,b) => b[1].length - a[1].length).map(([eco,items]) => `
-    <section class="detail-section">
-      <h3 class="section-h">${escapeHtml(eco)} (${items.length} entries)</h3>
-      <div class="card-stack">
-        ${items.map(a => `
-          <div class="info-card">
-            <div class="info-card-row">
-              <strong>${escapeHtml(a.display_name || a.package_name || '-')}</strong>
-              <span class="badge ${a.normalized_range ? '' : 'none'}">${escapeHtml(a.normalized_range || 'no range')}</span>
-              ${a.range_type ? `<span class="badge tag-source">${escapeHtml(a.range_type)}</span>` : ''}
+  return `
+    <div style="margin-bottom:10px">
+      <input type="text" id="affectedFilter" placeholder="Filter components..." 
+        style="width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px"
+        oninput="document.querySelectorAll('.aff-eco-group').forEach(g=>{const v=this.value.toLowerCase();g.style.display=v===''?'' : (g.textContent||'').toLowerCase().includes(v)?'':'none'})">
+    </div>
+    <div id="affectedGroups">
+    ${Object.entries(groupByEco(affected)).sort((a,b)=>b[1].length-a[1].length).map(([eco,items])=>`
+      <section class="detail-section aff-eco-group">
+        <h3 class="section-h">${escapeHtml(eco)} (${items.length})</h3>
+        <div class="card-stack" style="max-height:400px;overflow:auto">
+          ${items.map(a=>`
+            <div class="info-card">
+              <div class="info-card-row">
+                <strong>${escapeHtml(a.display_name||a.package_name||'-')}</strong>
+                <span class="badge ${a.normalized_range?'':'none'}">${escapeHtml((a.normalized_range||'no range').slice(0,60))}</span>
+                ${a.range_type?`<span class="badge tag-source">${escapeHtml(a.range_type)}</span>`:''}
+              </div>
             </div>
-            <div class="chips">
-              ${a.primary_purl ? `<code style="font-size:11px">${escapeHtml(a.primary_purl)}</code>` : ''}
-              ${a.primary_cpe23_uri ? `<code style="font-size:11px">${escapeHtml(a.primary_cpe23_uri)}</code>` : ''}
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    </section>
-  `).join('');
+          `).join('')}
+        </div>
+      </section>
+    `).join('')}
+    </div>`;
+}
+function groupByEco(affected) {
+  const m={};
+  affected.forEach(a=>{const e=a.ecosystem||'unknown';(m[e]=m[e]||[]).push(a)});
+  return m;
 }
 
 function renderRecordsBySource(records) {

@@ -148,9 +148,11 @@ public static class SbomEndpoints
                 FROM vulnerability_affected_components c
                 JOIN vulnerabilities v ON v.id=c.vulnerability_id
                 WHERE c.primary_purl LIKE $1||'%' OR c.primary_purl=$2
-                   OR (lower(c.display_name)=lower($3) AND ($4::text IS NULL OR lower(coalesce(c.ecosystem,'')) = lower($4)))
-                   OR (lower(c.package_name)=lower($3) AND ($4::text IS NULL OR lower(coalesce(c.ecosystem,'')) = lower($4)))
-                ORDER BY v.id, CASE WHEN c.normalized_range IS NOT NULL AND c.normalized_range <> '' THEN 0 ELSE 1 END, coalesce(v.max_cvss_score,0) DESC
+                   OR (lower(c.display_name)=lower($3) AND ($4::text IS NULL OR lower(coalesce(c.ecosystem,'')) LIKE lower($4) || '%'))
+                   OR (lower(c.package_name)=lower($3) AND ($4::text IS NULL OR lower(coalesce(c.ecosystem,'')) LIKE lower($4) || '%'))
+                ORDER BY v.id,
+                  CASE WHEN c.normalized_range IS NOT NULL AND c.normalized_range <> '' AND c.normalized_range ~ '^[<>]=?' THEN 0 ELSE 1 END,
+                  coalesce(v.max_cvss_score,0) DESC
                 LIMIT 200", conn);
             sq.Parameters.AddWithValue(pwv);
             sq.Parameters.AddWithValue(purlDec);

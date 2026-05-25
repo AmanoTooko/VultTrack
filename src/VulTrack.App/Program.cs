@@ -387,11 +387,15 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             """, queryId, ct),
         records = await QueryRecordsGroupedAsync(db, queryId, ct),
         affectedComponents = await QueryRowsAsync(db, """
-            select ecosystem, package_name, display_name, primary_purl, primary_cpe23_uri,
+            select ecosystem, package_name, display_name,
+                   left(coalesce(primary_purl,''), 80) as primary_purl,
+                   left(coalesce(primary_cpe23_uri,''), 80) as primary_cpe23_uri,
                    normalized_range, range_type, confidence, evidence_count, resolution_status
             from vulnerability_affected_components
             where vulnerability_id = $1
-            order by coalesce(ecosystem,'') desc, display_name, coalesce(normalized_range,'')
+            order by CASE WHEN range_type IN ('ECOSYSTEM','semver','vendor') THEN 0 ELSE 1 END,
+                     CASE WHEN normalized_range IS NOT NULL AND normalized_range <> '' THEN 0 ELSE 1 END,
+                     ecosystem nulls last, display_name
             limit 50
             """, queryId, ct),
         descriptions = await QueryRowsAsync(db, """
