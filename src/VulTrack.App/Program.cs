@@ -533,24 +533,74 @@ app.MapPost("/api/v1/component.search", async (NpgsqlDataSource db, ComponentSea
 });
 SbomEndpoints.Map(app);
 
-app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (NpgsqlDataSource db, string? ecosystem, string? package, CancellationToken ct) =>
+app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (NpgsqlDataSource db, string? ecosystem, string? package, string? version, CancellationToken ct) =>
 {
-    var limit = string.IsNullOrWhiteSpace(package) ? "WHERE c.ecosystem = $1" : "WHERE lower(c.ecosystem) = lower($1) AND lower(c.package_name) = lower($2)";
+    string whereFilter, limitClause = "LIMIT 50";
+    var parameters = new List<object> { (object?)ecosystem ?? "go" };
+    
+    if (string.IsNullOrWhiteSpace(package))
+    {
+        whereFilter = "WHERE lower(c.ecosystem) = lower($1)";
+    }
+    else
+    {
+        whereFilter = "WHERE lower(c.ecosystem) = lower($1) AND lower(c.package_name) = lower($2)";
+        parameters.Add(package);
+        limitClause = "";
+    }
+    
     await using var cmd = db.CreateCommand($"""
-        SELECT c.ecosystem, c.package_name, count(DISTINCT c.vulnerability_id) as cve_count, count(*) as fact_count
+        SELECT c.ecosystem, c.package_name,
+               count(DISTINCT c.vulnerability_id) as total_cves,
+               count(*) as fact_count
         FROM vulnerability_affected_components c
-        {limit}
+        {whereFilter}
         GROUP BY c.ecosystem, c.package_name
-        ORDER BY cve_count DESC
-        LIMIT 50
+        ORDER BY total_cves DESC
+        {limitClause}
         """);
-    cmd.Parameters.AddWithValue((object?)ecosystem ?? "go");
-    if (!string.IsNullOrWhiteSpace(package)) cmd.Parameters.AddWithValue(package);
+    for (var i = 0; i < parameters.Count; i++) cmd.Parameters.AddWithValue(parameters[i]);
     var items = new List<object>();
     await using var r = await cmd.ExecuteReaderAsync(ct);
     while (await r.ReadAsync(ct))
-        items.Add(new { ecosystem = r.GetString(0), package = r.GetString(1), cveCount = r.GetInt32(2), factCount = r.GetInt32(3) });
+    {
+        var eco = r.GetString(0);
+        var pkg = r.GetString(1);
+        var totalCves = r.GetInt32(2);
+        var factCount = r.GetInt32(3);
+        int? affectedIfVersion = null, notAffectedIfVersion = null;
+        
+        if (!string.IsNullOrWhiteSpace(version))
+        {
+            using var vc = db.CreateCommand("""
+                SELECT count(DISTINCT c.vulnerability_id)
+                FROM vulnerability_affected_components c
+                WHERE lower(c.ecosystem) = lower($1) AND lower(c.package_name) = lower($2)
+                  AND c.normalized_range IS NOT NULL
+                """);
+            vc.Parameters.AddWithValue(eco); vc.Parameters.AddWithValue(pkg);
+            await using var vr = await vc.ExecuteReaderAsync(ct);
+            if (await vr.ReadAsync(ct)) { var hasRange = vr.GetInt32(0); notAffectedIfVersion = totalCves - hasRange; affectedIfVersion = null; }
+        }
+        items.Add(new { ecosystem = eco, package = pkg, totalCves, affectedIfVersion, notAffectedIfVersion, factCount });
+    }
     return ApiResult.Ok(new { items });
+});
+
+app.MapGet("/api/v1/benchmark.packageCves", async (NpgsqlDataSource db, string name, CancellationToken ct) =>
+{
+    await using var cmd = db.CreateCommand("""
+        SELECT lower(coalesce(display_name,'')), count(DISTINCT vulnerability_id) as cves,
+               count(*) as facts, string_agg(DISTINCT ecosystem, ', ') as ecosystems
+        FROM vulnerability_affected_components
+        WHERE lower(coalesce(display_name,'')) = lower($1)
+        GROUP BY lower(coalesce(display_name,''))
+        """);
+    cmd.Parameters.AddWithValue(name);
+    await using var r = await cmd.ExecuteReaderAsync(ct);
+    if (await r.ReadAsync(ct))
+        return ApiResult.Ok(new { name, cves = r.GetInt32(1), facts = r.GetInt32(2), ecosystems = r.GetString(3) });
+    return ApiResult.Ok(new { name, cves = 0 });
 });
 
 app.Run();
