@@ -112,7 +112,11 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertDescriptionsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, IReadOnlyList<DescriptionDraft> descriptions, CancellationToken ct)
     {
-        var valid = descriptions.Where(x => !string.IsNullOrWhiteSpace(x.Value)).ToList();
+        var valid = descriptions
+            .Where(x => !string.IsNullOrWhiteSpace(x.Value))
+            .GroupBy(x => new { x.Lang, x.DescriptionType })
+            .Select(g => g.First())
+            .ToList();
         if (valid.Count == 0) return;
 
         if (valid.Count == 1)
@@ -122,6 +126,8 @@ public abstract class NormalizerBase(
                 insert into vulnerability_descriptions
                   (vulnerability_id, vulnerability_record_id, source_id, lang, description_type, value, is_selected)
                 values ($1,$2,$3,$4,$5,$6,$7)
+                on conflict (vulnerability_id, source_id, lang, description_type)
+                do update set value = excluded.value, is_selected = excluded.is_selected
                 """, connection);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
@@ -150,7 +156,7 @@ public abstract class NormalizerBase(
         }
 
         await using var batchCmd = new NpgsqlCommand(
-            $"insert into vulnerability_descriptions (vulnerability_id, vulnerability_record_id, source_id, lang, description_type, value, is_selected) values {string.Join(",", values)}",
+            $"insert into vulnerability_descriptions (vulnerability_id, vulnerability_record_id, source_id, lang, description_type, value, is_selected) values {string.Join(",", values)} on conflict (vulnerability_id, source_id, lang, description_type) do update set value = excluded.value, is_selected = excluded.is_selected",
             connection);
         for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
         await batchCmd.ExecuteNonQueryAsync(ct);

@@ -160,6 +160,8 @@ public static class SbomEndpoints
                 var vm = ver is not null && range is not null
                     ? VersionRangeMatcher.Matches(ver, range) : (bool?)null;
 
+                if (vm == false) continue;
+
                 await using var ins = new NpgsqlCommand(@"
                     INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched)
                     VALUES($1,$2,$3,$4,$5,$6,$7)

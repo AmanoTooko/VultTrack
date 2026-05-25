@@ -249,12 +249,14 @@ public sealed class NvdRawProcessor(
             var criteria = cpeMatch?["criteria"]?.GetValue<string>();
             if (string.IsNullOrWhiteSpace(criteria)) continue;
             var product = ParseProduct(criteria);
+            var versionRange = ExtractCpeVersionRange(cpeMatch);
+            var rangeType = versionRange is not null ? "cpe_match" : "cpe_match_no_range";
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_affected_facts
                   (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
                    cpe23_uri, package_name, normalized_package_name, version_range_raw, range_type, vulnerable,
                    source_specific)
-                values ($1,$2,$3,$4,'cpe','cpe',$5,$6,lower($6),$7,'cpe_match',$8,$9::jsonb)
+                values ($1,$2,$3,$4,'cpe','cpe',$5,$6,lower($6),$7,$8,$9,$10::jsonb)
                 """, conn);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
@@ -262,14 +264,32 @@ public sealed class NvdRawProcessor(
             cmd.Parameters.AddWithValue(record.RawIndexId);
             cmd.Parameters.AddWithValue(criteria);
             cmd.Parameters.AddWithValue(product);
-            cmd.Parameters.AddWithValue(criteria);
+            cmd.Parameters.AddWithValue((object?)versionRange ?? DBNull.Value);
+            cmd.Parameters.AddWithValue(rangeType);
             cmd.Parameters.AddWithValue(cpeMatch?["vulnerable"]?.GetValue<bool>() ?? true);
             cmd.Parameters.AddWithValue(cpeMatch?.ToJsonString() ?? "{}");
             await cmd.ExecuteNonQueryAsync(ct);
-            facts.Add(new AffectedFactDraft("cpe", "cpe", product, null, criteria, "cpe_match", cpeMatch?.ToJsonString() ?? "{}"));
+            facts.Add(new AffectedFactDraft("cpe", "cpe", product, null, criteria, rangeType, cpeMatch?.ToJsonString() ?? "{}"));
         }
 
         return facts;
+    }
+
+    private static string? ExtractCpeVersionRange(JsonNode? cpeMatch)
+    {
+        if (cpeMatch is null) return null;
+        var parts = new List<string>();
+        var startInc = cpeMatch["versionStartIncluding"]?.GetValue<string>();
+        var startExc = cpeMatch["versionStartExcluding"]?.GetValue<string>();
+        var endInc = cpeMatch["versionEndIncluding"]?.GetValue<string>();
+        var endExc = cpeMatch["versionEndExcluding"]?.GetValue<string>();
+
+        if (!string.IsNullOrWhiteSpace(startInc)) parts.Add($">= {startInc}");
+        if (!string.IsNullOrWhiteSpace(startExc)) parts.Add($"> {startExc}");
+        if (!string.IsNullOrWhiteSpace(endInc)) parts.Add($"<= {endInc}");
+        if (!string.IsNullOrWhiteSpace(endExc)) parts.Add($"< {endExc}");
+
+        return parts.Count > 0 ? string.Join(", ", parts) : null;
     }
 
     private static async Task MarkNormalizedAsync(NpgsqlConnection conn, IReadOnlyList<Guid> rawIndexIds, CancellationToken ct)

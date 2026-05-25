@@ -217,6 +217,7 @@ function renderDetail(data) {
       ${descriptions.length ? renderDescriptionCards(descriptions) : ''}
       ${severities.length ? renderSeverityCards(severities) : ''}
       ${affected.length ? renderAffectedCards(affected) : ''}
+      ${refs.length ? renderSourceLinks(refs) : ''}
       ${refs.length ? renderReferenceCards(refs) : ''}
     </div>
   `;
@@ -280,6 +281,35 @@ function renderAffectedCards(affected) {
             <div class="chips">
               ${c.ecosystem ? `<span class="badge">${escapeHtml(c.ecosystem)}</span>` : ''}
               ${c.range_type ? `<span class="badge">${escapeHtml(c.range_type)}</span>` : ''}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderSourceLinks(refs) {
+  const bySource = {};
+  refs.forEach(r => {
+    const src = r.code || 'unknown';
+    if (!bySource[src]) bySource[src] = [];
+    bySource[src].push(r);
+  });
+  return `
+    <section class="detail-section">
+      <h3 class="section-h">Source Links</h3>
+      <div class="card-stack">
+        ${Object.entries(bySource).map(([src, items]) => `
+          <div class="info-card">
+            <div class="info-card-row"><strong>${escapeHtml(src)}</strong></div>
+            <div style="margin-top:6px">
+              ${items.slice(0, 5).map(r => `
+                <a href="${escapeAttr(r.url)}" target="_blank" rel="noreferrer" class="ref-link" style="display:block;margin:2px 0">
+                  ${escapeHtml(shortUrl(r.url))}
+                </a>
+              `).join('')}
+              ${items.length > 5 ? `<span class="muted">+${items.length - 5} more</span>` : ''}
             </div>
           </div>
         `).join('')}
@@ -609,20 +639,34 @@ async function loadSbomDetail(sbomId) {
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading...</h2></div>';
   try {
     const data = await api(`/api/v1/sbom.get?id=${encodeURIComponent(sbomId)}`);
-    renderSbomDetail(data);
+    renderSbomDetail(data, sbomId);
   } catch (e) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Error</h2><p>${escapeHtml(e.message)}</p></div>`;
   }
 }
 
-function renderSbomDetail(data) {
+function renderSbomDetail(data, sbomId) {
   const s = data.sbom;
+  const vulns = data.vulnerabilities || [];
+  const comps = data.components || [];
+
+  const grouped = {};
+  vulns.forEach(v => {
+    const cid = v.componentId || 'other';
+    if (!grouped[cid]) grouped[cid] = [];
+    grouped[cid].push(v);
+  });
+
+  const sorted = comps
+    .map(c => ({ ...c, vulns: grouped[c.id] || [], confirmedCount: (grouped[c.id] || []).filter(v => v.versionMatched === true || v.versionMatched == null).length }))
+    .sort((a, b) => (b.confirmedCount - a.confirmedCount) || (a.name || '').localeCompare(b.name || ''));
+
   el.detailPane.innerHTML = `
     <header class="detail-header">
       <div class="detail-title"><h2>${escapeHtml(s.name)}</h2></div>
       <div class="detail-meta-row">
         <span class="kv-inline">Components <b>${s.componentCount}</b></span>
-        <span class="kv-inline">Vulns matched <b>${s.matchedCount}</b></span>
+        <span class="kv-inline">Affected findings <b>${s.matchedCount}</b></span>
         <span class="kv-inline">Format <b>${s.format}</b></span>
       </div>
       <div style="display:flex;gap:8px;margin-top:8px">
@@ -632,28 +676,42 @@ function renderSbomDetail(data) {
     </header>
     <div class="detail-sections" style="margin-top:16px">
       <section class="detail-section">
-        <h3 class="section-h">Components</h3>
+        <h3 class="section-h">Components (${sorted.length})</h3>
         <div class="card-stack">
-          ${data.components.map(c => `
-            <div class="info-card">
-              <div class="info-card-row">
-                <strong>${escapeHtml(c.name || c.purl)}</strong>
-                ${c.version ? `<span class="badge">${escapeHtml(c.version)}</span>` : ''}
-                ${c.vulnCount > 0 ? `<span class="badge high">${c.vulnCount} vulns</span>` : '<span class="badge">no vulns</span>'}
-              </div>
-              <div class="chips">
-                ${c.ecosystem ? `<span class="badge">${escapeHtml(c.ecosystem)}</span>` : ''}
-                <code style="font-size:11px;color:var(--muted)">${escapeHtml(c.purl)}</code>
-              </div>
-            </div>
-          `).join('')}
+          ${sorted.map(c => {
+            const hasVulns = c.confirmedCount > 0;
+            return `
+              <div class="info-card" style="border-left:3px solid ${hasVulns ? 'var(--risk)' : 'var(--line)'}">
+                <div class="info-card-row" ${hasVulns ? `style="cursor:pointer" data-expand="${escapeAttr(c.id)}"` : ''}>
+                  <strong>${escapeHtml(c.name || c.purl)}</strong>
+                  ${c.version ? `<span class="badge">${escapeHtml(c.version)}</span>` : ''}
+                  <span class="badge ${hasVulns ? 'risk' : ''}">${c.confirmedCount} affected</span>
+                  ${hasVulns ? '<span class="badge" style="font-size:10px">&#9660;</span>' : ''}
+                </div>
+                <div class="chips">
+                  ${c.ecosystem ? `<span class="badge">${escapeHtml(c.ecosystem)}</span>` : ''}
+                  <code style="font-size:11px;color:var(--muted)">${escapeHtml(c.purl)}</code>
+                </div>
+                ${hasVulns ? `
+                <div class="sbom-expand" id="expand-${c.id}" style="display:none;margin-top:10px">
+                  <table class="table" style="border:none;margin:0"><thead><tr>
+                    <th>CVE</th><th>Severity</th><th>Range</th><th>Status</th>
+                  </tr></thead><tbody>
+                  ${c.vulns.map(v => {
+                    const status = v.versionMatched === true ? 'AFFECTED' : v.versionMatched === false ? 'NOT AFFECTED' : '?';
+                    const kl = v.versionMatched === true ? 'risk' : v.versionMatched === false ? 'none' : '';
+                    return `<tr data-vuln-id="${escapeAttr(v.vulnerabilityId)}" class="finding-row" style="cursor:pointer">
+                      <td><span class="finding-cve">${escapeHtml(v.primaryIdentifier)}</span></td>
+                      <td>${severityBadge(v.severityLabel, v.cvssScore)}</td>
+                      <td><code style="font-size:11px">${escapeHtml(v.versionRange || 'no range')}</code></td>
+                      <td><span class="badge ${kl}">${status}</span></td></tr>`;
+                  }).join('')}
+                  </tbody></table>
+                </div>` : ''}
+              </div>`;
+          }).join('')}
         </div>
       </section>
-      ${data.vulnerabilities.length ? `
-      <section class="detail-section">
-        <h3 class="section-h">Findings by Component</h3>
-        ${renderGroupedFindings(data.vulnerabilities, data.components)}
-      </section>` : ''}
     </div>
   `;
 
@@ -674,43 +732,16 @@ function renderSbomDetail(data) {
     } catch(e) { alert('Delete failed: ' + e.message); }
   });
 
-  // Make vuln cards AND table rows clickable
+  el.detailPane.querySelectorAll('[data-expand]').forEach(row => {
+    row.addEventListener('click', () => {
+      const target = document.getElementById('expand-' + row.dataset.expand);
+      if (target) target.style.display = target.style.display === 'none' ? 'block' : 'none';
+    });
+  });
+
   el.detailPane.querySelectorAll('[data-vuln-id]').forEach(el => {
     el.addEventListener('click', () => loadVulnerabilityDetail(el.dataset.vulnId));
   });
 }
 
-function renderGroupedFindings(vulnerabilities, components) {
-  const byComp = {};
-  vulnerabilities.forEach(v => {
-    const cid = v.componentId || 'other';
-    if (!byComp[cid]) {
-      const comp = components.find(c => c.id === cid) || {};
-      byComp[cid] = { name: comp.name || v.componentName || 'component', version: comp.version || '', ecosystem: v.ecosystem || '', vulns: [] };
-    }
-    byComp[cid].vulns.push(v);
-  });
-  return Object.values(byComp).map(g => {
-    const matched = g.vulns.filter(v => v.versionMatched === true).length;
-    const notAffected = g.vulns.filter(v => v.versionMatched === false).length;
-    return `<div style="margin-bottom:20px;border:1px solid var(--line);border-radius:10px;overflow:hidden">
-      <div class="finding-header" style="padding:10px 14px;background:#f9faf7;border-bottom:1px solid var(--line)">
-        <strong>${escapeHtml(g.name)}</strong>
-        ${g.version ? `<span class="badge">v${escapeHtml(g.version)}</span>` : ''}
-        <span class="badge tag-source">${escapeHtml(g.ecosystem)}</span>
-        <span class="badge high">${matched} affected</span>
-        ${notAffected > 0 ? `<span class="badge none">${notAffected} not affected</span>` : ''}
-      </div>
-      <table class="table" style="border:none;margin:0"><thead><tr><th>CVE</th><th>Severity</th><th>Range</th><th>Status</th></tr></thead><tbody>
-      ${g.vulns.map(v => {
-        const s = v.versionMatched === true ? 'AFFECTED' : v.versionMatched === false ? 'NOT AFFECTED' : '?';
-        const kl = v.versionMatched === true ? 'risk' : v.versionMatched === false ? 'none' : '';
-        return `<tr data-vuln-id="${escapeAttr(v.vulnerabilityId)}" class="finding-row" style="cursor:pointer">
-          <td><span class="finding-cve">${escapeHtml(v.primaryIdentifier)}</span></td>
-          <td>${severityBadge(v.severityLabel, v.cvssScore)}</td>
-          <td><code style="font-size:11px">${escapeHtml(v.versionRange || 'no range')}</code></td>
-          <td><span class="badge ${kl}">${s}</span></td></tr>`;
-      }).join('')}
-      </tbody></table></div>`;
-  }).join('');
-}
+
