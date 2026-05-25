@@ -146,10 +146,17 @@ public static class SbomEndpoints
             sq.Parameters.AddWithValue((object?)name ?? DBNull.Value);
             sq.Parameters.AddWithValue((object?)meco ?? DBNull.Value);
 
-            await using var sr = await sq.ExecuteReaderAsync(ct);
-            while (await sr.ReadAsync(ct))
+            var matches = new List<(Guid VulnId, string? PrimaryId, string? Title, string? SeveLabel, decimal? Cvss,
+                string? DisplayName, string? Eco, string? Range)>();
+            await using (var sr = await sq.ExecuteReaderAsync(ct))
+                while (await sr.ReadAsync(ct))
+                    matches.Add((sr.GetGuid(0), sr.IsDBNull(1) ? null : sr.GetString(1),
+                        sr.IsDBNull(2) ? null : sr.GetString(2), sr.IsDBNull(3) ? null : sr.GetString(3),
+                        sr.IsDBNull(4) ? (decimal?)null : sr.GetDecimal(4), sr.IsDBNull(5) ? null : sr.GetString(5),
+                        sr.IsDBNull(6) ? null : sr.GetString(6), sr.IsDBNull(7) ? null : sr.GetString(7)));
+
+            foreach (var (vid, _, _, _, _, dname, ecosys, range) in matches)
             {
-                var range = sr.IsDBNull(7) ? null : sr.GetString(7);
                 var vm = ver is not null && range is not null
                     ? VersionRangeMatcher.Matches(ver, range) : (bool?)null;
 
@@ -157,13 +164,9 @@ public static class SbomEndpoints
                     INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched)
                     VALUES($1,$2,$3,$4,$5,$6,$7)
                     ON CONFLICT(sbom_component_id,vulnerability_id,COALESCE(normalized_range,'')) DO NOTHING", conn);
-                ins.Parameters.AddWithValue(cid);
-                ins.Parameters.AddWithValue(sr.GetGuid(0));
-                ins.Parameters.AddWithValue(purl);
-                ins.Parameters.AddWithValue((object?)sr.GetValue(6) ?? DBNull.Value);
-                ins.Parameters.AddWithValue((object?)sr.GetValue(5) ?? DBNull.Value);
-                ins.Parameters.AddWithValue((object?)sr.GetValue(7) ?? DBNull.Value);
-                ins.Parameters.AddWithValue((object?)vm ?? DBNull.Value);
+                ins.Parameters.AddWithValue(cid); ins.Parameters.AddWithValue(vid); ins.Parameters.AddWithValue(purl);
+                ins.Parameters.AddWithValue((object?)dname ?? DBNull.Value); ins.Parameters.AddWithValue((object?)ecosys ?? DBNull.Value);
+                ins.Parameters.AddWithValue((object?)range ?? DBNull.Value); ins.Parameters.AddWithValue((object?)vm ?? DBNull.Value);
                 await ins.ExecuteNonQueryAsync(ct);
                 m++;
             }
