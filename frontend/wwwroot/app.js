@@ -305,13 +305,13 @@ function renderAffectedGrouped(affected) {
         ${items.map(a => `
           <div class="info-card">
             <div class="info-card-row">
-              <strong>${escapeHtml(a.displayName || a.packageName || '-')}</strong>
-              <span class="badge ${a.normalizedRange ? '' : 'none'}">${escapeHtml(a.normalizedRange || 'no range')}</span>
-              ${a.rangeType ? `<span class="badge tag-source">${escapeHtml(a.rangeType)}</span>` : ''}
+              <strong>${escapeHtml(a.display_name || a.package_name || '-')}</strong>
+              <span class="badge ${a.normalized_range ? '' : 'none'}">${escapeHtml(a.normalized_range || 'no range')}</span>
+              ${a.range_type ? `<span class="badge tag-source">${escapeHtml(a.range_type)}</span>` : ''}
             </div>
             <div class="chips">
-              ${a.primaryPurl ? `<code style="font-size:11px">${escapeHtml(a.primaryPurl)}</code>` : ''}
-              ${a.primaryCpe23Uri ? `<code style="font-size:11px">${escapeHtml(a.primaryCpe23Uri)}</code>` : ''}
+              ${a.primary_purl ? `<code style="font-size:11px">${escapeHtml(a.primary_purl)}</code>` : ''}
+              ${a.primary_cpe23_uri ? `<code style="font-size:11px">${escapeHtml(a.primary_cpe23_uri)}</code>` : ''}
             </div>
           </div>
         `).join('')}
@@ -751,15 +751,21 @@ function renderSbomDetail(data, sbomId) {
                 ${hasVulns ? `
                 <div class="sbom-expand" id="expand-${c.id}" style="display:none;margin-top:10px">
                   <table class="table" style="border:none;margin:0"><thead><tr>
-                    <th>CVE</th><th>Severity</th><th>Range</th><th>Status</th>
+                    <th>CVE</th><th>Severity</th><th>Version Range</th><th>Status</th>
                   </tr></thead><tbody>
                   ${displayVulns.map(v => {
-                    const status = v.versionMatched === true ? 'AFFECTED' : v.versionMatched === false ? 'NOT AFFECTED' : '?';
-                    const kl = v.versionMatched === true ? 'risk' : v.versionMatched === false ? 'none' : '';
+                    const isMatched = v.versionMatched === true;
+                    const isFalse = v.versionMatched === false;
+                    const hasRange = v.versionRange && v.versionRange !== '';
+                    const status = isMatched ? 'AFFECTED' : isFalse ? 'FIXED' : (hasRange ? '?' : 'unknown');
+                    const kl = isMatched ? 'risk' : isFalse ? 'none' : '';
+                    const rangeDisplay = hasRange 
+                      ? `<code style="font-size:11px">${escapeHtml(v.versionRange)}</code>`
+                      : `<span class="muted" style="font-size:11px" title="Alpine secfixes: no version data">no version data</span>`;
                     return `<tr data-vuln-id="${escapeAttr(v.vulnerabilityId)}" class="finding-row" style="cursor:pointer">
                       <td><span class="finding-cve">${escapeHtml(v.primaryIdentifier)}</span></td>
                       <td>${severityBadge(v.severityLabel, v.cvssScore)}</td>
-                      <td><code style="font-size:11px">${escapeHtml(v.versionRange || 'no range')}</code></td>
+                      <td>${rangeDisplay}</td>
                       <td><span class="badge ${kl}">${status}</span></td></tr>`;
                   }).join('')}
                   ${displayVulns.length < (c.vulnCount || 0) ? `<tr><td colspan="4" class="muted" style="text-align:center">+${(c.vulnCount || 0) - displayVulns.length} more CVEs (increase limit)</td></tr>` : ''}
