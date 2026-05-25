@@ -463,6 +463,33 @@ input:focus {
   padding: 8px 18px;
 }
 
+.finding-table {
+  font-size: 13px;
+}
+
+.finding-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.finding-row:hover {
+  background: #edf7f3;
+}
+
+.finding-cve {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.finding-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 0 4px;
+}
+
 .summary {
   max-width: 1120px;
   color: #3f473d;

@@ -652,24 +652,26 @@ function renderSbomDetail(data) {
       </section>
       ${data.vulnerabilities.length ? `
       <section class="detail-section">
-        <h3 class="section-h">Vulnerabilities (${data.vulnerabilities.length})</h3>
-        <div class="card-stack">
-          ${data.vulnerabilities.slice(0,100).map(v => {
-            const match = v.versionMatched === true ? 'match' : v.versionMatched === false ? 'miss' : '?';
+        <h3 class="section-h">Findings (${data.vulnerabilities.length})</h3>
+        <div style="max-height:70vh;overflow:auto">
+        <table class="table finding-table">
+          <thead><tr>
+            <th>Component</th><th>Vulnerability</th><th>Severity</th><th>Version Range</th><th>Match</th>
+          </tr></thead>
+          <tbody>
+          ${data.vulnerabilities.slice(0,200).map(v => {
+            const match = v.versionMatched === true ? 'MATCH' : v.versionMatched === false ? 'miss' : '';
             return `
-            <div class="info-card" style="cursor:pointer" data-vuln-id="${escapeAttr(v.vulnerabilityId)}">
-              <div class="info-card-row">
-                <strong>${escapeHtml(v.primaryIdentifier)}</strong>
-                ${severityBadge(v.severityLabel, v.cvssScore)}
-                ${match === 'match' ? '<span class="badge high">VERSION MATCH</span>' : match === 'miss' ? '<span class="badge">range miss</span>' : ''}
-              </div>
-              <div class="chips">
-                ${v.componentName ? `<span class="badge">${escapeHtml(v.componentName)}</span>` : ''}
-                ${v.versionRange ? `<span class="badge">${escapeHtml(v.versionRange)}</span>` : ''}
-                ${v.ecosystem ? `<span class="badge">${escapeHtml(v.ecosystem)}</span>` : ''}
-              </div>
-            </div>`;
+            <tr data-vuln-id="${escapeAttr(v.vulnerabilityId)}" style="cursor:pointer" class="finding-row">
+              <td><small>${escapeHtml(v.componentName || v.ecosystem || '-')}</small></td>
+              <td><span class="finding-cve">${escapeHtml(v.primaryIdentifier)}</span></td>
+              <td>${severityBadge(v.severityLabel, v.cvssScore)}</td>
+              <td><code style="font-size:11px">${escapeHtml(v.versionRange || '-')}</code></td>
+              <td><span class="badge ${match === 'MATCH' ? 'high' : 'none'}">${match || '?'}</span></td>
+            </tr>`;
           }).join('')}
+          </tbody>
+        </table>
         </div>
       </section>` : ''}
     </div>
@@ -692,8 +694,8 @@ function renderSbomDetail(data) {
     } catch(e) { alert('Delete failed: ' + e.message); }
   });
 
-  // Make vuln cards clickable
-  el.detailPane.querySelectorAll('[data-vuln-id]').forEach(card => {
-    card.addEventListener('click', () => loadVulnerabilityDetail(card.dataset.vulnId));
+  // Make vuln cards AND table rows clickable
+  el.detailPane.querySelectorAll('[data-vuln-id]').forEach(el => {
+    el.addEventListener('click', () => loadVulnerabilityDetail(el.dataset.vulnId));
   });
 }
