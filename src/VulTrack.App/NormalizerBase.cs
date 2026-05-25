@@ -265,7 +265,7 @@ public abstract class NormalizerBase(
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_weaknesses
                   (vulnerability_id, vulnerability_record_id, source_id, weakness_type, weakness_id, description)
-                values ($1,$2,$3,$4,$5,$6)
+                values ($1,$2,$3,$4,$5,$6) on conflict (vulnerability_id, source_id, coalesce(weakness_id,'')) do nothing
                 """, connection);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);

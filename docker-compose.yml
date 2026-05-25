@@ -5,13 +5,13 @@ services:
     command:
       - postgres
       - -c
-      - shared_buffers=2GB
+      - shared_buffers=1GB
       - -c
-      - effective_cache_size=6GB
+      - effective_cache_size=3GB
       - -c
-      - work_mem=128MB
+      - work_mem=16MB
       - -c
-      - maintenance_work_mem=512MB
+      - maintenance_work_mem=256MB
       - -c
       - checkpoint_timeout=15min
       - -c

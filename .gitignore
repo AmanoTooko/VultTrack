@@ -1,5 +1,6 @@
 .env
 data/
+pgdata/
 node_modules/
 plugins/fetchers/node_modules/
 plugins/fetchers/dist/
@@ -10,3 +11,10 @@ tests/**/obj/
 .DS_Store
 TestResults/
 coverage/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+/bin/
+/obj/

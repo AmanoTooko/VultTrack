@@ -27,16 +27,18 @@ el.refreshButton.addEventListener('click', () => {
   runSearch();
 });
 
-el.tabs.forEach((tab) => {
-  tab.addEventListener('click', () => {
-    state.mode = tab.dataset.mode;
-    el.tabs.forEach((item) => item.classList.toggle('is-active', item === tab));
-    el.componentFields.hidden = state.mode !== 'component';
-    el.queryLabel.textContent = state.mode === 'component' ? 'Component name or purl' : 'Identifier or keyword';
-    el.queryInput.placeholder = state.mode === 'component' ? 'pkg:maven/org.apache.logging.log4j/log4j-core' : 'CVE-2021-44228';
-    runSearch();
+  el.tabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      state.mode = tab.dataset.mode;
+      el.tabs.forEach((item) => item.classList.toggle('is-active', item === tab));
+      el.componentFields.hidden = state.mode !== 'component';
+      el.searchForm.hidden = state.mode === 'sbom';
+      el.queryLabel.textContent = state.mode === 'component' ? 'Component name, vendor, or purl' : 'Identifier or keyword';
+      el.queryInput.placeholder = state.mode === 'component' ? 'pkg:maven/org.apache.logging.log4j/log4j-core' : 'CVE-2021-44228';
+      if (state.mode === 'sbom') loadSbomList();
+      else runSearch();
+    });
   });
-});
 
 el.searchForm.addEventListener('submit', (event) => {
   event.preventDefault();
@@ -527,6 +529,171 @@ function escapeAttr(value) {
 }
 
 loadStatus();
-// Initial load: show latest 10 vulnerabilities
+// Initial load: show latest 10
 el.queryInput.value = '';
 setTimeout(() => runSearch(), 100);
+
+// ===== SBOM Management =====
+
+async function loadSbomList() {
+  el.searchForm.hidden = true;
+  el.detailPane.innerHTML = '';
+  renderSbomUpload();
+  try {
+    const data = await api('/api/v1/sbom.list');
+    renderSbomItems(data.items);
+  } catch (e) {
+    document.getElementById('sbomUploadStatus').textContent = `Error loading list: ${escapeHtml(e.message)}`;
+  }
+}
+
+function renderSbomUpload() {
+  el.resultList.innerHTML = `
+    <div class="search-form">
+      <label class="upload-area">
+        <span>Upload CycloneDX SBOM (JSON)</span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <input type="file" id="sbomFileInput" accept=".json,application/json" style="display:none">
+          <button type="button" class="primary-button upload-btn" id="sbomUploadBtn">Choose file & Upload</button>
+          <span class="muted" id="sbomUploadStatus"></span>
+        </div>
+      </label>
+    </div>
+    <div id="sbomListItems"></div>
+  `;
+  setupSbomUpload();
+}
+
+function renderSbomItems(items) {
+  const list = document.getElementById('sbomListItems');
+  if (!list) return;
+  list.innerHTML = items.length
+    ? `<div class="muted result-item" style="font-weight:600">Uploaded SBOMs (${items.length})</div>
+       ${items.map(i => `
+         <button class="result-item" type="button" data-sbom-id="${escapeAttr(i.id)}" style="display:grid;gap:4px">
+           <div class="result-main"><span class="result-title">${escapeHtml(i.name)}</span></div>
+           <div class="result-meta">
+             <span class="badge">${i.componentCount} components</span>
+             <span class="badge ${i.matchedCount > 0 ? 'high' : ''}">${i.matchedCount} vulns</span>
+             <span class="badge">${date(i.uploadedAt)}</span>
+           </div>
+         </button>
+       `).join('')}`
+    : '<div class="muted result-item">No SBOMs uploaded yet</div>';
+  list.querySelectorAll('[data-sbom-id]').forEach(btn => {
+    btn.addEventListener('click', () => loadSbomDetail(btn.dataset.sbomId));
+  });
+}
+
+function setupSbomUpload() {
+  const btn = document.getElementById('sbomUploadBtn');
+  const fileInput = document.getElementById('sbomFileInput');
+  const status = document.getElementById('sbomUploadStatus');
+  if (!btn || !fileInput) return;
+  btn.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files[0];
+    if (!file) return;
+    status.textContent = 'Uploading...';
+    try {
+      const text = await file.text();
+      const data = await api('/api/v1/sbom.upload', { method: 'POST', body: text });
+      status.textContent = `Uploaded: ${data.name} (${data.componentCount} components)`;
+      loadSbomList();
+    } catch (e) {
+      status.textContent = `Error: ${escapeHtml(e.message)}`;
+    }
+  });
+}
+
+async function loadSbomDetail(sbomId) {
+  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading...</h2></div>';
+  try {
+    const data = await api(`/api/v1/sbom.get?id=${encodeURIComponent(sbomId)}`);
+    renderSbomDetail(data);
+  } catch (e) {
+    el.detailPane.innerHTML = `<div class="empty-state"><h2>Error</h2><p>${escapeHtml(e.message)}</p></div>`;
+  }
+}
+
+function renderSbomDetail(data) {
+  const s = data.sbom;
+  el.detailPane.innerHTML = `
+    <header class="detail-header">
+      <div class="detail-title"><h2>${escapeHtml(s.name)}</h2></div>
+      <div class="detail-meta-row">
+        <span class="kv-inline">Components <b>${s.componentCount}</b></span>
+        <span class="kv-inline">Vulns matched <b>${s.matchedCount}</b></span>
+        <span class="kv-inline">Format <b>${s.format}</b></span>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="tab" type="button" id="sbomMatchBtn" style="height:32px;padding:0 12px">Match Vulnerabilities</button>
+        <button class="tab" type="button" id="sbomDeleteBtn" style="height:32px;padding:0 12px;color:var(--risk)">Delete</button>
+      </div>
+    </header>
+    <div class="detail-sections" style="margin-top:16px">
+      <section class="detail-section">
+        <h3 class="section-h">Components</h3>
+        <div class="card-stack">
+          ${data.components.map(c => `
+            <div class="info-card">
+              <div class="info-card-row">
+                <strong>${escapeHtml(c.name || c.purl)}</strong>
+                ${c.version ? `<span class="badge">${escapeHtml(c.version)}</span>` : ''}
+                ${c.vulnCount > 0 ? `<span class="badge high">${c.vulnCount} vulns</span>` : '<span class="badge">no vulns</span>'}
+              </div>
+              <div class="chips">
+                ${c.ecosystem ? `<span class="badge">${escapeHtml(c.ecosystem)}</span>` : ''}
+                <code style="font-size:11px;color:var(--muted)">${escapeHtml(c.purl)}</code>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      </section>
+      ${data.vulnerabilities.length ? `
+      <section class="detail-section">
+        <h3 class="section-h">Vulnerabilities (${data.vulnerabilities.length})</h3>
+        <div class="card-stack">
+          ${data.vulnerabilities.slice(0,100).map(v => {
+            const match = v.versionMatched === true ? 'match' : v.versionMatched === false ? 'miss' : '?';
+            return `
+            <div class="info-card" style="cursor:pointer" data-vuln-id="${escapeAttr(v.vulnerabilityId)}">
+              <div class="info-card-row">
+                <strong>${escapeHtml(v.primaryIdentifier)}</strong>
+                ${severityBadge(v.severityLabel, v.cvssScore)}
+                ${match === 'match' ? '<span class="badge high">VERSION MATCH</span>' : match === 'miss' ? '<span class="badge">range miss</span>' : ''}
+              </div>
+              <div class="chips">
+                ${v.componentName ? `<span class="badge">${escapeHtml(v.componentName)}</span>` : ''}
+                ${v.versionRange ? `<span class="badge">${escapeHtml(v.versionRange)}</span>` : ''}
+                ${v.ecosystem ? `<span class="badge">${escapeHtml(v.ecosystem)}</span>` : ''}
+              </div>
+            </div>`;
+          }).join('')}
+        </div>
+      </section>` : ''}
+    </div>
+  `;
+
+  document.getElementById('sbomMatchBtn')?.addEventListener('click', async () => {
+    document.getElementById('sbomMatchBtn').textContent = 'Matching...';
+    try {
+      await api('/api/v1/sbom.match', { method: 'POST', body: JSON.stringify({ sbomId }) });
+      loadSbomDetail(sbomId);
+    } catch(e) { alert('Match failed: ' + e.message); }
+  });
+
+  document.getElementById('sbomDeleteBtn')?.addEventListener('click', async () => {
+    if (!confirm('Delete this SBOM?')) return;
+    try {
+      await api('/api/v1/sbom.delete', { method: 'POST', body: JSON.stringify({ sbomId }) });
+      el.detailPane.innerHTML = '<div class="empty-state"><h2>Deleted</h2></div>';
+      loadSbomList();
+    } catch(e) { alert('Delete failed: ' + e.message); }
+  });
+
+  // Make vuln cards clickable
+  el.detailPane.querySelectorAll('[data-vuln-id]').forEach(card => {
+    card.addEventListener('click', () => loadVulnerabilityDetail(card.dataset.vulnId));
+  });
+}

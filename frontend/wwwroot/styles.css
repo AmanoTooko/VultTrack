@@ -452,6 +452,17 @@ input:focus {
   word-break: break-all;
 }
 
+.upload-area {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+}
+
+.upload-btn {
+  width: fit-content;
+  padding: 8px 18px;
+}
+
 .summary {
   max-width: 1120px;
   color: #3f473d;

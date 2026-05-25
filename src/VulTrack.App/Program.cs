@@ -530,6 +530,104 @@ app.MapPost("/api/v1/component.search", async (NpgsqlDataSource db, ComponentSea
     return ApiResult.Ok(new { components, registryPackages });
 });
 
+// ===== SBOM Management =====
+
+app.MapPost("/api/v1/sbom.upload", async (NpgsqlDataSource db, HttpRequest request, CancellationToken ct) =>
+{
+    try
+    {
+        using var reader = new StreamReader(request.Body);
+        var json = await reader.ReadToEndAsync(ct);
+        var doc = JsonNode.Parse(json);
+        if (doc is null) return ApiResult.Error("INVALID_SBOM", "Cannot parse JSON");
+
+        var meta = doc["metadata"];
+        var cname = meta?["component"]?["name"]?.GetValue<string>() ?? "unknown";
+        var cver = meta?["component"]?["version"]?.GetValue<string>() ?? "";
+        var name = $"{cname} {cver}".Trim();
+
+        var sbomId = Guid.NewGuid();
+        var components = doc["components"]?.AsArray() ?? [];
+        var parsed = new List<(string purl, string? name, string? version, string? ecosystem, string? type)>();
+        foreach (var comp in components)
+        {
+            var purl = comp?["purl"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(purl)) continue;
+            parsed.Add((purl, comp?["name"]?.GetValue<string>(), comp?["version"]?.GetValue<string>(),
+                EcosystemFromCyclonePurl(purl), comp?["type"]?.GetValue<string>()));
+        }
+
+        await using var cmd = db.CreateCommand("INSERT INTO sbom_uploads(id,name,format,metadata,component_count) VALUES ($1,$2,\'cyclonedx\',$3,$4)");
+        cmd.Parameters.AddWithValue(sbomId);
+        cmd.Parameters.AddWithValue(name);
+        cmd.Parameters.AddWithValue(json);
+        cmd.Parameters.AddWithValue(parsed.Count);
+        await cmd.ExecuteNonQueryAsync(ct);
+
+        if (parsed.Count > 0)
+        {
+            var vals = new List<string>(); var pi = 1; var pl = new List<object>();
+            foreach (var p in parsed)
+            {
+                vals.Add($"(${pi++},${pi++},${pi++},${pi++},${pi++},${pi++},${pi++})");
+                pl.Add(sbomId); pl.Add(p.purl); pl.Add((object?)p.name ?? DBNull.Value);
+                pl.Add((object?)p.version ?? DBNull.Value); pl.Add((object?)p.ecosystem ?? DBNull.Value);
+                pl.Add((object?)p.type ?? DBNull.Value); pl.Add("{}");
+            }
+            await using var ic = db.CreateCommand($"INSERT INTO sbom_components(sbom_id,purl,name,version,ecosystem,component_type,metadata) VALUES {string.Join(",", vals)}");
+            foreach (var v in pl) ic.Parameters.AddWithValue(v);
+            await ic.ExecuteNonQueryAsync(ct);
+        }
+        return ApiResult.Ok(new { id = sbomId, name, componentCount = parsed.Count });
+    }
+    catch (Exception ex) { return ApiResult.Error("UPLOAD_FAILED", ex.Message); }
+}).DisableAntiforgery();
+
+app.MapGet("/api/v1/sbom.list", async (NpgsqlDataSource db, CancellationToken ct) =>
+{
+    var items = new List<object>();
+    await using var cmd = db.CreateCommand("SELECT id,name,format,component_count,matched_count,uploaded_at FROM sbom_uploads ORDER BY uploaded_at DESC LIMIT 50");
+    await using var r = await cmd.ExecuteReaderAsync(ct);
+    while (await r.ReadAsync(ct))
+        items.Add(new { id=r.GetGuid(0),name=r.GetString(1),format=r.GetString(2),componentCount=r.GetInt32(3),matchedCount=r.GetInt32(4),uploadedAt=r.GetFieldValue<DateTimeOffset>(5) });
+    return ApiResult.Ok(new { items });
+});
+
+app.MapGet("/api/v1/sbom.get", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
+{
+    object? sbom = null;
+    await using (var c = db.CreateCommand("SELECT id,name,format,component_count,matched_count,uploaded_at FROM sbom_uploads WHERE id=$1"))
+    { c.Parameters.AddWithValue(id); await using var r = await c.ExecuteReaderAsync(ct);
+      if (await r.ReadAsync(ct)) sbom = new {id=r.GetGuid(0),name=r.GetString(1),format=r.GetString(2),componentCount=r.GetInt32(3),matchedCount=r.GetInt32(4),uploadedAt=r.GetFieldValue<DateTimeOffset>(5)}; }
+    if (sbom is null) return ApiResult.NotFound("NOT_FOUND", id.ToString());
+    var comps = new List<object>();
+    await using (var cc = db.CreateCommand("SELECT c.id,c.purl,c.name,c.version,c.ecosystem,c.component_type,c.vuln_count FROM sbom_components c WHERE c.sbom_id=$1 ORDER BY c.ecosystem,c.name"))
+    { cc.Parameters.AddWithValue(id); await using var r = await cc.ExecuteReaderAsync(ct);
+      while (await r.ReadAsync(ct)) comps.Add(new {id=r.GetGuid(0),purl=r.GetString(1),name=r.IsDBNull(2)?null:r.GetString(2),version=r.IsDBNull(3)?null:r.GetString(3),ecosystem=r.IsDBNull(4)?null:r.GetString(4),type=r.IsDBNull(5)?null:r.GetString(5),vulnCount=r.GetInt32(6)}); }
+    var vulns = new List<object>();
+    await using (var vc = db.CreateCommand("SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT 500"))
+    { vc.Parameters.AddWithValue(id); await using var r = await vc.ExecuteReaderAsync(ct);
+      while (await r.ReadAsync(ct)) vulns.Add(new {id=r.GetGuid(0),componentId=r.GetGuid(1),vulnerabilityId=r.GetGuid(2),primaryIdentifier=r.GetString(3),title=r.IsDBNull(4)?null:r.GetString(4),severityLabel=r.IsDBNull(5)?null:r.GetString(5),cvssScore=r.IsDBNull(6)?(decimal?)null:r.GetDecimal(6),componentName=r.IsDBNull(7)?null:r.GetString(7),ecosystem=r.IsDBNull(8)?null:r.GetString(8),versionRange=r.IsDBNull(9)?null:r.GetString(9),versionMatched=r.IsDBNull(10)?(bool?)null:r.GetBoolean(10)}); }
+    return ApiResult.Ok(new {sbom,components=comps,vulnerabilities=vulns});
+});
+
+app.MapPost("/api/v1/sbom.match", async (NpgsqlDataSource db, SbomMatchRequest req, CancellationToken ct) =>
+{
+    var m=0;
+    var comps = new List<(Guid id,string purl,string? name,string? version,string? eco)>();
+    await using(var s=db.CreateCommand("SELECT id,purl,name,version,ecosystem FROM sbom_components WHERE sbom_id=$1")){s.Parameters.AddWithValue(req.SbomId);await using var r=await s.ExecuteReaderAsync(ct);while(await r.ReadAsync(ct))comps.Add((r.GetGuid(0),r.GetString(1),r.IsDBNull(2)?null:r.GetString(2),r.IsDBNull(3)?null:r.GetString(3),r.IsDBNull(4)?null:r.GetString(4)));}
+    foreach(var(cid,purl,name,ver,eco)in comps){var pwv=PurlStripVersion(purl);await using var sc=db.CreateCommand("SELECT v.id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,c.display_name,c.ecosystem,c.normalized_range FROM vulnerability_affected_components c JOIN vulnerabilities v ON v.id=c.vulnerability_id WHERE(c.primary_purl LIKE $1||\'%\' OR c.primary_purl=$2) ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT 200");sc.Parameters.AddWithValue(pwv);sc.Parameters.AddWithValue(purl);await using var sr=await sc.ExecuteReaderAsync(ct);while(await sr.ReadAsync(ct)){var range=sr.IsDBNull(7)?null:sr.GetString(7);var vm=ver is not null&&range is not null?VersionRangeMatcher.Matches(ver,range):(bool?)null;await using var ins=db.CreateCommand("INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(sbom_component_id,vulnerability_id,COALESCE(normalized_range,\'\')) DO NOTHING");ins.Parameters.AddWithValue(cid);ins.Parameters.AddWithValue(sr.GetGuid(0));ins.Parameters.AddWithValue(purl);ins.Parameters.AddWithValue((object?)sr.GetValue(6)??DBNull.Value);ins.Parameters.AddWithValue((object?)sr.GetValue(5)??DBNull.Value);ins.Parameters.AddWithValue((object?)sr.GetValue(7)??DBNull.Value);ins.Parameters.AddWithValue((object?)vm??DBNull.Value);await ins.ExecuteNonQueryAsync(ct);m++;}await using var uc=db.CreateCommand("UPDATE sbom_components SET vuln_count=(SELECT count(*) FROM sbom_vulnerabilities WHERE sbom_component_id=$1) WHERE id=$1");uc.Parameters.AddWithValue(cid);await uc.ExecuteNonQueryAsync(ct);}
+    await using var usb=db.CreateCommand("UPDATE sbom_uploads SET matched_count=(SELECT count(DISTINCT vulnerability_id) FROM sbom_vulnerabilities sv JOIN sbom_components sc ON sc.id=sv.sbom_component_id WHERE sc.sbom_id=$1) WHERE id=$1");usb.Parameters.AddWithValue(req.SbomId);await usb.ExecuteNonQueryAsync(ct);
+    return ApiResult.Ok(new {matched=m});
+});
+
+app.MapPost("/api/v1/sbom.delete", async (NpgsqlDataSource db, SbomDeleteRequest req, CancellationToken ct) =>
+{
+    await using var c = db.CreateCommand("DELETE FROM sbom_uploads WHERE id=$1");
+    c.Parameters.AddWithValue(req.SbomId); await c.ExecuteNonQueryAsync(ct);
+    return ApiResult.Ok(new {deleted=true});
+});
+
 app.Run();
 
 static string ToNpgsqlConnectionString(string value)
@@ -645,6 +743,12 @@ static object MakeResult(NpgsqlDataReader reader) => new
 
 static string[] TruncateNames(string[] names) =>
     names is { Length: > 15 } ? names[..15].Append($"+{names.Length - 15} more").ToArray() : names;
+
+static string? PurlStripVersion(string purl) => purl.Contains('@') && purl.LastIndexOf('@') > "pkg:".Length ? purl[..purl.LastIndexOf('@')] : purl;
+
+static string? EcosystemFromCyclonePurl(string? purl) => purl?.StartsWith("pkg:", StringComparison.OrdinalIgnoreCase) == true
+    ? purl["pkg:".Length..purl.IndexOf('/')].ToLowerInvariant()
+    : null;
 
 static (string Ecosystem, string? Version)? ParseEcosystemVersion(string query)
 {

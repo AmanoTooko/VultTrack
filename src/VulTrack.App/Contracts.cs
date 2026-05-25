@@ -48,3 +48,13 @@ public sealed record ComponentVulnerabilityMatch(
     string? VersionRange,
     string? RangeType,
     bool? VersionMatched);
+
+public sealed record SbomUploadRequest(
+    string Name,
+    string Content);
+
+public sealed record SbomMatchRequest(
+    Guid SbomId);
+
+public sealed record SbomDeleteRequest(
+    Guid SbomId);

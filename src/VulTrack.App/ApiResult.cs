@@ -12,7 +12,14 @@ public static class ApiResult
     public static IResult NotFound(string code, string message) => Results.Json(new
     {
         ok = false,
-        error = new { code, message, details = new { } },
-        requestId = Guid.NewGuid().ToString("n")
+        error = new { code, message },
+        requestId = Guid.NewGuid().ToString("N")[..8]
     }, statusCode: StatusCodes.Status404NotFound);
+
+    public static IResult Error(string code, string message) => Results.Json(new
+    {
+        ok = false,
+        error = new { code, message },
+        requestId = Guid.NewGuid().ToString("N")[..8]
+    }, statusCode: StatusCodes.Status400BadRequest);
 }
