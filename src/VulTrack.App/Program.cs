@@ -357,7 +357,20 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
         updatedAt = reader.GetFieldValue<DateTimeOffset>(21)
     };
 
+    var actualId = id;
+    if (string.IsNullOrWhiteSpace(vulnerability.description) && vulnerability.sourceCount <= 1)
+    {
+        // Try to find a richer entry (merged CVE that has description)
+        await using var best = db.CreateCommand("SELECT id FROM vulnerabilities WHERE primary_identifier = $1 ORDER BY coalesce(source_count,0) DESC, coalesce(length(description),0) DESC LIMIT 1");
+        best.Parameters.AddWithValue(vulnerability.primaryIdentifier);
+        await using var bestReader = await best.ExecuteReaderAsync(ct);
+        if (await bestReader.ReadAsync(ct))
+            actualId = bestReader.GetGuid(0);
+    }
+
     var sourceUrls = BuildSourceUrls(vulnerability.primaryIdentifier, vulnerability.aliases);
+
+    var queryId = actualId;
 
     return ApiResult.Ok(new
     {
@@ -371,16 +384,16 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             where i.canonical_vulnerability_id = $1
             order by i.identifier_type, i.identifier_value
             limit 50
-            """, id, ct),
-        records = await QueryRecordsGroupedAsync(db, id, ct),
+            """, queryId, ct),
+        records = await QueryRecordsGroupedAsync(db, queryId, ct),
         affectedComponents = await QueryRowsAsync(db, """
             select ecosystem, package_name, display_name, primary_purl, primary_cpe23_uri,
                    normalized_range, range_type, confidence, evidence_count, resolution_status
             from vulnerability_affected_components
             where vulnerability_id = $1
             order by coalesce(ecosystem,'') desc, display_name, coalesce(normalized_range,'')
-            limit 200
-            """, id, ct),
+            limit 50
+            """, queryId, ct),
         descriptions = await QueryRowsAsync(db, """
             select s.code, lang, description_type, left(value, 4000) as value, is_selected
             from vulnerability_descriptions d
@@ -388,7 +401,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             where d.vulnerability_id = $1
             order by is_selected desc, s.code nulls last
             limit 10
-            """, id, ct),
+            """, queryId, ct),
         severities = await QueryRowsAsync(db, """
             select s.code, scoring_system, scoring_version, score_type, vector_string,
                    score, severity_label, is_selected
@@ -396,8 +409,8 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             left join sources s on s.id = vss.source_id
             where vss.vulnerability_id = $1
             order by is_selected desc, score desc nulls last
-            limit 20
-            """, id, ct),
+            limit 10
+            """, queryId, ct),
         references = await QueryRowsAsync(db, """
             with ranked as (
               select s.code, url, ref_type, tags,
@@ -411,7 +424,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             where source_rank <= 20
             order by code nulls last, source_rank, url
             limit 100
-            """, id, ct)
+            """, queryId, ct)
     });
 });
 
@@ -614,11 +627,12 @@ static Dictionary<string, string> BuildSourceUrls(string cveId, string[] aliases
 static async Task<List<object>> QueryRecordsGroupedAsync(NpgsqlDataSource db, Guid vulnId, CancellationToken ct)
 {
     await using var cmd = db.CreateCommand("""
-        select s.code, s.name, vr.source_record_id, left(vr.title, 300) as title, vr.updated_at
+        select s.code, s.name, vr.source_record_id, left(vr.title, 200) as title, vr.updated_at
         from vulnerability_records vr
         join sources s on s.id = vr.source_id
         where vr.vulnerability_id = $1
         order by s.code, vr.updated_at desc
+        limit 100
         """);
     cmd.Parameters.AddWithValue(vulnId);
     var rows = new List<object>();
