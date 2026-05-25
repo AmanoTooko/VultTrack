@@ -208,9 +208,11 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
             await using var fastCmd = db.CreateCommand("""
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
                        v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
-                from vulnerability_identifier_index i
-                join vulnerabilities v on v.id = i.canonical_vulnerability_id
-                where i.normalized_value = $1
+                from vulnerabilities v
+                where exists (
+                    select 1 from vulnerability_identifier_index i
+                    where i.canonical_vulnerability_id = v.id and i.normalized_value = $1
+                )
                 order by coalesce(v.max_cvss_score, 0) desc
                 limit $2
                 """);

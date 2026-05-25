@@ -77,10 +77,12 @@ public abstract class NormalizerBase(
         }
         else
         {
+        foreach (var batch in facts.Chunk(4000))
+        {
             var values = new List<string>();
             var paramIdx = 1;
             var cmdParams = new List<object>();
-            foreach (var fact in facts)
+            foreach (var fact in batch)
             {
                 values.Add($"(${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},lower(${paramIdx - 1}),${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},true,${paramIdx++}::jsonb)");
                 cmdParams.Add(vulnerabilityId);
@@ -102,6 +104,7 @@ public abstract class NormalizerBase(
                 connection);
             for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
             await batchCmd.ExecuteNonQueryAsync(ct);
+        }
         }
 
         foreach (var hook in affectedHooks)

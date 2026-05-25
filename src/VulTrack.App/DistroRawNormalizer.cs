@@ -3,7 +3,7 @@ using Npgsql;
 
 namespace VulTrack.App;
 
-public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer)
+public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer, ILogger<DistroRawNormalizer> logger)
     : NormalizerBase(affectedHooks, canonicalizer), ISourceScopedRawNormalizer
 {
     public string SourceCode => "distro";
@@ -70,8 +70,9 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                 succeededIds.Add(row.RawIndexId);
                 processed++;
             }
-            catch
+            catch (Exception ex)
             {
+                logger.LogError(ex, "Failed to normalize Alpine {Package}", row.PackageName);
                 failed++;
             }
         }
@@ -120,8 +121,9 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                 succeededIds.Add(row.RawIndexId);
                 processed++;
             }
-            catch
+            catch (Exception ex)
             {
+                logger.LogError(ex, "Failed to normalize Debian {CveId}", row.CveId);
                 failed++;
             }
         }

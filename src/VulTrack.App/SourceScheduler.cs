@@ -16,7 +16,7 @@ public sealed class SourceScheduler(
             return;
         }
 
-        var normalizeInterval = TimeSpan.FromSeconds(30);
+        var normalizeInterval = TimeSpan.FromSeconds(15);
         var fetchInterval = TimeSpan.FromHours(12);
 
         _ = Task.Run(() => RunFetchLoopAsync(fetchInterval, stoppingToken), stoppingToken);

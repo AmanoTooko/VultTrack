@@ -89,6 +89,8 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
                 insert into vulnerability_descriptions
                   (vulnerability_id, vulnerability_record_id, source_id, lang, description_type, value, is_selected)
                 values ($1,$2,$3,$4,'detail',$5,$6)
+                on conflict (vulnerability_id, source_id, lang, description_type)
+                do update set value = excluded.value, is_selected = excluded.is_selected
                 """, connection);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
