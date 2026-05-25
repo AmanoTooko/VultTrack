@@ -754,6 +754,7 @@ static string? EcosystemFromCyclonePurl(string? purl) => purl?.StartsWith("pkg:"
 static string? MapEcosystem(string? eco) => eco?.ToLowerInvariant() switch
 {
     "deb" => "debian",
+    "apk" => "alpine",
     "rpm" or "redhat" or "suse" => "rpm",
     null => null,
     var x => x
