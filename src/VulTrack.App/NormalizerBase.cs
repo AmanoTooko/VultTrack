@@ -51,9 +51,14 @@ public abstract class NormalizerBase(
             return;
         }
 
-        if (facts.Count == 1)
+        var dedupedFacts = facts
+            .GroupBy(f => $"{f.FactType}|{f.PackageName ?? ""}|{f.VersionRange ?? ""}|{f.RangeType ?? ""}|{f.Purl ?? ""}|{f.Ecosystem ?? ""}")
+            .Select(g => g.First())
+            .ToList();
+
+        if (dedupedFacts.Count == 1)
         {
-            var fact = facts[0];
+            var fact = dedupedFacts[0];
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_affected_facts
                   (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
@@ -77,7 +82,7 @@ public abstract class NormalizerBase(
         }
         else
         {
-        foreach (var batch in facts.Chunk(4000))
+        foreach (var batch in dedupedFacts.Chunk(4000))
         {
             var values = new List<string>();
             var paramIdx = 1;
