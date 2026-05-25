@@ -616,7 +616,15 @@ app.MapPost("/api/v1/sbom.match", async (NpgsqlDataSource db, SbomMatchRequest r
     var m=0;
     var comps = new List<(Guid id,string purl,string? name,string? version,string? eco)>();
     await using(var s=db.CreateCommand("SELECT id,purl,name,version,ecosystem FROM sbom_components WHERE sbom_id=$1")){s.Parameters.AddWithValue(req.SbomId);await using var r=await s.ExecuteReaderAsync(ct);while(await r.ReadAsync(ct))comps.Add((r.GetGuid(0),r.GetString(1),r.IsDBNull(2)?null:r.GetString(2),r.IsDBNull(3)?null:r.GetString(3),r.IsDBNull(4)?null:r.GetString(4)));}
-    foreach(var(cid,purl,name,ver,eco)in comps){var pwv=PurlStripVersion(purl);await using var sc=db.CreateCommand("SELECT v.id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,c.display_name,c.ecosystem,c.normalized_range FROM vulnerability_affected_components c JOIN vulnerabilities v ON v.id=c.vulnerability_id WHERE(c.primary_purl LIKE $1||\'%\' OR c.primary_purl=$2) ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT 200");sc.Parameters.AddWithValue(pwv);sc.Parameters.AddWithValue(purl);await using var sr=await sc.ExecuteReaderAsync(ct);while(await sr.ReadAsync(ct)){var range=sr.IsDBNull(7)?null:sr.GetString(7);var vm=ver is not null&&range is not null?VersionRangeMatcher.Matches(ver,range):(bool?)null;await using var ins=db.CreateCommand("INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(sbom_component_id,vulnerability_id,COALESCE(normalized_range,\'\')) DO NOTHING");ins.Parameters.AddWithValue(cid);ins.Parameters.AddWithValue(sr.GetGuid(0));ins.Parameters.AddWithValue(purl);ins.Parameters.AddWithValue((object?)sr.GetValue(6)??DBNull.Value);ins.Parameters.AddWithValue((object?)sr.GetValue(5)??DBNull.Value);ins.Parameters.AddWithValue((object?)sr.GetValue(7)??DBNull.Value);ins.Parameters.AddWithValue((object?)vm??DBNull.Value);await ins.ExecuteNonQueryAsync(ct);m++;}await using var uc=db.CreateCommand("UPDATE sbom_components SET vuln_count=(SELECT count(*) FROM sbom_vulnerabilities WHERE sbom_component_id=$1) WHERE id=$1");uc.Parameters.AddWithValue(cid);await uc.ExecuteNonQueryAsync(ct);}
+    foreach(var (cid,purl,name,ver,eco) in comps){var pwv=PurlStripVersion(purl);var purlDecoded=Uri.UnescapeDataString(purl);var pwvDecoded=Uri.UnescapeDataString(pwv!=null?pwv:"");var matchedEco=MapEcosystem(eco);
+    bool hasResults=false;
+    // Strategy 1: PURL matching
+    await using(var sq=db.CreateCommand("SELECT v.id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,c.display_name,c.ecosystem,c.normalized_range FROM vulnerability_affected_components c JOIN vulnerabilities v ON v.id=c.vulnerability_id WHERE c.primary_purl LIKE $1||\'%\' OR c.primary_purl=$2 OR c.primary_purl=$3 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT 200")){sq.Parameters.AddWithValue(pwvDecoded);sq.Parameters.AddWithValue(purlDecoded);sq.Parameters.AddWithValue(purl);await using var sr=await sq.ExecuteReaderAsync(ct);while(await sr.ReadAsync(ct)){hasResults=true;await InsertSbomVuln(db,cid,purl,sr,ver,ct);m++;}}
+    // Strategy 2: package name + ecosystem fallback
+    if(!hasResults&&name!=null&&matchedEco!=null){
+      await using(var sq=db.CreateCommand("SELECT v.id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,c.display_name,c.ecosystem,c.normalized_range FROM vulnerability_affected_components c JOIN vulnerabilities v ON v.id=c.vulnerability_id WHERE (lower(c.display_name)=lower($1) OR lower(c.package_name)=lower($1)) AND lower(c.ecosystem)=lower($2) ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT 200")){sq.Parameters.AddWithValue(name);sq.Parameters.AddWithValue(matchedEco);await using var sr=await sq.ExecuteReaderAsync(ct);while(await sr.ReadAsync(ct)){await InsertSbomVuln(db,cid,purl,sr,ver,ct);m++;}}
+    }
+    await using var uc=db.CreateCommand("UPDATE sbom_components SET vuln_count=(SELECT count(*) FROM sbom_vulnerabilities WHERE sbom_component_id=$1) WHERE id=$1");uc.Parameters.AddWithValue(cid);await uc.ExecuteNonQueryAsync(ct);}
     await using var usb=db.CreateCommand("UPDATE sbom_uploads SET matched_count=(SELECT count(DISTINCT vulnerability_id) FROM sbom_vulnerabilities sv JOIN sbom_components sc ON sc.id=sv.sbom_component_id WHERE sc.sbom_id=$1) WHERE id=$1");usb.Parameters.AddWithValue(req.SbomId);await usb.ExecuteNonQueryAsync(ct);
     return ApiResult.Ok(new {matched=m});
 });
@@ -749,6 +757,25 @@ static string? PurlStripVersion(string purl) => purl.Contains('@') && purl.LastI
 static string? EcosystemFromCyclonePurl(string? purl) => purl?.StartsWith("pkg:", StringComparison.OrdinalIgnoreCase) == true
     ? purl["pkg:".Length..purl.IndexOf('/')].ToLowerInvariant()
     : null;
+
+static string? MapEcosystem(string? eco) => eco?.ToLowerInvariant() switch
+{
+    "deb" => "debian",
+    "rpm" or "redhat" or "suse" => "rpm",
+    null => null,
+    var x => x
+};
+
+static async Task InsertSbomVuln(NpgsqlDataSource db, Guid cid, string purl, NpgsqlDataReader sr, string? ver, CancellationToken ct)
+{
+    var range = sr.IsDBNull(7) ? null : sr.GetString(7);
+    var vm = ver is not null && range is not null ? VersionRangeMatcher.Matches(ver, range) : (bool?)null;
+    await using var ins = db.CreateCommand("INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(sbom_component_id,vulnerability_id,COALESCE(normalized_range,'')) DO NOTHING");
+    ins.Parameters.AddWithValue(cid); ins.Parameters.AddWithValue(sr.GetGuid(0)); ins.Parameters.AddWithValue(purl);
+    ins.Parameters.AddWithValue((object?)sr.GetValue(6) ?? DBNull.Value); ins.Parameters.AddWithValue((object?)sr.GetValue(5) ?? DBNull.Value);
+    ins.Parameters.AddWithValue((object?)sr.GetValue(7) ?? DBNull.Value); ins.Parameters.AddWithValue((object?)vm ?? DBNull.Value);
+    await ins.ExecuteNonQueryAsync(ct);
+}
 
 static (string Ecosystem, string? Version)? ParseEcosystemVersion(string query)
 {
