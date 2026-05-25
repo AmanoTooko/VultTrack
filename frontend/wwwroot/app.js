@@ -432,7 +432,6 @@ function shortUrl(url) {
 }
 
 function severityBadge(label, score) {
-  if (!label && score == null) return '';
   const numeric = Number(score ?? 0);
   const tag = (String(label || '')).toLowerCase();
   const klass = tag === 'critical' || numeric >= 9 ? 'critical' :
@@ -652,27 +651,8 @@ function renderSbomDetail(data) {
       </section>
       ${data.vulnerabilities.length ? `
       <section class="detail-section">
-        <h3 class="section-h">Findings (${data.vulnerabilities.length})</h3>
-        <div style="max-height:70vh;overflow:auto">
-        <table class="table finding-table">
-          <thead><tr>
-            <th>Component</th><th>Vulnerability</th><th>Severity</th><th>Version Range</th><th>Match</th>
-          </tr></thead>
-          <tbody>
-          ${data.vulnerabilities.slice(0,200).map(v => {
-            const match = v.versionMatched === true ? 'MATCH' : v.versionMatched === false ? 'miss' : '';
-            return `
-            <tr data-vuln-id="${escapeAttr(v.vulnerabilityId)}" style="cursor:pointer" class="finding-row">
-              <td><small>${escapeHtml(v.componentName || v.ecosystem || '-')}</small></td>
-              <td><span class="finding-cve">${escapeHtml(v.primaryIdentifier)}</span></td>
-              <td>${severityBadge(v.severityLabel, v.cvssScore)}</td>
-              <td><code style="font-size:11px">${escapeHtml(v.versionRange || '-')}</code></td>
-              <td><span class="badge ${match === 'MATCH' ? 'high' : 'none'}">${match || '?'}</span></td>
-            </tr>`;
-          }).join('')}
-          </tbody>
-        </table>
-        </div>
+        <h3 class="section-h">Findings by Component</h3>
+        ${renderGroupedFindings(data.vulnerabilities, data.components)}
       </section>` : ''}
     </div>
   `;
@@ -698,4 +678,39 @@ function renderSbomDetail(data) {
   el.detailPane.querySelectorAll('[data-vuln-id]').forEach(el => {
     el.addEventListener('click', () => loadVulnerabilityDetail(el.dataset.vulnId));
   });
+}
+
+function renderGroupedFindings(vulnerabilities, components) {
+  const byComp = {};
+  vulnerabilities.forEach(v => {
+    const cid = v.componentId || 'other';
+    if (!byComp[cid]) {
+      const comp = components.find(c => c.id === cid) || {};
+      byComp[cid] = { name: comp.name || v.componentName || 'component', version: comp.version || '', ecosystem: v.ecosystem || '', vulns: [] };
+    }
+    byComp[cid].vulns.push(v);
+  });
+  return Object.values(byComp).map(g => {
+    const matched = g.vulns.filter(v => v.versionMatched === true).length;
+    const notAffected = g.vulns.filter(v => v.versionMatched === false).length;
+    return `<div style="margin-bottom:20px;border:1px solid var(--line);border-radius:10px;overflow:hidden">
+      <div class="finding-header" style="padding:10px 14px;background:#f9faf7;border-bottom:1px solid var(--line)">
+        <strong>${escapeHtml(g.name)}</strong>
+        ${g.version ? `<span class="badge">v${escapeHtml(g.version)}</span>` : ''}
+        <span class="badge tag-source">${escapeHtml(g.ecosystem)}</span>
+        <span class="badge high">${matched} affected</span>
+        ${notAffected > 0 ? `<span class="badge none">${notAffected} not affected</span>` : ''}
+      </div>
+      <table class="table" style="border:none;margin:0"><thead><tr><th>CVE</th><th>Severity</th><th>Range</th><th>Status</th></tr></thead><tbody>
+      ${g.vulns.map(v => {
+        const s = v.versionMatched === true ? 'AFFECTED' : v.versionMatched === false ? 'NOT AFFECTED' : '?';
+        const kl = v.versionMatched === true ? 'risk' : v.versionMatched === false ? 'none' : '';
+        return `<tr data-vuln-id="${escapeAttr(v.vulnerabilityId)}" class="finding-row" style="cursor:pointer">
+          <td><span class="finding-cve">${escapeHtml(v.primaryIdentifier)}</span></td>
+          <td>${severityBadge(v.severityLabel, v.cvssScore)}</td>
+          <td><code style="font-size:11px">${escapeHtml(v.versionRange || 'no range')}</code></td>
+          <td><span class="badge ${kl}">${s}</span></td></tr>`;
+      }).join('')}
+      </tbody></table></div>`;
+  }).join('');
 }

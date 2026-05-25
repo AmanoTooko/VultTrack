@@ -163,7 +163,8 @@ public static class SbomEndpoints
                 await using var ins = new NpgsqlCommand(@"
                     INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched)
                     VALUES($1,$2,$3,$4,$5,$6,$7)
-                    ON CONFLICT(sbom_component_id,vulnerability_id,COALESCE(normalized_range,'')) DO NOTHING", conn);
+                    ON CONFLICT(sbom_component_id,vulnerability_id,COALESCE(normalized_range,''))
+                    DO UPDATE SET version_matched=excluded.version_matched, display_name=excluded.display_name, ecosystem=excluded.ecosystem", conn);
                 ins.Parameters.AddWithValue(cid); ins.Parameters.AddWithValue(vid); ins.Parameters.AddWithValue(purl);
                 ins.Parameters.AddWithValue((object?)dname ?? DBNull.Value); ins.Parameters.AddWithValue((object?)ecosys ?? DBNull.Value);
                 ins.Parameters.AddWithValue((object?)range ?? DBNull.Value); ins.Parameters.AddWithValue((object?)vm ?? DBNull.Value);
