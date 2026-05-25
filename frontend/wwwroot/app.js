@@ -189,6 +189,7 @@ function renderDetail(data) {
   const refs = data.references || [];
   const descriptions = data.descriptions || [];
   const affected = data.affectedComponents || [];
+  const sourceUrls = data.sourceUrls || {};
   const sourceTags = [...new Set(records.map(r => r.code).filter(Boolean))];
 
   el.detailPane.innerHTML = `
@@ -204,23 +205,47 @@ function renderDetail(data) {
       <div class="detail-meta-row">
         <span class="kv-inline">Published <b>${date(v.publishedAt)}</b></span>
         <span class="kv-inline">Modified <b>${date(v.modifiedAt)}</b></span>
-        <span class="kv-inline">Sources <b>${fmt(records.length)}</b></span>
+        <span class="kv-inline">Sources <b>${fmt(sourceTags.length)}</b></span>
         <span class="kv-inline">Affected <b>${fmt(v.affectedComponentCount)}</b></span>
       </div>
-      <div class="chips" style="margin-top:8px">
-        <span class="chip-label">Sources:</span>
-        ${sourceTags.map(s => `<span class="badge tag-${escapeAttr(s)}">${escapeHtml(s)}</span>`).join('')}
+      <div class="chips" style="margin-top:4px">
+        ${sourceTags.map(s => `<span class="badge tag-source">${escapeHtml(s)}</span>`).join('')}
       </div>
+      ${Object.keys(sourceUrls).length ? `<div style="margin-top:8px">${Object.entries(sourceUrls).map(([k,u]) => 
+        `<a href="${escapeAttr(u)}" target="_blank" rel="noreferrer" class="badge" style="text-decoration:none;margin:2px">&#128279; ${escapeHtml(k)}</a>`
+      ).join('')}</div>` : ''}
     </header>
 
-    <div class="detail-sections">
+    <div style="display:flex;gap:4px;margin:12px 0;border-bottom:1px solid var(--line);padding-bottom:8px">
+      ${['Overview','Affected','Sources','References'].map((t,i) => 
+        `<button class="tab detail-tab" data-dtab="${i}" style="padding:6px 14px;${i===0?'background:#eef':''}">${t}</button>`
+      ).join('')}
+    </div>
+
+    <div id="dt-0" class="detail-sections">
       ${descriptions.length ? renderDescriptionCards(descriptions) : ''}
       ${severities.length ? renderSeverityCards(severities) : ''}
-      ${affected.length ? renderAffectedCards(affected) : ''}
-      ${refs.length ? renderSourceLinks(refs) : ''}
-      ${refs.length ? renderReferenceCards(refs) : ''}
+    </div>
+    <div id="dt-1" class="detail-sections" style="display:none">
+      ${renderAffectedGrouped(affected, v.primaryIdentifier)}
+    </div>
+    <div id="dt-2" class="detail-sections" style="display:none">
+      ${renderRecordsBySource(records)}
+    </div>
+    <div id="dt-3" class="detail-sections" style="display:none">
+      ${refs.length ? renderReferenceCards(refs) : '<p class="muted">No references</p>'}
     </div>
   `;
+
+  el.detailPane.querySelectorAll('.detail-tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      el.detailPane.querySelectorAll('.detail-tab').forEach(t => t.style.background = '');
+      tab.style.background = '#eef';
+      el.detailPane.querySelectorAll('[id^="dt-"]').forEach(d => d.style.display = 'none');
+      const target = document.getElementById('dt-' + tab.dataset.dtab);
+      if (target) target.style.display = '';
+    });
+  });
 }
 
 function sourceTag(code) {
@@ -265,28 +290,58 @@ function renderSeverityCards(severities) {
   `;
 }
 
-function renderAffectedCards(affected) {
-  if (!affected.length) return '';
-  const display = affected.slice(0, 50);
-  return `
+function renderAffectedGrouped(affected) {
+  if (!affected.length) return '<p class="muted">No affected components</p>';
+  const byEco = {};
+  affected.forEach(a => {
+    const eco = a.ecosystem || 'unknown';
+    if (!byEco[eco]) byEco[eco] = [];
+    byEco[eco].push(a);
+  });
+  return Object.entries(byEco).sort((a,b) => b[1].length - a[1].length).map(([eco,items]) => `
     <section class="detail-section">
-      <h3 class="section-h">Affected Components (${fmt(affected.length)})</h3>
+      <h3 class="section-h">${escapeHtml(eco)} (${items.length} entries)</h3>
       <div class="card-stack">
-        ${display.map(c => `
+        ${items.map(a => `
           <div class="info-card">
             <div class="info-card-row">
-              <strong>${escapeHtml(c.display_name || c.package_name || c.primary_purl || 'component')}</strong>
-              ${c.normalized_range ? `<span class="badge high">${escapeHtml(c.normalized_range)}</span>` : ''}
+              <strong>${escapeHtml(a.displayName || a.packageName || '-')}</strong>
+              <span class="badge ${a.normalizedRange ? '' : 'none'}">${escapeHtml(a.normalizedRange || 'no range')}</span>
+              ${a.rangeType ? `<span class="badge tag-source">${escapeHtml(a.rangeType)}</span>` : ''}
             </div>
             <div class="chips">
-              ${c.ecosystem ? `<span class="badge">${escapeHtml(c.ecosystem)}</span>` : ''}
-              ${c.range_type ? `<span class="badge">${escapeHtml(c.range_type)}</span>` : ''}
+              ${a.primaryPurl ? `<code style="font-size:11px">${escapeHtml(a.primaryPurl)}</code>` : ''}
+              ${a.primaryCpe23Uri ? `<code style="font-size:11px">${escapeHtml(a.primaryCpe23Uri)}</code>` : ''}
             </div>
           </div>
         `).join('')}
       </div>
     </section>
-  `;
+  `).join('');
+}
+
+function renderRecordsBySource(records) {
+  if (!records.length) return '<p class="muted">No source records</p>';
+  const bySrc = {};
+  records.forEach(r => {
+    const code = r.code || '?';
+    if (!bySrc[code]) bySrc[code] = [];
+    bySrc[code].push(r);
+  });
+  return Object.entries(bySrc).map(([code, items]) => `
+    <section class="detail-section">
+      <h3 class="section-h">${escapeHtml(code)} (${items.length})</h3>
+      <div class="card-stack" style="max-height:300px;overflow:auto">
+        ${items.map(r => `
+          <div class="info-card">
+            <div class="info-card-row"><strong>${escapeHtml(r.recordId || '-')}</strong></div>
+            <p style="font-size:12px;color:var(--muted);margin:4px 0">${escapeHtml(r.title || '')}</p>
+            <small class="muted">${date(r.updatedAt)}</small>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `).join('');
 }
 
 function renderSourceLinks(refs) {

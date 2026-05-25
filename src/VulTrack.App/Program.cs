@@ -357,9 +357,12 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
         updatedAt = reader.GetFieldValue<DateTimeOffset>(21)
     };
 
+    var sourceUrls = BuildSourceUrls(vulnerability.primaryIdentifier, vulnerability.aliases);
+
     return ApiResult.Ok(new
     {
         vulnerability,
+        sourceUrls,
         identifiers = await QueryRowsAsync(db, """
             select i.identifier_type, i.identifier_value, i.normalized_value, i.evidence_strength,
                    i.confidence, s.code
@@ -369,39 +372,22 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             order by i.identifier_type, i.identifier_value
             limit 50
             """, id, ct),
-        records = await QueryRowsAsync(db, """
-            select vr.id::text, s.code, s.name, vr.source_record_id, vr.title, vr.description,
-                   vr.status, vr.confidence, left(vr.source_specific::text, 2000) as source_specific, vr.updated_at
-            from vulnerability_records vr
-            join sources s on s.id = vr.source_id
-            where vr.vulnerability_id = $1
-            order by s.code, vr.updated_at desc
-            limit 50
-            """, id, ct),
+        records = await QueryRecordsGroupedAsync(db, id, ct),
         affectedComponents = await QueryRowsAsync(db, """
             select ecosystem, package_name, display_name, primary_purl, primary_cpe23_uri,
                    normalized_range, range_type, confidence, evidence_count, resolution_status
             from vulnerability_affected_components
             where vulnerability_id = $1
-            order by ecosystem nulls last, display_name
-            limit 50
-            """, id, ct),
-        affectedFacts = await QueryRowsAsync(db, """
-            select s.code, fact_type, ecosystem, package_name, purl, cpe23_uri,
-                   version_range_raw, range_type, vulnerable, left(source_specific::text, 500) as source_specific
-            from vulnerability_affected_facts f
-            left join sources s on s.id = f.source_id
-            where f.vulnerability_id = $1
-            order by s.code, ecosystem nulls last, package_name nulls last
-            limit 100
+            order by coalesce(ecosystem,'') desc, display_name, coalesce(normalized_range,'')
+            limit 200
             """, id, ct),
         descriptions = await QueryRowsAsync(db, """
-            select s.code, lang, description_type, left(value, 2000) as value, is_selected
+            select s.code, lang, description_type, left(value, 4000) as value, is_selected
             from vulnerability_descriptions d
             left join sources s on s.id = d.source_id
             where d.vulnerability_id = $1
             order by is_selected desc, s.code nulls last
-            limit 30
+            limit 10
             """, id, ct),
         severities = await QueryRowsAsync(db, """
             select s.code, scoring_system, scoring_version, score_type, vector_string,
@@ -410,7 +396,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             left join sources s on s.id = vss.source_id
             where vss.vulnerability_id = $1
             order by is_selected desc, score desc nulls last
-            limit 30
+            limit 20
             """, id, ct),
         references = await QueryRowsAsync(db, """
             with ranked as (
@@ -602,6 +588,46 @@ app.MapGet("/api/v1/benchmark.packageCves", async (NpgsqlDataSource db, string n
         return ApiResult.Ok(new { name, cves = r.GetInt32(1), facts = r.GetInt32(2), ecosystems = r.GetString(3) });
     return ApiResult.Ok(new { name, cves = 0 });
 });
+
+static Dictionary<string, string> BuildSourceUrls(string cveId, string[] aliases)
+{
+    var urls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    if (!string.IsNullOrWhiteSpace(cveId) && cveId.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase))
+    {
+        urls["NVD"] = $"https://nvd.nist.gov/vuln/detail/{cveId}";
+        urls["CVE.org"] = $"https://www.cve.org/CVERecord?id={cveId}";
+        urls["MITRE"] = $"https://cve.mitre.org/cgi-bin/cvename.cgi?name={cveId}";
+        urls["OSV"] = $"https://osv.dev/vulnerability/{cveId}";
+    }
+    foreach (var alias in aliases)
+    {
+        if (alias.StartsWith("GHSA-", StringComparison.OrdinalIgnoreCase))
+            urls["GitHub Advisory"] = $"https://github.com/advisories/{alias}";
+        if (alias.StartsWith("OSV-", StringComparison.OrdinalIgnoreCase))
+            urls["OSV"] = $"https://osv.dev/vulnerability/{alias}";
+        if (alias.StartsWith("USN-", StringComparison.OrdinalIgnoreCase))
+            urls["Ubuntu"] = $"https://ubuntu.com/security/notices/{alias}";
+    }
+    return urls;
+}
+
+static async Task<List<object>> QueryRecordsGroupedAsync(NpgsqlDataSource db, Guid vulnId, CancellationToken ct)
+{
+    await using var cmd = db.CreateCommand("""
+        select s.code, s.name, vr.source_record_id, left(vr.title, 300) as title, vr.updated_at
+        from vulnerability_records vr
+        join sources s on s.id = vr.source_id
+        where vr.vulnerability_id = $1
+        order by s.code, vr.updated_at desc
+        """);
+    cmd.Parameters.AddWithValue(vulnId);
+    var rows = new List<object>();
+    await using var r = await cmd.ExecuteReaderAsync(ct);
+    while (await r.ReadAsync(ct))
+        rows.Add(new { code = r.GetString(0), name = r.GetString(1), recordId = r.GetString(2),
+            title = r.IsDBNull(3) ? null : r.GetString(3), updatedAt = r.GetFieldValue<DateTimeOffset>(4) });
+    return rows;
+}
 
 app.Run();
 
