@@ -8,6 +8,7 @@ on:
 jobs:
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -24,7 +25,9 @@ jobs:
       - run: npm audit --audit-level=moderate
       - run: npm run lint
       - run: npm test
-      - run: dotnet format VulTrack.slnx --verify-no-changes --verbosity minimal
+      - run: dotnet restore tests/VulTrack.Tests/VulTrack.Tests.csproj
+      - run: dotnet format whitespace src/VulTrack.App/VulTrack.App.csproj --verify-no-changes --no-restore --verbosity minimal
+      - run: dotnet format whitespace tests/VulTrack.Tests/VulTrack.Tests.csproj --verify-no-changes --no-restore --verbosity minimal
       - run: dotnet test tests/VulTrack.Tests/VulTrack.Tests.csproj
 
   docker:
