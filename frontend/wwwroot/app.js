@@ -508,51 +508,6 @@ function registryResult(item) {
   `;
 }
 
-function tableSection(title, headers, rows, allowHtml = false) {
-  if (!rows.length) return '';
-  return `
-    <section class="section">
-      <h3>${escapeHtml(title)}</h3>
-      <table class="table">
-        <thead><tr>${headers.map((header) => `<th>${escapeHtml(header)}</th>`).join('')}</tr></thead>
-        <tbody>
-          ${rows.map((row) => `<tr>${row.map((cell) => `<td>${allowHtml ? (cell ?? '') : escapeHtml(cell ?? '')}</td>`).join('')}</tr>`).join('')}
-        </tbody>
-      </table>
-    </section>
-  `;
-}
-
-function rawSection(title, value) {
-  if (!value) return '';
-  return `
-    <section class="section">
-      <h3>${escapeHtml(title)}</h3>
-      <pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>
-    </section>
-  `;
-}
-
-function cardSection(title, items, allowHtml = false) {
-  if (!items.length) return '';
-  return `
-    <section class="section">
-      <h3>${escapeHtml(title)}</h3>
-      <div class="source-card-list">
-        ${items.map(item => `
-          <article class="source-card">
-            <div class="source-card-head">
-              <strong>${allowHtml ? item.title : escapeHtml(item.title || '')}</strong>
-              <div class="chips">${(item.meta || []).map(x => `<span class="badge">${escapeHtml(x)}</span>`).join('')}</div>
-            </div>
-            ${item.body ? `<p>${escapeHtml(item.body).slice(0, 1200)}</p>` : ''}
-          </article>
-        `).join('')}
-      </div>
-    </section>
-  `;
-}
-
 function inferComponentInput(query, vendor) {
   const trimmed = query.trim();
   if (!trimmed || trimmed.startsWith('pkg:')) return { name: null, vendor: vendor || null };
@@ -643,7 +598,6 @@ const CVSS_LABELS = {
 function parseCvssVector(vectorString) {
   if (!vectorString) return [];
   const parts = vectorString.split('/');
-  const version = parts.find((p) => p.startsWith('CVSS:'));
   const metrics = parts.filter((p) => p.includes(':') && !p.startsWith('CVSS:'));
   return metrics.map((m) => {
     const [key, value] = m.split(':');

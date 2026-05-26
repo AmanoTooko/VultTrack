@@ -7,8 +7,10 @@ public abstract class NormalizerBase(
     IEnumerable<IAffectedComponentHook> affectedHooks,
     IVulnerabilityCanonicalizer canonicalizer)
 {
+    protected IVulnerabilityCanonicalizer Canonicalizer { get; } = canonicalizer;
+
     protected Task<Guid> UpsertVulnerabilityAsync(NpgsqlConnection connection, Guid sourceId, Guid rawIndexId, string primaryIdentifier, string? title, string? description, string? status, DateTimeOffset? publishedAt, DateTimeOffset? modifiedAt, string[] identifiers, CancellationToken ct) =>
-        canonicalizer.UpsertCanonicalAsync(
+        Canonicalizer.UpsertCanonicalAsync(
             connection,
             new VulnerabilityCanonicalDraft(primaryIdentifier, title, description, status, publishedAt, modifiedAt, identifiers, sourceId, rawIndexId),
             ct);
@@ -82,34 +84,34 @@ public abstract class NormalizerBase(
         }
         else
         {
-        foreach (var batch in dedupedFacts.Chunk(4000))
-        {
-            var values = new List<string>();
-            var paramIdx = 1;
-            var cmdParams = new List<object>();
-            foreach (var fact in batch)
+            foreach (var batch in dedupedFacts.Chunk(4000))
             {
-                values.Add($"(${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},lower(${paramIdx - 1}),${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},true,${paramIdx++}::jsonb)");
-                cmdParams.Add(vulnerabilityId);
-                cmdParams.Add(recordId);
-                cmdParams.Add(sourceId);
-                cmdParams.Add(rawIndexId);
-                cmdParams.Add(fact.FactType);
-                cmdParams.Add((object?)fact.Ecosystem ?? DBNull.Value);
-                cmdParams.Add((object?)fact.PackageName ?? DBNull.Value);
-                cmdParams.Add((object?)fact.Purl ?? DBNull.Value);
-                cmdParams.Add((object?)PurlWithoutVersion(fact.Purl) ?? DBNull.Value);
-                cmdParams.Add((object?)fact.VersionRange ?? DBNull.Value);
-                cmdParams.Add((object?)fact.RangeType ?? DBNull.Value);
-                cmdParams.Add(fact.SourceSpecificJson);
-            }
+                var values = new List<string>();
+                var paramIdx = 1;
+                var cmdParams = new List<object>();
+                foreach (var fact in batch)
+                {
+                    values.Add($"(${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},lower(${paramIdx - 1}),${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},true,${paramIdx++}::jsonb)");
+                    cmdParams.Add(vulnerabilityId);
+                    cmdParams.Add(recordId);
+                    cmdParams.Add(sourceId);
+                    cmdParams.Add(rawIndexId);
+                    cmdParams.Add(fact.FactType);
+                    cmdParams.Add((object?)fact.Ecosystem ?? DBNull.Value);
+                    cmdParams.Add((object?)fact.PackageName ?? DBNull.Value);
+                    cmdParams.Add((object?)fact.Purl ?? DBNull.Value);
+                    cmdParams.Add((object?)PurlWithoutVersion(fact.Purl) ?? DBNull.Value);
+                    cmdParams.Add((object?)fact.VersionRange ?? DBNull.Value);
+                    cmdParams.Add((object?)fact.RangeType ?? DBNull.Value);
+                    cmdParams.Add(fact.SourceSpecificJson);
+                }
 
-            await using var batchCmd = new NpgsqlCommand(
-                $"insert into vulnerability_affected_facts (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem, package_name, normalized_package_name, purl, purl_without_version, version_range_raw, range_type, vulnerable, source_specific) values {string.Join(",", values)}",
-                connection);
-            for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
-            await batchCmd.ExecuteNonQueryAsync(ct);
-        }
+                await using var batchCmd = new NpgsqlCommand(
+                    $"insert into vulnerability_affected_facts (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem, package_name, normalized_package_name, purl, purl_without_version, version_range_raw, range_type, vulnerable, source_specific) values {string.Join(",", values)}",
+                    connection);
+                for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
+                await batchCmd.ExecuteNonQueryAsync(ct);
+            }
         }
 
         foreach (var hook in affectedHooks)

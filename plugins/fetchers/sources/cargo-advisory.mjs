@@ -47,7 +47,7 @@ function parseAdvisoryToml(raw) {
       val = val.slice(1, -1);
     } else if (val.startsWith('[') && val.endsWith(']')) {
       // Array: strip brackets and quotes
-      val = val.slice(1, -1).split(',').map(v => v.trim().replace(/^[\"']|[\"']$/g, '')).filter(Boolean);
+      val = val.slice(1, -1).split(',').map(v => v.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
     } else if (val === 'true') val = true;
     else if (val === 'false') val = false;
 

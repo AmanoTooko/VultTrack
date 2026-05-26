@@ -21,7 +21,10 @@ jobs:
           dotnet-version: 10.0.x
 
       - run: npm ci
+      - run: npm audit --audit-level=moderate
+      - run: npm run lint
       - run: npm test
+      - run: dotnet format VulTrack.slnx --verify-no-changes --verbosity minimal
       - run: dotnet test tests/VulTrack.Tests/VulTrack.Tests.csproj
 
   docker:
@@ -43,6 +46,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Set image namespace
+        run: echo "IMAGE_NAMESPACE=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
       - uses: docker/build-push-action@v6
         with:
           context: .
@@ -50,8 +56,8 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/vultrack-api:latest
-            ghcr.io/${{ github.repository_owner }}/vultrack-api:${{ github.sha }}
+            ghcr.io/${{ env.IMAGE_NAMESPACE }}/vultrack-api:latest
+            ghcr.io/${{ env.IMAGE_NAMESPACE }}/vultrack-api:${{ github.sha }}
 
       - uses: docker/build-push-action@v6
         with:
@@ -59,5 +65,5 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/vultrack-frontend:latest
-            ghcr.io/${{ github.repository_owner }}/vultrack-frontend:${{ github.sha }}
+            ghcr.io/${{ env.IMAGE_NAMESPACE }}/vultrack-frontend:latest
+            ghcr.io/${{ env.IMAGE_NAMESPACE }}/vultrack-frontend:${{ github.sha }}

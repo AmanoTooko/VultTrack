@@ -541,7 +541,7 @@ app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (NpgsqlDataSource db, st
 {
     string whereFilter, limitClause = "LIMIT 50";
     var parameters = new List<object> { (object?)ecosystem ?? "go" };
-    
+
     if (string.IsNullOrWhiteSpace(package))
     {
         whereFilter = "WHERE lower(c.ecosystem) = lower($1)";
@@ -552,7 +552,7 @@ app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (NpgsqlDataSource db, st
         parameters.Add(package);
         limitClause = "";
     }
-    
+
     await using var cmd = db.CreateCommand($"""
         SELECT c.ecosystem, c.package_name,
                count(DISTINCT c.vulnerability_id) as total_cves,
@@ -573,7 +573,7 @@ app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (NpgsqlDataSource db, st
         var totalCves = r.GetInt32(2);
         var factCount = r.GetInt32(3);
         int? affectedIfVersion = null, notAffectedIfVersion = null;
-        
+
         if (!string.IsNullOrWhiteSpace(version))
         {
             using var vc = db.CreateCommand("""
@@ -734,8 +734,14 @@ static async Task<List<object>> QueryRecordsGroupedAsync(NpgsqlDataSource db, Gu
     var rows = new List<object>();
     await using var r = await cmd.ExecuteReaderAsync(ct);
     while (await r.ReadAsync(ct))
-        rows.Add(new { code = r.GetString(0), name = r.GetString(1), recordId = r.GetString(2),
-            title = r.IsDBNull(3) ? null : r.GetString(3), updatedAt = r.GetFieldValue<DateTimeOffset>(4) });
+        rows.Add(new
+        {
+            code = r.GetString(0),
+            name = r.GetString(1),
+            recordId = r.GetString(2),
+            title = r.IsDBNull(3) ? null : r.GetString(3),
+            updatedAt = r.GetFieldValue<DateTimeOffset>(4)
+        });
     return rows;
 }
 
@@ -855,32 +861,6 @@ static object MakeResult(NpgsqlDataReader reader) => new
 static string[] TruncateNames(string[] names) =>
     names is { Length: > 15 } ? names[..15].Append($"+{names.Length - 15} more").ToArray() : names;
 
-static string? PurlStripVersion(string purl) => purl.Contains('@') && purl.LastIndexOf('@') > "pkg:".Length ? purl[..purl.LastIndexOf('@')] : purl;
-
-static string? EcosystemFromCyclonePurl(string? purl) => purl?.StartsWith("pkg:", StringComparison.OrdinalIgnoreCase) == true
-    ? purl["pkg:".Length..purl.IndexOf('/')].ToLowerInvariant()
-    : null;
-
-static string? MapEcosystem(string? eco) => eco?.ToLowerInvariant() switch
-{
-    "deb" => "debian",
-    "apk" => "alpine",
-    "rpm" or "redhat" or "suse" => "rpm",
-    null => null,
-    var x => x
-};
-
-static async Task InsertSbomVuln(NpgsqlDataSource db, Guid cid, string purl, NpgsqlDataReader sr, string? ver, CancellationToken ct)
-{
-    var range = sr.IsDBNull(7) ? null : sr.GetString(7);
-    var vm = ver is not null && range is not null ? VersionRangeMatcher.Matches(ver, range) : (bool?)null;
-    await using var ins = db.CreateCommand("INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched) VALUES($1,$2,$3,$4,$5,$6,$7) ON CONFLICT(sbom_component_id,vulnerability_id,COALESCE(normalized_range,'')) DO NOTHING");
-    ins.Parameters.AddWithValue(cid); ins.Parameters.AddWithValue(sr.GetGuid(0)); ins.Parameters.AddWithValue(purl);
-    ins.Parameters.AddWithValue((object?)sr.GetValue(6) ?? DBNull.Value); ins.Parameters.AddWithValue((object?)sr.GetValue(5) ?? DBNull.Value);
-    ins.Parameters.AddWithValue((object?)sr.GetValue(7) ?? DBNull.Value); ins.Parameters.AddWithValue((object?)vm ?? DBNull.Value);
-    await ins.ExecuteNonQueryAsync(ct);
-}
-
 static (string Ecosystem, string? Version)? ParseEcosystemVersion(string query)
 {
     if (string.IsNullOrWhiteSpace(query)) return null;
@@ -888,18 +868,36 @@ static (string Ecosystem, string? Version)? ParseEcosystemVersion(string query)
 
     var ecosystemKeywords = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
     {
-        ["go"] = "go", ["golang"] = "go",
-        ["npm"] = "npm", ["node"] = "npm", ["nodejs"] = "npm",
-        ["pypi"] = "PyPI", ["pip"] = "PyPI", ["python"] = "PyPI",
-        ["maven"] = "maven", ["java"] = "maven",
-        ["nuget"] = "nuget", [".net"] = "nuget", ["dotnet"] = "nuget",
-        ["cargo"] = "cargo", ["rust"] = "cargo", ["crates"] = "cargo",
-        ["rubygems"] = "RubyGems", ["ruby"] = "RubyGems", ["gem"] = "RubyGems",
-        ["packagist"] = "Packagist", ["php"] = "Packagist", ["composer"] = "Packagist",
+        ["go"] = "go",
+        ["golang"] = "go",
+        ["npm"] = "npm",
+        ["node"] = "npm",
+        ["nodejs"] = "npm",
+        ["pypi"] = "PyPI",
+        ["pip"] = "PyPI",
+        ["python"] = "PyPI",
+        ["maven"] = "maven",
+        ["java"] = "maven",
+        ["nuget"] = "nuget",
+        [".net"] = "nuget",
+        ["dotnet"] = "nuget",
+        ["cargo"] = "cargo",
+        ["rust"] = "cargo",
+        ["crates"] = "cargo",
+        ["rubygems"] = "RubyGems",
+        ["ruby"] = "RubyGems",
+        ["gem"] = "RubyGems",
+        ["packagist"] = "Packagist",
+        ["php"] = "Packagist",
+        ["composer"] = "Packagist",
         ["alpine"] = "alpine",
         ["debian"] = "debian",
         ["ubuntu"] = "ubuntu",
-        ["rpm"] = "rpm", ["suse"] = "rpm", ["redhat"] = "rpm", ["rhel"] = "rpm", ["centos"] = "rpm"
+        ["rpm"] = "rpm",
+        ["suse"] = "rpm",
+        ["redhat"] = "rpm",
+        ["rhel"] = "rpm",
+        ["centos"] = "rpm"
     };
 
     var versionPattern = @"(\d+\.\d+(?:\.\d+)?(?:[-.]\w+)*)";

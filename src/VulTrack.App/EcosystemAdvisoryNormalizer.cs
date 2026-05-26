@@ -74,7 +74,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
             drafts.Add((row, new VulnerabilityCanonicalDraft(primary, null, null, "active", row.PublishedAt, row.ModifiedAt, identifiers, row.SourceId, row.RawIndexId)));
         }
 
-        var cache = await canonicalizer.ResolveCanonicalIdsBatchAsync(connection, drafts.Select(d => d.Draft).ToList(), ct);
+        var cache = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, drafts.Select(d => d.Draft).ToList(), ct);
 
         foreach (var (row, draft) in drafts)
         {
@@ -87,7 +87,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
                 var title = ExtractTitle(payload, isCsaf, row.AdvisoryId);
                 var description = ExtractDescription(payload, isCsaf, title);
                 var fullDraft = new VulnerabilityCanonicalDraft(primary, title, description, "active", row.PublishedAt, row.ModifiedAt, identifiers, row.SourceId, row.RawIndexId);
-                var vulnerabilityId = await canonicalizer.GetOrCreateCanonicalAsync(connection, fullDraft, cache, ct);
+                var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, fullDraft, cache, ct);
                 var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.AdvisoryId, title, description, "active", row.Payload, ct);
                 await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
                 await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, description), ct);

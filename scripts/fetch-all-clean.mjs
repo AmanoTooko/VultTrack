@@ -96,7 +96,7 @@ const okCount = results.filter(r => r.ok).length;
 const failCount = results.filter(r => !r.ok).length;
 const totalFetched = results.reduce((s, r) => s + r.fetchedCount, 0);
 
-log(`Results: ${okCount}/${SOURCES.length} succeeded, total ${totalFetched} records`);
+log(`Results: ${okCount}/${SOURCES.length} succeeded, ${failCount} failed, total ${totalFetched} records`);
 log(`Summary saved to: ${summary}`);
 
 // Print results

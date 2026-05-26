@@ -129,7 +129,7 @@ export async function saveCheckpoint(client, sourceId, checkpoint) {
  * Supports .zip, .tar.xz, .json.gz formats via system tools.
  * Skips if archive hash matches checkpoint.
  */
-export async function initFetch({ client, ctx, archiveUrl, format, processFile }) {
+export async function initFetch({ ctx, archiveUrl, format, processFile }) {
   const fs = await import('node:fs/promises');
   const path = await import('node:path');
   const { createWriteStream } = await import('node:fs');
@@ -167,13 +167,11 @@ export async function initFetch({ client, ctx, archiveUrl, format, processFile }
   }
 
   console.error('Download complete, extracting...');
-  let files = [];
-
   if (format === 'zip-list' || ext === 'zip') {
     // List .json entries
     const list = spawnSync('unzip', ['-Z1', archivePath], { encoding: 'utf8', maxBuffer: 50 * 1024 * 1024 });
     if (list.status !== 0) throw new Error(`Failed to list archive: ${list.stderr}`);
-    files = list.stdout.split('\n').filter(f => f.endsWith('.json'));
+    const files = list.stdout.split('\n').filter(f => f.endsWith('.json'));
     for (const entry of files) {
       const result = spawnSync('unzip', ['-p', archivePath, entry], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
       if (result.status !== 0) continue;

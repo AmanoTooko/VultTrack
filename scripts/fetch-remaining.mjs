@@ -22,7 +22,11 @@ for (const sourceCode of SOURCES) {
   let log = (msg) => {
     const line = `[${new Date().toISOString()}] ${msg}`;
     console.log(line);
-    try { writeFileSync(logFile, line + '\n', { flag: 'a' }); } catch {}
+    try {
+      writeFileSync(logFile, line + '\n', { flag: 'a' });
+    } catch {
+      // Logging must not fail the fetch batch.
+    }
   };
 
   log(`Starting ${sourceCode}...`);

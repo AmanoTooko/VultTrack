@@ -83,9 +83,15 @@ public static class SbomEndpoints
             "SELECT id,name,format,component_count,matched_count,uploaded_at FROM sbom_uploads ORDER BY uploaded_at DESC LIMIT 50");
         await using var r = await c.ExecuteReaderAsync(ct);
         while (await r.ReadAsync(ct))
-            items.Add(new { id = r.GetGuid(0), name = r.GetString(1), format = r.GetString(2),
-                componentCount = r.GetInt32(3), matchedCount = r.GetInt32(4),
-                uploadedAt = r.GetFieldValue<DateTimeOffset>(5) });
+            items.Add(new
+            {
+                id = r.GetGuid(0),
+                name = r.GetString(1),
+                format = r.GetString(2),
+                componentCount = r.GetInt32(3),
+                matchedCount = r.GetInt32(4),
+                uploadedAt = r.GetFieldValue<DateTimeOffset>(5)
+            });
         return ApiResult.Ok(new { items });
     }
 
@@ -94,32 +100,57 @@ public static class SbomEndpoints
         object? sbom = null;
         await using (var c = db.CreateCommand(
             "SELECT id,name,format,component_count,matched_count,uploaded_at FROM sbom_uploads WHERE id=$1"))
-        { c.Parameters.AddWithValue(id); await using var r = await c.ExecuteReaderAsync(ct);
-          if (await r.ReadAsync(ct)) sbom = new { id = r.GetGuid(0), name = r.GetString(1), format = r.GetString(2),
-              componentCount = r.GetInt32(3), matchedCount = r.GetInt32(4), uploadedAt = r.GetFieldValue<DateTimeOffset>(5) }; }
+        {
+            c.Parameters.AddWithValue(id); await using var r = await c.ExecuteReaderAsync(ct);
+            if (await r.ReadAsync(ct)) sbom = new
+            {
+                id = r.GetGuid(0),
+                name = r.GetString(1),
+                format = r.GetString(2),
+                componentCount = r.GetInt32(3),
+                matchedCount = r.GetInt32(4),
+                uploadedAt = r.GetFieldValue<DateTimeOffset>(5)
+            };
+        }
         if (sbom is null) return ApiResult.NotFound("NOT_FOUND", id.ToString());
 
         var comps = new List<object>();
         await using (var cc = db.CreateCommand(
             "SELECT id,purl,name,version,ecosystem,component_type,vuln_count FROM sbom_components WHERE sbom_id=$1 ORDER BY ecosystem,name"))
-        { cc.Parameters.AddWithValue(id); await using var r = await cc.ExecuteReaderAsync(ct);
-          while (await r.ReadAsync(ct)) comps.Add(new { id = r.GetGuid(0), purl = r.GetString(1),
-              name = r.IsDBNull(2) ? null : r.GetString(2), version = r.IsDBNull(3) ? null : r.GetString(3),
-              ecosystem = r.IsDBNull(4) ? null : r.GetString(4), type = r.IsDBNull(5) ? null : r.GetString(5),
-              vulnCount = r.GetInt32(6) }); }
+        {
+            cc.Parameters.AddWithValue(id); await using var r = await cc.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct)) comps.Add(new
+            {
+                id = r.GetGuid(0),
+                purl = r.GetString(1),
+                name = r.IsDBNull(2) ? null : r.GetString(2),
+                version = r.IsDBNull(3) ? null : r.GetString(3),
+                ecosystem = r.IsDBNull(4) ? null : r.GetString(4),
+                type = r.IsDBNull(5) ? null : r.GetString(5),
+                vulnCount = r.GetInt32(6)
+            });
+        }
 
         var vulns = new List<object>();
         await using (var vc = db.CreateCommand(
             "SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT 2000"))
-        { vc.Parameters.AddWithValue(id); await using var r = await vc.ExecuteReaderAsync(ct);
-          while (await r.ReadAsync(ct)) vulns.Add(new { id = r.GetGuid(0), componentId = r.GetGuid(1),
-              vulnerabilityId = r.GetGuid(2), primaryIdentifier = r.GetString(3),
-              title = r.IsDBNull(4) ? null : r.GetString(4), severityLabel = r.IsDBNull(5) ? null : r.GetString(5),
-              cvssScore = r.IsDBNull(6) ? (decimal?)null : r.GetDecimal(6),
-              componentName = r.IsDBNull(7) ? null : r.GetString(7),
-              ecosystem = r.IsDBNull(8) ? null : r.GetString(8),
-              versionRange = r.IsDBNull(9) ? null : r.GetString(9),
-              versionMatched = r.IsDBNull(10) ? (bool?)null : r.GetBoolean(10) }); }
+        {
+            vc.Parameters.AddWithValue(id); await using var r = await vc.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct)) vulns.Add(new
+            {
+                id = r.GetGuid(0),
+                componentId = r.GetGuid(1),
+                vulnerabilityId = r.GetGuid(2),
+                primaryIdentifier = r.GetString(3),
+                title = r.IsDBNull(4) ? null : r.GetString(4),
+                severityLabel = r.IsDBNull(5) ? null : r.GetString(5),
+                cvssScore = r.IsDBNull(6) ? (decimal?)null : r.GetDecimal(6),
+                componentName = r.IsDBNull(7) ? null : r.GetString(7),
+                ecosystem = r.IsDBNull(8) ? null : r.GetString(8),
+                versionRange = r.IsDBNull(9) ? null : r.GetString(9),
+                versionMatched = r.IsDBNull(10) ? (bool?)null : r.GetBoolean(10)
+            });
+        }
 
         return ApiResult.Ok(new { sbom, components = comps, vulnerabilities = vulns });
     }
@@ -131,10 +162,12 @@ public static class SbomEndpoints
         var comps = new List<(Guid Id, string Purl, string? Name, string? Version, string? Eco)>();
         await using (var s = new NpgsqlCommand(
             "SELECT id,purl,name,version,ecosystem FROM sbom_components WHERE sbom_id=$1", conn))
-        { s.Parameters.AddWithValue(req.SbomId); await using var r = await s.ExecuteReaderAsync(ct);
-          while (await r.ReadAsync(ct))
-              comps.Add((r.GetGuid(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2),
-                  r.IsDBNull(3) ? null : r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4))); }
+        {
+            s.Parameters.AddWithValue(req.SbomId); await using var r = await s.ExecuteReaderAsync(ct);
+            while (await r.ReadAsync(ct))
+                comps.Add((r.GetGuid(0), r.GetString(1), r.IsDBNull(2) ? null : r.GetString(2),
+                    r.IsDBNull(3) ? null : r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4)));
+        }
 
         foreach (var (cid, purl, name, ver, eco) in comps)
         {
@@ -219,7 +252,11 @@ public static class SbomEndpoints
 
     private static string? MapEcosystem(string? eco) => eco?.ToLowerInvariant() switch
     {
-        "deb" => "debian", "apk" => "alpine", "rpm" => "rpm", null => null, var x => x
+        "deb" => "debian",
+        "apk" => "alpine",
+        "rpm" => "rpm",
+        null => null,
+        var x => x
     };
 
     private static string? PurlToEcosystem(string? purl)
@@ -229,7 +266,10 @@ public static class SbomEndpoints
         if (slash < 0) return null;
         return purl["pkg:".Length..slash].ToLowerInvariant() switch
         {
-            "deb" => "debian", "apk" => "alpine", "rpm" => "rpm", var x => x
+            "deb" => "debian",
+            "apk" => "alpine",
+            "rpm" => "rpm",
+            var x => x
         };
     }
 }

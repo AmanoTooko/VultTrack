@@ -73,8 +73,6 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
   let latestSeen = null;
   let lastProcessedTimestamp = null;
   let eligibleSeen = 0;
-  let hitLimit = false;
-  let reachedWatermark = false;
   let resumeOffset = 0;
 
   for (const line of csv.split(/\r?\n/)) {
@@ -119,8 +117,8 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
   }
 
   const processedOffset = resumeOffset + ids.length;
-  hitLimit = ids.length >= max && max < Number.MAX_SAFE_INTEGER;
-  reachedWatermark = !hitLimit;
+  const hitLimit = ids.length >= max && max < Number.MAX_SAFE_INTEGER;
+  const reachedWatermark = !hitLimit;
 
   if (hitLimit) {
     return {

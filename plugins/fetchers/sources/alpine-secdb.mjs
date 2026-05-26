@@ -1,4 +1,3 @@
-import { fetchJson } from '../lib/http.mjs';
 import { getEnv, getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
