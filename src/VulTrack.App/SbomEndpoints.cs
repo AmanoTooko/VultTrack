@@ -170,7 +170,8 @@ public static class SbomEndpoints
 
             foreach (var (vid, _, _, _, _, dname, ecosys, range) in matches)
             {
-                var vm = ver is not null && range is not null
+                if (string.IsNullOrEmpty(range)) continue;
+                var vm = ver is not null && range is not null && ver is not null
                     ? VersionRangeMatcher.Matches(ver, range) : (bool?)null;
 
                 if (vm == false) continue;
