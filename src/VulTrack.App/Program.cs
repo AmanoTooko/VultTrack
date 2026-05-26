@@ -9,6 +9,7 @@ var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL")
     ?? "Host=localhost;Port=5432;Database=vultrack;Username=vultrack;Password=vultrack";
 
 builder.Services.AddSingleton(NpgsqlDataSource.Create(ToNpgsqlConnectionString(databaseUrl)));
+builder.Services.Configure<VulTrackSchedulerOptions>(builder.Configuration.GetSection("VulTrack:Scheduler"));
 builder.Services.AddSingleton<NvdRawProcessor>();
 builder.Services.AddSingleton<IVulnerabilityCanonicalizer, VulnerabilityCanonicalizer>();
 builder.Services.AddSingleton<IAffectedComponentHook, DefaultAffectedComponentHook>();
@@ -604,6 +605,97 @@ app.MapGet("/api/v1/benchmark.packageCves", async (NpgsqlDataSource db, string n
     if (await r.ReadAsync(ct))
         return ApiResult.Ok(new { name, cves = r.GetInt32(1), facts = r.GetInt32(2), ecosystems = r.GetString(3) });
     return ApiResult.Ok(new { name, cves = 0 });
+});
+
+app.MapGet("/api/v1/benchmark.matchingQuality", async (NpgsqlDataSource db, string? ecosystem, string? packageName, Guid? sbomId, CancellationToken ct) =>
+{
+    var affectedSummary = new List<object>();
+    await using (var cmd = db.CreateCommand("""
+        select
+          coalesce(nullif(lower(ecosystem), ''), 'unknown') as ecosystem,
+          count(*) as facts,
+          count(distinct vulnerability_id) as vulnerabilities,
+          count(*) filter (where primary_purl is not null and primary_purl <> '') as purl_facts,
+          count(*) filter (where primary_cpe23_uri is not null and primary_cpe23_uri <> '') as cpe_facts,
+          count(*) filter (where normalized_range is null or normalized_range = '') as no_range,
+          count(*) filter (where normalized_range ~ '^[[:space:]]*>[[:space:]]*0(\.0+)*[[:space:]]*$') as open_lower_bound,
+          count(*) filter (where normalized_range is not null and normalized_range <> '' and normalized_range !~ '(<=|>=|==|=|<|>)') as unparseable_range
+        from vulnerability_affected_components
+        where ($1::text is null or lower(ecosystem) = lower($1))
+          and ($2::text is null or lower(package_name) = lower($2) or lower(display_name) = lower($2))
+        group by coalesce(nullif(lower(ecosystem), ''), 'unknown')
+        order by facts desc
+        limit 50
+        """))
+    {
+        cmd.Parameters.AddWithValue((object?)ecosystem ?? DBNull.Value);
+        cmd.Parameters.AddWithValue((object?)packageName ?? DBNull.Value);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var facts = reader.GetInt64(1);
+            var noRange = reader.GetInt64(5);
+            var unparseable = reader.GetInt64(7);
+            affectedSummary.Add(new
+            {
+                ecosystem = reader.GetString(0),
+                facts,
+                vulnerabilities = reader.GetInt64(2),
+                purlFacts = reader.GetInt64(3),
+                cpeFacts = reader.GetInt64(4),
+                noRange,
+                openLowerBound = reader.GetInt64(6),
+                unparseableRange = unparseable,
+                actionableRangeRatio = facts == 0 ? 0 : Math.Round((double)(facts - noRange - unparseable) / facts, 4)
+            });
+        }
+    }
+
+    object? sbomSummary = null;
+    if (sbomId is not null)
+    {
+        await using var cmd = db.CreateCommand("""
+            select
+              count(*) as findings,
+              count(*) filter (where sv.version_matched = true) as affected,
+              count(*) filter (where sv.version_matched = false) as fixed,
+              count(*) filter (where sv.version_matched is null) as unknown,
+              count(*) filter (where sv.normalized_range is null or sv.normalized_range = '') as no_range,
+              count(distinct sv.sbom_component_id) as components_with_findings
+            from sbom_vulnerabilities sv
+            join sbom_components sc on sc.id = sv.sbom_component_id
+            where sc.sbom_id = $1
+            """);
+        cmd.Parameters.AddWithValue(sbomId.Value);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (await reader.ReadAsync(ct))
+        {
+            sbomSummary = new
+            {
+                sbomId,
+                findings = reader.GetInt64(0),
+                affected = reader.GetInt64(1),
+                notAffected = reader.GetInt64(2),
+                unknown = reader.GetInt64(3),
+                noRange = reader.GetInt64(4),
+                componentsWithFindings = reader.GetInt64(5)
+            };
+        }
+    }
+
+    return ApiResult.Ok(new
+    {
+        filters = new { ecosystem, packageName, sbomId },
+        affectedSummary,
+        sbomSummary,
+        standard = new
+        {
+            affected = "exact purl or normalized package match plus a parseable normalized_range where VersionRangeMatcher returns true",
+            notAffected = "same component identity but VersionRangeMatcher returns false",
+            unknown = "component identity matches but version is absent, range is absent, or range cannot be parsed",
+            suspiciousBroadRange = "ranges like >0 are counted separately because they may mean source-level coarse package association"
+        }
+    });
 });
 
 static Dictionary<string, string> BuildSourceUrls(string cveId, string[] aliases)

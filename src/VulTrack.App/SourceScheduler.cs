@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using Microsoft.Extensions.Options;
 using Npgsql;
 
 namespace VulTrack.App;
@@ -6,18 +7,21 @@ namespace VulTrack.App;
 public sealed class SourceScheduler(
     NpgsqlDataSource db,
     IRawNormalizationService normalizer,
+    IOptions<VulTrackSchedulerOptions> options,
     ILogger<SourceScheduler> logger) : BackgroundService
 {
+    private VulTrackSchedulerOptions Options => options.Value;
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("VULTRACK_SCHEDULER_ENABLED"), "true", StringComparison.OrdinalIgnoreCase))
+        if (!EnvBool("VULTRACK_SCHEDULER_ENABLED", Options.Enabled))
         {
             logger.LogInformation("VulTrack scheduler is disabled.");
             return;
         }
 
-        var normalizeInterval = TimeSpan.FromSeconds(15);
-        var fetchInterval = TimeSpan.FromHours(12);
+        var normalizeInterval = TimeSpan.FromSeconds(EnvInt("SCHEDULER_INTERVAL_SECONDS", Options.NormalizeIntervalSeconds, 1));
+        var fetchInterval = TimeSpan.FromHours(Math.Max(1, Options.FetchIntervalHours));
 
         _ = Task.Run(() => RunFetchLoopAsync(fetchInterval, stoppingToken), stoppingToken);
         await RunNormalizeLoopAsync(normalizeInterval, stoppingToken);
@@ -25,7 +29,7 @@ public sealed class SourceScheduler(
 
     private async Task RunNormalizeLoopAsync(TimeSpan interval, CancellationToken ct)
     {
-        var limit = int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_NORMALIZE_LIMIT"), out var parsed) ? parsed : 500;
+        var limit = EnvInt("SCHEDULER_NORMALIZE_LIMIT", Options.NormalizeLimit, 1);
         while (!ct.IsCancellationRequested)
         {
             try
@@ -84,7 +88,7 @@ public sealed class SourceScheduler(
     {
         await DedupEpssPendingAsync(ct);
 
-        var limit = int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_NORMALIZE_LIMIT"), out var parsed) ? parsed : 500;
+        var limit = EnvInt("SCHEDULER_NORMALIZE_LIMIT", Options.NormalizeLimit, 1);
         var allSources = await LoadAllSourcesAsync(ct);
         foreach (var source in allSources)
         {
@@ -133,14 +137,19 @@ public sealed class SourceScheduler(
     {
         var rows = new List<ScheduledSource>();
         await using var cmd = db.CreateCommand("""
-            select s.code, s.schedule_cron,
+            select s.code, s.schedule_cron, s.config_json->>'runMode' as run_mode,
                    max(r.finished_at) filter (where r.status = 'succeeded') as last_success
             from sources s
             left join source_sync_runs r on r.source_id = s.id
-            where s.enabled = true and s.schedule_cron is not null
-            group by s.id, s.code, s.schedule_cron
+            where s.enabled = true
+              and (
+                s.schedule_cron is not null
+                or ($1::boolean = true and s.config_json->>'runMode' = 'init')
+              )
+            group by s.id, s.code, s.schedule_cron, s.config_json->>'runMode'
             order by s.code
             """);
+        cmd.Parameters.AddWithValue(EnvBool("SCHEDULER_INCLUDE_INIT_SOURCES", Options.IncludeInitSources));
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -150,9 +159,17 @@ public sealed class SourceScheduler(
                 continue;
             }
 
-            var cron = reader.GetString(1);
-            var lastSuccess = reader.IsDBNull(2) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(2);
-            if (IsDue(cron, lastSuccess, DateTimeOffset.UtcNow))
+            var cron = reader.IsDBNull(1) ? null : reader.GetString(1);
+            var runMode = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var lastSuccess = reader.IsDBNull(3) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(3);
+            if (string.Equals(runMode, "init", StringComparison.OrdinalIgnoreCase) && cron is null)
+            {
+                if (lastSuccess is null)
+                    rows.Add(new ScheduledSource(code, "", lastSuccess));
+                continue;
+            }
+
+            if (cron is not null && IsDue(cron, lastSuccess, DateTimeOffset.UtcNow))
             {
                 rows.Add(new ScheduledSource(code, cron, lastSuccess));
             }
@@ -161,12 +178,12 @@ public sealed class SourceScheduler(
         return rows;
     }
 
-    private static bool IsSourceAllowed(string code)
+    private bool IsSourceAllowed(string code)
     {
         var configured = Environment.GetEnvironmentVariable("SCHEDULER_SOURCE_CODES");
         if (string.IsNullOrWhiteSpace(configured))
         {
-            return true;
+            return Options.SourceCodes.Length == 0 || Options.SourceCodes.Contains(code, StringComparer.OrdinalIgnoreCase);
         }
 
         return configured
@@ -177,10 +194,8 @@ public sealed class SourceScheduler(
     private async Task RunSourceAsync(string source, CancellationToken ct)
     {
         var repoRoot = ResolveRepoRoot();
-        var node = Environment.GetEnvironmentVariable("PLUGIN_NODE_BIN") ?? "node";
-        var timeout = TimeSpan.FromSeconds(int.TryParse(Environment.GetEnvironmentVariable("SCHEDULER_FETCH_TIMEOUT_SECONDS"), out var timeoutSeconds)
-            ? Math.Max(30, timeoutSeconds)
-            : 600);
+        var node = Environment.GetEnvironmentVariable("PLUGIN_NODE_BIN") ?? Options.PluginNodeBin;
+        var timeout = TimeSpan.FromSeconds(EnvInt("SCHEDULER_FETCH_TIMEOUT_SECONDS", Options.FetchTimeoutSeconds, 30));
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeoutCts.CancelAfter(timeout);
         var psi = new ProcessStartInfo(node)
@@ -193,9 +208,10 @@ public sealed class SourceScheduler(
         psi.ArgumentList.Add("--source");
         psi.ArgumentList.Add(source);
         psi.Environment["DATABASE_URL"] = ToPluginDatabaseUrl(Environment.GetEnvironmentVariable("DATABASE_URL") ?? "");
-        if (Environment.GetEnvironmentVariable("SCHEDULER_FETCH_LIMIT") is { Length: > 0 } limit)
+        var fetchLimit = Environment.GetEnvironmentVariable("SCHEDULER_FETCH_LIMIT") ?? Options.FetchLimit;
+        if (!string.IsNullOrWhiteSpace(fetchLimit))
         {
-            psi.Environment["FETCHER_MAX_RECORDS"] = limit;
+            psi.Environment["FETCHER_MAX_RECORDS"] = fetchLimit;
         }
 
         logger.LogInformation("Starting fetcher {Source}", source);
@@ -333,6 +349,32 @@ public sealed class SourceScheduler(
     }
 
     private sealed record ScheduledSource(string Code, string Cron, DateTimeOffset? LastSuccess);
+
+    private static int EnvInt(string name, int fallback, int min)
+    {
+        return int.TryParse(Environment.GetEnvironmentVariable(name), out var parsed)
+            ? Math.Max(min, parsed)
+            : Math.Max(min, fallback);
+    }
+
+    private static bool EnvBool(string name, bool fallback)
+    {
+        var value = Environment.GetEnvironmentVariable(name);
+        return string.IsNullOrWhiteSpace(value)
+            ? fallback
+            : string.Equals(value, "true", StringComparison.OrdinalIgnoreCase) || value == "1";
+    }
 }
-  
-// Add dedup logic in the normalize loop
+
+public sealed class VulTrackSchedulerOptions
+{
+    public bool Enabled { get; init; }
+    public int NormalizeIntervalSeconds { get; init; } = 15;
+    public int FetchIntervalHours { get; init; } = 12;
+    public int NormalizeLimit { get; init; } = 500;
+    public int FetchTimeoutSeconds { get; init; } = 600;
+    public string? FetchLimit { get; init; }
+    public string PluginNodeBin { get; init; } = "node";
+    public string[] SourceCodes { get; init; } = [];
+    public bool IncludeInitSources { get; init; }
+}

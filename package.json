@@ -9,6 +9,7 @@
     "normalize:run": "node scripts/run-full-normalization.mjs",
     "normalize:parallel": "node scripts/run-parallel-normalization.mjs",
     "normalize:sources": "node scripts/normalize-source-smoke.mjs",
+    "benchmark:matching": "node scripts/benchmark-matching-quality.mjs",
     "test": "node --test tests/node/*.test.mjs",
     "test:integration": "node --test tests/integration/*.test.mjs",
     "test:api": "node --test tests/api/*.test.mjs"

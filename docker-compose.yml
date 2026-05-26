@@ -5,17 +5,15 @@ services:
     command:
       - postgres
       - -c
-      - shared_buffers=1GB
+      - shared_buffers=6GB
       - -c
-      - effective_cache_size=3GB
+      - effective_cache_size=18GB
       - -c
-      - work_mem=16MB
+      - work_mem=64MB
       - -c
-      - maintenance_work_mem=256MB
+      - maintenance_work_mem=2GB
       - -c
       - checkpoint_timeout=15min
-      - -c
-      - max_wal_size=4GB
       - -c
       - random_page_cost=1.1
       - -c
@@ -27,8 +25,14 @@ services:
       - -c
       - autovacuum_vacuum_cost_limit=2000
       - -c
-      - max_parallel_workers_per_gather=0
-    shm_size: '256m'
+      - max_wal_size=8GB
+      - -c
+      - max_worker_processes=8
+      - -c
+      - max_parallel_workers=4
+      - -c
+      - max_parallel_workers_per_gather=2
+    shm_size: '2g'
     environment:
       POSTGRES_DB: vultrack
       POSTGRES_USER: vultrack
@@ -36,7 +40,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - /Volumes/NekoMac/Dev/VulTrack/pgdata:/var/lib/postgresql/data
+      - ./pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vultrack -d vultrack"]
@@ -56,10 +60,12 @@ services:
       DATABASE_URL: postgres://vultrack:vultrack@vultrack-postgres:5432/vultrack
       VULTRACK_REPO_ROOT: /workspace
       VULTRACK_SCHEDULER_ENABLED: "true"
-      SCHEDULER_INTERVAL_SECONDS: "5"
+      SCHEDULER_INTERVAL_SECONDS: "15"
+      SCHEDULER_FETCH_TIMEOUT_SECONDS: "1800"
       SCHEDULER_FETCH_LIMIT:
       SCHEDULER_NORMALIZE_LIMIT: "5000"
       SCHEDULER_SOURCE_CODES:
+      SCHEDULER_INCLUDE_INIT_SOURCES: "false"
     volumes:
       - .:/workspace
     command: ["dotnet", "run", "--urls", "http://0.0.0.0:8080"]

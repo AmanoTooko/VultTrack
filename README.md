@@ -43,6 +43,12 @@ Run normalization:
 API_BASE_URL=http://localhost:5099 LIMIT_PER_SOURCE=50 NORMALIZE_PARALLELISM=4 npm run normalize:parallel
 ```
 
+Run matching benchmark:
+
+```bash
+API_BASE_URL=http://localhost:5099 npm run benchmark:matching
+```
+
 ## Important Paths
 
 - Fetchers: `plugins/fetchers/`
@@ -52,6 +58,8 @@ API_BASE_URL=http://localhost:5099 LIMIT_PER_SOURCE=50 NORMALIZE_PARALLELISM=4 n
 - Frontend container: `frontend/`
 - Design docs: `docs/design/`
 - Performance report: `docs/reports/pgsql-normalization-performance.md`
+- Matching benchmark: `docs/benchmark-matching.md`
+- Oracle ARM deployment: `docs/deployment/oracle-arm.md`
 - Current agent TODO/status: `docs/agent-todo.md`
 
 ## Configuration
@@ -66,6 +74,12 @@ Common environment variables:
 - `FETCHER_MAX_RECORDS`
 - `LIMIT_PER_SOURCE`
 - `NORMALIZE_PARALLELISM`
+- `VULTRACK_SCHEDULER_ENABLED`
+- `SCHEDULER_INTERVAL_SECONDS`
+- `SCHEDULER_FETCH_TIMEOUT_SECONDS`
+- `SCHEDULER_NORMALIZE_LIMIT`
+- `SCHEDULER_SOURCE_CODES`
+- `SCHEDULER_INCLUDE_INIT_SOURCES`
 
 ## License
 

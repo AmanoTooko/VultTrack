@@ -1,9 +1,12 @@
 const state = {
   mode: 'vulnerability',
-  selectedId: null
+  selectedId: null,
+  sidebarCollapsed: localStorage.getItem('vultrack.sidebarCollapsed') === 'true'
 };
 
 const el = {
+  shell: document.querySelector('.shell'),
+  sidebarToggle: document.querySelector('#sidebarToggle'),
   statusLine: document.querySelector('#statusLine'),
   refreshButton: document.querySelector('#refreshButton'),
   metricVulns: document.querySelector('#metricVulns'),
@@ -21,6 +24,14 @@ const el = {
   resultList: document.querySelector('#resultList'),
   detailPane: document.querySelector('#detailPane')
 };
+
+el.shell.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+
+el.sidebarToggle?.addEventListener('click', () => {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  localStorage.setItem('vultrack.sidebarCollapsed', String(state.sidebarCollapsed));
+  el.shell.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+});
 
 el.refreshButton.addEventListener('click', () => {
   loadStatus();
@@ -187,10 +198,11 @@ function renderDetail(data) {
   const records = data.records || [];
   const severities = data.severities || [];
   const refs = data.references || [];
-  const descriptions = data.descriptions || [];
+  const descriptions = aggregateDescriptions(data.descriptions || []);
   const affected = data.affectedComponents || [];
   const sourceUrls = data.sourceUrls || {};
   const sourceTags = [...new Set(records.map(r => r.code).filter(Boolean))];
+  const affectedByEco = groupByEco(affected);
 
   el.detailPane.innerHTML = `
     <header class="detail-header">
@@ -207,24 +219,27 @@ function renderDetail(data) {
         <span class="kv-inline">Modified <b>${date(v.modifiedAt)}</b></span>
         <span class="kv-inline">Sources <b>${fmt(sourceTags.length)}</b></span>
         <span class="kv-inline">Affected <b>${fmt(v.affectedComponentCount)}</b></span>
+        <span class="kv-inline">Ecosystems <b>${fmt(Object.keys(affectedByEco).length)}</b></span>
       </div>
       <div class="chips" style="margin-top:4px">
         ${sourceTags.map(s => `<span class="badge tag-source">${escapeHtml(s)}</span>`).join('')}
       </div>
-      ${Object.keys(sourceUrls).length ? `<div style="margin-top:8px">${Object.entries(sourceUrls).map(([k,u]) => 
+      ${Object.keys(sourceUrls).length ? `<div style="margin-top:8px">${Object.entries(sourceUrls).map(([k,u]) =>
         `<a href="${escapeAttr(u)}" target="_blank" rel="noreferrer" class="badge" style="text-decoration:none;margin:2px">&#128279; ${escapeHtml(k)}</a>`
       ).join('')}</div>` : ''}
     </header>
 
-    <div style="display:flex;gap:4px;margin:12px 0;border-bottom:1px solid var(--line);padding-bottom:8px">
-      ${['Overview','Affected','Sources','References'].map((t,i) => 
-        `<button class="tab detail-tab" data-dtab="${i}" style="padding:6px 14px;${i===0?'background:#eef':''}">${t}</button>`
+    <div class="detail-tabs">
+      ${['Overview','Affected','Sources','References'].map((t,i) =>
+        `<button class="tab detail-tab ${i === 0 ? 'is-active' : ''}" data-dtab="${i}">${t}</button>`
       ).join('')}
     </div>
 
     <div id="dt-0" class="detail-sections">
+      ${renderOverviewCards(v, affectedByEco, records, refs)}
       ${descriptions.length ? renderDescriptionCards(descriptions) : ''}
       ${severities.length ? renderSeverityCards(severities) : ''}
+      ${refs.length ? renderSourceLinks(refs) : ''}
     </div>
     <div id="dt-1" class="detail-sections" style="display:none">
       ${renderAffectedGrouped(affected, v.primaryIdentifier)}
@@ -239,8 +254,8 @@ function renderDetail(data) {
 
   el.detailPane.querySelectorAll('.detail-tab').forEach(tab => {
     tab.addEventListener('click', () => {
-      el.detailPane.querySelectorAll('.detail-tab').forEach(t => t.style.background = '');
-      tab.style.background = '#eef';
+      el.detailPane.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('is-active'));
+      tab.classList.add('is-active');
       el.detailPane.querySelectorAll('[id^="dt-"]').forEach(d => d.style.display = 'none');
       const target = document.getElementById('dt-' + tab.dataset.dtab);
       if (target) target.style.display = '';
@@ -252,6 +267,42 @@ function sourceTag(code) {
   return `<span class="badge tag-source">${escapeHtml(code || '?')}</span>`;
 }
 
+function renderOverviewCards(v, affectedByEco, records, refs) {
+  const topEcosystems = Object.entries(affectedByEco)
+    .sort((a, b) => b[1].length - a[1].length)
+    .slice(0, 8);
+  const sourceCount = new Set(records.map(r => r.code).filter(Boolean)).size;
+  return `
+    <section class="detail-section">
+      <h3 class="section-h">Overview</h3>
+      <div class="overview-grid">
+        <div class="stat-card"><span>${fmt(v.affectedComponentCount)}</span><small>Affected facts</small></div>
+        <div class="stat-card"><span>${fmt(sourceCount)}</span><small>Sources</small></div>
+        <div class="stat-card"><span>${fmt(refs.length)}</span><small>References</small></div>
+        <div class="stat-card"><span>${v.kevDateAdded ? 'Yes' : 'No'}</span><small>CISA KEV</small></div>
+      </div>
+      ${topEcosystems.length ? `<div class="chips compact-chips">${topEcosystems.map(([eco, items]) => `<span class="badge">${escapeHtml(eco)} ${fmt(items.length)}</span>`).join('')}</div>` : ''}
+    </section>
+  `;
+}
+
+function aggregateDescriptions(descriptions) {
+  const map = new Map();
+  for (const item of descriptions) {
+    const value = String(item.value || '').trim();
+    if (!value) continue;
+    const key = value.toLowerCase().replace(/\s+/g, ' ');
+    const existing = map.get(key) || { ...item, value, sources: [], langs: new Set() };
+    if (item.code && !existing.sources.includes(item.code)) existing.sources.push(item.code);
+    if (item.lang) existing.langs.add(item.lang);
+    existing.is_selected = existing.is_selected || item.is_selected;
+    map.set(key, existing);
+  }
+  return [...map.values()]
+    .sort((a, b) => Number(Boolean(b.is_selected)) - Number(Boolean(a.is_selected)) || b.sources.length - a.sources.length)
+    .map(item => ({ ...item, langs: [...item.langs] }));
+}
+
 function renderDescriptionCards(descriptions) {
   if (!descriptions.length) return '';
   return `
@@ -261,7 +312,10 @@ function renderDescriptionCards(descriptions) {
         ${descriptions.map(d => `
           <div class="info-card">
             <p class="info-card-body">${escapeHtml(d.value || '')}</p>
-            <div class="chips">${sourceTag(d.code)} ${d.lang ? `<span class="badge">${escapeHtml(d.lang)}</span>` : ''}</div>
+            <div class="chips">
+              ${(d.sources || [d.code]).filter(Boolean).map(sourceTag).join('')}
+              ${(d.langs || (d.lang ? [d.lang] : [])).map(lang => `<span class="badge">${escapeHtml(lang)}</span>`).join('')}
+            </div>
           </div>
         `).join('')}
       </div>
@@ -294,7 +348,7 @@ function renderAffectedGrouped(affected) {
   if (!affected.length) return '<p class="muted">No affected components</p>';
   return `
     <div style="margin-bottom:10px">
-      <input type="text" id="affectedFilter" placeholder="Filter components..." 
+      <input type="text" id="affectedFilter" placeholder="Filter components..."
         style="width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px"
         oninput="document.querySelectorAll('.aff-eco-group').forEach(g=>{const v=this.value.toLowerCase();g.style.display=v===''?'' : (g.textContent||'').toLowerCase().includes(v)?'':'none'})">
     </div>
@@ -762,7 +816,7 @@ function renderSbomDetail(data, sbomId) {
                     const hasRange = v.versionRange && v.versionRange !== '';
                     const status = isMatched ? 'AFFECTED' : isFalse ? 'FIXED' : (hasRange ? '?' : 'unknown');
                     const kl = isMatched ? 'risk' : isFalse ? 'none' : '';
-                    const rangeDisplay = hasRange 
+                    const rangeDisplay = hasRange
                       ? `<code style="font-size:11px">${escapeHtml(v.versionRange)}</code>`
                       : `<span class="muted" style="font-size:11px" title="Alpine secfixes: no version data">no version data</span>`;
                     return `<tr data-vuln-id="${escapeAttr(v.vulnerabilityId)}" class="finding-row" style="cursor:pointer">
@@ -809,5 +863,3 @@ function renderSbomDetail(data, sbomId) {
     el.addEventListener('click', () => loadVulnerabilityDetail(el.dataset.vulnId));
   });
 }
-
-

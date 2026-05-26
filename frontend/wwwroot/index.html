@@ -9,13 +9,18 @@
 <body>
   <main class="shell">
     <header class="topbar">
-      <div>
+      <div class="brand-block">
         <h1>VulTrack</h1>
         <p id="statusLine">Loading pipeline state</p>
       </div>
-      <button id="refreshButton" class="icon-button" type="button" title="Refresh data" aria-label="Refresh data">
-        <span aria-hidden="true">&#8635;</span>
-      </button>
+      <div class="topbar-actions">
+        <button id="sidebarToggle" class="icon-button" type="button" title="Toggle sidebar" aria-label="Toggle sidebar">
+          <span aria-hidden="true">☰</span>
+        </button>
+        <button id="refreshButton" class="icon-button" type="button" title="Refresh data" aria-label="Refresh data">
+          <span aria-hidden="true">&#8635;</span>
+        </button>
+      </div>
     </header>
 
     <section class="metrics" aria-label="Pipeline metrics">
