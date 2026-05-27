@@ -24,8 +24,13 @@
   display: none !important;
 }
 
+html {
+  min-height: 100%;
+}
+
 body {
   margin: 0;
+  min-height: 100vh;
   background:
     linear-gradient(180deg, color-mix(in srgb, var(--accent) 7%, transparent), transparent 260px),
     var(--bg);
@@ -47,7 +52,8 @@ input,
 }
 
 .shell {
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
@@ -173,7 +179,7 @@ h1 {
   display: grid;
   grid-template-columns: clamp(240px, 23vw, 300px) minmax(0, 1fr);
   min-height: 0;
-  height: auto;
+  height: 100%;
   overflow: hidden;
   transition: grid-template-columns 160ms ease;
 }
@@ -479,6 +485,7 @@ a.result-item {
 
 .detail-pane {
   min-width: 0;
+  min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: clamp(18px, 2.5vw, 32px);
@@ -1490,6 +1497,11 @@ a {
 }
 
 @media (max-width: 900px) {
+  .shell {
+    height: auto;
+    min-height: 100vh;
+  }
+
   body {
     overflow: auto;
   }
