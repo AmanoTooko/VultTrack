@@ -74,47 +74,136 @@ app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken 
 
 app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToken ct) =>
 {
-    var normalizeStatus = new List<object>();
-    var nonSucceededRaw = 0L;
+    var sourceStatus = new List<object>();
+    var sourcePendingRows = new List<(string SourceCode, long Pending)>();
+    var totalRaw = 0L;
+    var parsePendingTotal = 0L;
+    var parseSucceededTotal = 0L;
+    var parseFailedTotal = 0L;
+    var normalizePendingTotal = 0L;
+    var normalizeSucceededTotal = 0L;
+    var normalizeFailedTotal = 0L;
     await using (var cmd = db.CreateCommand("""
-        select normalize_status, count(*)
-        from source_raw_index
-        where normalize_status <> 'succeeded'
-        group by normalize_status
-        order by normalize_status
+        with raw_counts as (
+          select source_id,
+                 count(*) as raw_total,
+                 count(*) filter (where parse_status = 'pending') as parse_pending,
+                 count(*) filter (where parse_status = 'succeeded') as parse_succeeded,
+                 count(*) filter (where parse_status = 'failed') as parse_failed,
+                 count(*) filter (where normalize_status = 'pending') as normalize_pending,
+                 count(*) filter (where normalize_status = 'succeeded') as normalize_succeeded,
+                 count(*) filter (where normalize_status = 'failed') as normalize_failed,
+                 max(updated_at) as raw_updated_at
+          from source_raw_index
+          group by source_id
+        ),
+        latest_runs as (
+          select distinct on (source_id)
+                 source_id, status, trigger, started_at, finished_at,
+                 fetched_count, changed_count, parsed_count, normalized_count,
+                 error_count, log_summary
+          from source_sync_runs
+          order by source_id, started_at desc
+        ),
+        successful_runs as (
+          select source_id, max(finished_at) as last_success_at
+          from source_sync_runs
+          where status = 'succeeded'
+          group by source_id
+        )
+        select s.code, s.name, s.kind, s.enabled, s.plugin_name, s.schedule_cron,
+               s.config_json->>'runMode' as run_mode,
+               coalesce(r.raw_total, 0), coalesce(r.parse_pending, 0), coalesce(r.parse_succeeded, 0),
+               coalesce(r.parse_failed, 0), coalesce(r.normalize_pending, 0),
+               coalesce(r.normalize_succeeded, 0), coalesce(r.normalize_failed, 0),
+               r.raw_updated_at,
+               lr.status, lr.trigger, lr.started_at, lr.finished_at,
+               coalesce(lr.fetched_count, 0), coalesce(lr.changed_count, 0),
+               coalesce(lr.parsed_count, 0), coalesce(lr.normalized_count, 0),
+               coalesce(lr.error_count, 0), lr.log_summary,
+               sr.last_success_at
+        from sources s
+        left join raw_counts r on r.source_id = s.id
+        left join latest_runs lr on lr.source_id = s.id
+        left join successful_runs sr on sr.source_id = s.id
+        order by s.enabled desc, s.kind, s.code
         """))
     await using (var reader = await cmd.ExecuteReaderAsync(ct))
     {
         while (await reader.ReadAsync(ct))
         {
-            var count = reader.GetInt64(1);
-            nonSucceededRaw += count;
-            normalizeStatus.Add(new { status = reader.GetString(0), count });
+            var rawTotal = reader.GetInt64(7);
+            var parsePending = reader.GetInt64(8);
+            var parseSucceeded = reader.GetInt64(9);
+            var parseFailed = reader.GetInt64(10);
+            var normalizePending = reader.GetInt64(11);
+            var normalizeSucceeded = reader.GetInt64(12);
+            var normalizeFailed = reader.GetInt64(13);
+            totalRaw += rawTotal;
+            parsePendingTotal += parsePending;
+            parseSucceededTotal += parseSucceeded;
+            parseFailedTotal += parseFailed;
+            normalizePendingTotal += normalizePending;
+            normalizeSucceededTotal += normalizeSucceeded;
+            normalizeFailedTotal += normalizeFailed;
+            if (normalizePending + normalizeFailed > 0)
+                sourcePendingRows.Add((reader.GetString(0), normalizePending + normalizeFailed));
+            sourceStatus.Add(new
+            {
+                code = reader.GetString(0),
+                name = reader.GetString(1),
+                kind = reader.GetString(2),
+                enabled = reader.GetBoolean(3),
+                pluginName = reader.GetString(4),
+                scheduleCron = reader.IsDBNull(5) ? null : reader.GetString(5),
+                runMode = reader.IsDBNull(6) ? null : reader.GetString(6),
+                rawTotal,
+                parsePending,
+                parseSucceeded,
+                parseFailed,
+                normalizePending,
+                normalizeSucceeded,
+                normalizeFailed,
+                normalizeProgress = rawTotal <= 0 ? 0 : Math.Round((double)normalizeSucceeded / rawTotal * 100, 2),
+                rawUpdatedAt = reader.IsDBNull(14) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(14),
+                latestRun = reader.IsDBNull(15) ? null : new
+                {
+                    status = reader.GetString(15),
+                    trigger = reader.IsDBNull(16) ? null : reader.GetString(16),
+                    startedAt = reader.GetFieldValue<DateTimeOffset>(17),
+                    finishedAt = reader.IsDBNull(18) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(18),
+                    fetchedCount = reader.GetInt32(19),
+                    changedCount = reader.GetInt32(20),
+                    parsedCount = reader.GetInt32(21),
+                    normalizedCount = reader.GetInt32(22),
+                    errorCount = reader.GetInt32(23),
+                    logSummary = reader.IsDBNull(24) ? null : reader.GetString(24)
+                },
+                lastSuccessAt = reader.IsDBNull(25) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(25)
+            });
         }
     }
 
-    var totalRaw = await EstimateTableCountAsync(db, "source_raw_index", ct);
-    normalizeStatus.Add(new { status = "succeeded", count = Math.Max(0, totalRaw - nonSucceededRaw), estimated = true });
-
-    var pendingBySource = new List<object>();
-    await using (var cmd = db.CreateCommand("""
-        select s.code, count(*)
-        from source_raw_index r
-        join sources s on s.id = r.source_id
-        where r.normalize_status <> 'succeeded'
-        group by s.code
-        order by count(*) desc, s.code
-        limit 25
-        """))
-    await using (var reader = await cmd.ExecuteReaderAsync(ct))
+    var normalizeStatus = new List<object>
     {
-        while (await reader.ReadAsync(ct))
-        {
-            pendingBySource.Add(new { sourceCode = reader.GetString(0), pending = reader.GetInt64(1) });
-        }
-    }
+        new { status = "pending", count = normalizePendingTotal, estimated = false },
+        new { status = "failed", count = normalizeFailedTotal, estimated = false },
+        new { status = "succeeded", count = normalizeSucceededTotal, estimated = false }
+    };
+    var parseStatus = new List<object>
+    {
+        new { status = "pending", count = parsePendingTotal, estimated = false },
+        new { status = "failed", count = parseFailedTotal, estimated = false },
+        new { status = "succeeded", count = parseSucceededTotal, estimated = false }
+    };
+    var pendingBySource = sourcePendingRows
+        .OrderByDescending(x => x.Pending)
+        .ThenBy(x => x.SourceCode, StringComparer.Ordinal)
+        .Take(25)
+        .Select(x => new { sourceCode = x.SourceCode, pending = x.Pending })
+        .ToList<object>();
 
-    var totals = await EstimateTableCountsAsync(db, [
+    var totals = await CountTablesAsync(db, [
         "vulnerabilities",
         "vulnerability_records",
         "vulnerability_affected_components",
@@ -131,9 +220,14 @@ app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToke
         components = totals["components"],
         registryPackages = totals["registry_packages"],
         cpeEntries = totals["cpe_entries"],
-        countsEstimated = true,
+        sourceRawRecords = totalRaw,
+        sources = sourceStatus.Count,
+        countsEstimated = false,
+        parseStatus,
         normalizeStatus,
-        pendingBySource
+        pendingBySource,
+        sourceStatus,
+        generatedAt = DateTimeOffset.UtcNow
     });
 });
 
@@ -768,33 +862,32 @@ static string ToNpgsqlConnectionString(string value)
     }.ConnectionString;
 }
 
-static async Task<long> EstimateTableCountAsync(NpgsqlDataSource db, string tableName, CancellationToken ct)
+static async Task<long> CountTableAsync(NpgsqlDataSource db, string tableName, CancellationToken ct)
 {
-    await using var cmd = db.CreateCommand("""
-        select greatest(reltuples, 0)::bigint
-        from pg_class
-        where relname = $1
-        """);
-    cmd.Parameters.AddWithValue(tableName);
+    var allowed = new HashSet<string>(StringComparer.Ordinal)
+    {
+        "source_raw_index",
+        "vulnerabilities",
+        "vulnerability_records",
+        "vulnerability_affected_components",
+        "components",
+        "registry_packages",
+        "cpe_entries"
+    };
+    if (!allowed.Contains(tableName)) throw new ArgumentOutOfRangeException(nameof(tableName), tableName, "Unexpected table name.");
+
+    await using var cmd = db.CreateCommand($"select count(*) from {tableName}");
     return (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
 }
 
-static async Task<IReadOnlyDictionary<string, long>> EstimateTableCountsAsync(NpgsqlDataSource db, IReadOnlyList<string> tableNames, CancellationToken ct)
+static async Task<IReadOnlyDictionary<string, long>> CountTablesAsync(NpgsqlDataSource db, IReadOnlyList<string> tableNames, CancellationToken ct)
 {
-    var estimates = tableNames.ToDictionary(x => x, _ => 0L, StringComparer.Ordinal);
-    await using var cmd = db.CreateCommand("""
-        select relname, greatest(reltuples, 0)::bigint
-        from pg_class
-        where relname = any($1)
-        """);
-    cmd.Parameters.AddWithValue(tableNames.ToArray());
-    await using var reader = await cmd.ExecuteReaderAsync(ct);
-    while (await reader.ReadAsync(ct))
+    var rows = await Task.WhenAll(tableNames.Select(async tableName => new
     {
-        estimates[reader.GetString(0)] = reader.GetInt64(1);
-    }
-
-    return estimates;
+        TableName = tableName,
+        Count = await CountTableAsync(db, tableName, ct)
+    }));
+    return rows.ToDictionary(x => x.TableName, x => x.Count, StringComparer.Ordinal);
 }
 
 static async Task<IReadOnlyList<Dictionary<string, object?>>> QueryRowsAsync(NpgsqlDataSource db, string sql, Guid id, CancellationToken ct)

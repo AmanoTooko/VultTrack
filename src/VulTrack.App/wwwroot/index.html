@@ -32,19 +32,13 @@
       </div>
     </header>
 
-    <section class="metrics" aria-label="Pipeline metrics">
-      <div><span id="metricVulns">-</span><small>Vulnerabilities</small></div>
-      <div><span id="metricRecords">-</span><small>Source records</small></div>
-      <div><span id="metricAffected">-</span><small>Affected components</small></div>
-      <div><span id="metricComponents">-</span><small>Components</small></div>
-    </section>
-
     <section class="workspace">
       <aside class="search-pane">
         <div class="tabs" role="tablist" aria-label="Search mode">
           <button class="tab is-active" type="button" data-mode="vulnerability">Vulns</button>
           <button class="tab" type="button" data-mode="component">Package</button>
           <button class="tab" type="button" data-mode="sbom">SBOM</button>
+          <button class="tab" type="button" data-mode="status">Status</button>
         </div>
 
         <form id="searchForm" class="search-form">
@@ -78,6 +72,18 @@
         </div>
       </section>
     </section>
+
+    <footer class="status-footer" aria-label="System status">
+      <button id="statusButton" class="status-pill" type="button">
+        <span>Status</span>
+        <strong id="statusPending">- pending</strong>
+      </button>
+      <div class="footer-metric"><span>Vulnerabilities</span><strong id="metricVulns">-</strong></div>
+      <div class="footer-metric"><span>Source records</span><strong id="metricRecords">-</strong></div>
+      <div class="footer-metric"><span>Affected</span><strong id="metricAffected">-</strong></div>
+      <div class="footer-metric"><span>Components</span><strong id="metricComponents">-</strong></div>
+      <div class="footer-metric"><span>Sources</span><strong id="metricSources">-</strong></div>
+    </footer>
   </main>
 
   <script src="/app.js" defer></script>
