@@ -390,6 +390,9 @@ create table if not exists vulnerability_descriptions (
   is_selected boolean not null default false
 );
 
+create unique index if not exists ux_vulnerability_descriptions_identity
+  on vulnerability_descriptions(vulnerability_id, source_id, lang, description_type) nulls not distinct;
+
 create table if not exists vulnerability_weaknesses (
   id uuid primary key default gen_random_uuid(),
   vulnerability_id uuid references vulnerabilities(id),
