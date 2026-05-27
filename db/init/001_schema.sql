@@ -255,6 +255,32 @@ create table if not exists stg_ecosystem_advisories (
   created_at timestamptz not null default now()
 );
 
+create table if not exists stg_exploit_pocs (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  provider text not null,
+  source_key text not null,
+  identifiers text[] not null default '{}',
+  title text,
+  source_url text,
+  artifact_url text,
+  artifact_object_id uuid references source_objects(id),
+  artifact_sha256 text,
+  artifact_type text not null,
+  exploit_type text,
+  maturity text not null default 'poc',
+  verification_status text not null default 'unreviewed',
+  requires_auth boolean,
+  requires_user_interaction boolean,
+  language text,
+  platform text,
+  author text,
+  published_at timestamptz,
+  modified_at timestamptz,
+  tags text[] not null default '{}',
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists vulnerabilities (
   id uuid primary key default gen_random_uuid(),
   canonical_key text not null unique,
@@ -418,6 +444,39 @@ create table if not exists vulnerability_references (
   tags text[] not null default '{}',
   source_json_path text
 );
+
+create table if not exists vulnerability_exploits (
+  id uuid primary key default gen_random_uuid(),
+  vulnerability_id uuid not null references vulnerabilities(id),
+  source_id uuid not null references sources(id),
+  raw_index_id uuid not null references source_raw_index(id),
+  source_key text not null,
+  source_url text,
+  artifact_url text,
+  artifact_object_id uuid references source_objects(id),
+  artifact_sha256 text,
+  title text,
+  artifact_type text not null,
+  exploit_type text,
+  maturity text not null default 'poc',
+  verification_status text not null default 'unreviewed',
+  requires_auth boolean,
+  requires_user_interaction boolean,
+  language text,
+  platform text,
+  author text,
+  published_at timestamptz,
+  modified_at timestamptz,
+  tags text[] not null default '{}',
+  source_specific jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create unique index if not exists ux_vulnerability_exploits_source_key
+  on vulnerability_exploits(source_id, source_key, vulnerability_id);
+create index if not exists ix_vulnerability_exploits_vuln
+  on vulnerability_exploits(vulnerability_id, maturity, verification_status);
 
 create table if not exists vulnerability_source_properties (
   id uuid primary key default gen_random_uuid(),
@@ -662,6 +721,8 @@ create index if not exists ix_severity_selected on vulnerability_severity_scores
 create index if not exists ix_weaknesses_vulnerability on vulnerability_weaknesses(vulnerability_id, source_id);
 create index if not exists ix_vuln_source_property_key on vulnerability_source_properties(source_id, property_namespace, property_key);
 create index if not exists ix_vuln_detail_blocks on vulnerability_detail_blocks(vulnerability_id, display_order);
+create index if not exists ix_stg_exploit_pocs_identifiers on stg_exploit_pocs using gin(identifiers);
+create index if not exists ix_stg_exploit_pocs_provider on stg_exploit_pocs(provider, modified_at desc);
 create index if not exists ix_component_identity_lookup on component_identity_index(identity_type, normalized_value);
 create index if not exists ix_component_identity_trgm on component_identity_index using gin(normalized_value gin_trgm_ops);
 create index if not exists ix_components_canonical_trgm on components using gin(canonical_name gin_trgm_ops);
@@ -741,6 +802,11 @@ values
   ('cve-list-v5', 'CVE List v5', 'vulnerability', 'https://github.com/CVEProject/cvelistV5', 'cve-list', null),
   ('cisa-kev', 'CISA Known Exploited Vulnerabilities', 'threat_intel', 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog', 'threat-intel', '0 */12 * * *'),
   ('first-epss', 'FIRST EPSS', 'threat_intel', 'https://www.first.org/epss/', 'threat-intel', '0 4 * * *'),
+  ('exploitdb', 'Exploit-DB Public Exploits', 'exploit', 'https://www.exploit-db.com/', 'exploit-intel', '0 */12 * * *'),
+  ('metasploit', 'Metasploit Framework Modules', 'exploit', 'https://github.com/rapid7/metasploit-framework', 'exploit-intel', '0 */12 * * *'),
+  ('nuclei-templates', 'ProjectDiscovery Nuclei Templates', 'exploit', 'https://github.com/projectdiscovery/nuclei-templates', 'exploit-intel', '0 */12 * * *'),
+  ('poc-in-github', 'PoC-in-GitHub CVE Repository Index', 'exploit', 'https://github.com/nomi-sec/PoC-in-GitHub', 'exploit-intel', '0 */12 * * *'),
+  ('trickest-cve', 'Trickest CVE PoC Index', 'exploit', 'https://github.com/trickest/cve', 'exploit-intel', '0 */12 * * *'),
   ('alpine-secdb', 'Alpine SecDB', 'vulnerability', 'https://secdb.alpinelinux.org/', 'alpine', '0 4 * * *'),
   ('debian-security-tracker', 'Debian Security Tracker', 'vulnerability', 'https://security-tracker.debian.org/', 'debian', '0 4 * * *'),
   ('ubuntu-osv', 'Ubuntu OSV', 'vulnerability', 'https://documentation.ubuntu.com/security/security-updates/osv/', 'ubuntu', '0 4 * * *'),

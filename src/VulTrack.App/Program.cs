@@ -20,6 +20,7 @@ builder.Services.AddSingleton<IRawNormalizer, EcosystemAdvisoryNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, PypiRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, CveListRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ThreatIntelRawNormalizer>();
+builder.Services.AddSingleton<IRawNormalizer, ExploitPocRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, DistroRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ComponentCatalogNormalizer>();
 builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>();
@@ -206,6 +207,7 @@ app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToke
     var totals = await CountTablesAsync(db, [
         "vulnerabilities",
         "vulnerability_records",
+        "vulnerability_exploits",
         "vulnerability_affected_components",
         "components",
         "registry_packages",
@@ -216,6 +218,7 @@ app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToke
     {
         vulnerabilities = totals["vulnerabilities"],
         vulnerabilityRecords = totals["vulnerability_records"],
+        vulnerabilityExploits = totals["vulnerability_exploits"],
         affectedComponents = totals["vulnerability_affected_components"],
         components = totals["components"],
         registryPackages = totals["registry_packages"],
@@ -522,6 +525,27 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             from ranked
             where source_rank <= 20
             order by code nulls last, source_rank, url
+            limit 100
+            """, queryId, ct),
+        exploits = await QueryRowsAsync(db, """
+            select s.code, e.source_key, e.title, e.source_url, e.artifact_url,
+                   e.artifact_type, e.exploit_type, e.maturity, e.verification_status,
+                   e.requires_auth, e.requires_user_interaction, e.language, e.platform,
+                   e.author, e.published_at, e.modified_at, e.tags
+            from vulnerability_exploits e
+            join sources s on s.id = e.source_id
+            where e.vulnerability_id = $1
+            order by case e.maturity
+                       when 'metasploit' then 0
+                       when 'functional' then 1
+                       when 'source_verified' then 2
+                       when 'verified-template' then 3
+                       when 'detection-template' then 4
+                       else 9
+                     end,
+                     e.modified_at desc nulls last,
+                     s.code,
+                     e.source_key
             limit 100
             """, queryId, ct)
     });
@@ -869,6 +893,7 @@ static async Task<long> CountTableAsync(NpgsqlDataSource db, string tableName, C
         "source_raw_index",
         "vulnerabilities",
         "vulnerability_records",
+        "vulnerability_exploits",
         "vulnerability_affected_components",
         "components",
         "registry_packages",

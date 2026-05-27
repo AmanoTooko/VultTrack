@@ -71,7 +71,19 @@ NVD_API_KEY=...
 GITHUB_TOKEN=...
 OSS_INDEX_USERNAME=...
 OSS_INDEX_TOKEN=...
+FETCHER_ARCHIVE_GITHUB_REPOS=0
+FETCHER_GITHUB_ARCHIVE_MAX_BYTES=10485760
 ```
+
+Exploit/PoC sources:
+
+- `exploitdb`：同步 Exploit-DB CSV，并把每条 exploit 文件 gzip 归档到 `source_objects`。
+- `metasploit`：浅克隆 Metasploit Framework，解析带 CVE 引用的 module，并归档 Ruby module。
+- `nuclei-templates`：浅克隆 ProjectDiscovery nuclei-templates，解析 CVE 模板，并归档 YAML template。
+- `poc-in-github`：浅克隆 PoC-in-GitHub 的 CVE-to-repository 索引。默认归档仓库 metadata；如果设置 `FETCHER_ARCHIVE_GITHUB_REPOS=1`，会尝试下载 GitHub repo zipball，受 `FETCHER_GITHUB_ARCHIVE_MAX_BYTES` 限制。
+- `trickest-cve`：通过 GitHub Contents API 拉取 CVE markdown 索引，归档 markdown。
+
+GitHub 公开 API 不强制要求 token，但全量跑 `poc-in-github`、`trickest-cve` 或开启 GitHub repo zipball 归档时，建议申请并配置 `GITHUB_TOKEN`，否则容易遇到 GitHub rate limit。当前 fetcher 不会自动执行任何 PoC，只保存元数据、来源 URL、hash 和压缩归档对象。
 
 需要显式 smoke 时，使用 `FETCHER_SMOKE=1`，或提供 source 专属 ID/组件环境变量，例如 `OSV_IDS`、`MAVEN_OSV_IDS`、`ANDROID_OSV_IDS`、`GOOGLE_OSV_IDS`、`UBUNTU_OSV_IDS`、`MAVEN_COMPONENTS`。这些变量表示“按指定对象查询”，不表示全量或日常增量。
 

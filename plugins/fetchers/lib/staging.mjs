@@ -233,6 +233,63 @@ export async function upsertEcosystemAdvisory(client, rawIndexId, item) {
   );
 }
 
+export async function upsertExploitPoc(client, rawIndexId, item) {
+  await client.query(
+    `insert into stg_exploit_pocs
+       (raw_index_id, provider, source_key, identifiers, title, source_url, artifact_url,
+        artifact_object_id, artifact_sha256, artifact_type, exploit_type, maturity,
+        verification_status, requires_auth, requires_user_interaction, language, platform,
+        author, published_at, modified_at, tags, payload)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+     on conflict (raw_index_id) do update set
+       provider = excluded.provider,
+       source_key = excluded.source_key,
+       identifiers = excluded.identifiers,
+       title = excluded.title,
+       source_url = excluded.source_url,
+       artifact_url = excluded.artifact_url,
+       artifact_object_id = excluded.artifact_object_id,
+       artifact_sha256 = excluded.artifact_sha256,
+       artifact_type = excluded.artifact_type,
+       exploit_type = excluded.exploit_type,
+       maturity = excluded.maturity,
+       verification_status = excluded.verification_status,
+       requires_auth = excluded.requires_auth,
+       requires_user_interaction = excluded.requires_user_interaction,
+       language = excluded.language,
+       platform = excluded.platform,
+       author = excluded.author,
+       published_at = excluded.published_at,
+       modified_at = excluded.modified_at,
+       tags = excluded.tags,
+       payload = excluded.payload`,
+    [
+      rawIndexId,
+      item.provider,
+      item.sourceKey,
+      item.identifiers ?? [],
+      item.title ?? null,
+      item.sourceUrl ?? null,
+      item.artifactUrl ?? null,
+      item.artifactObjectId ?? null,
+      item.artifactSha256 ?? null,
+      item.artifactType ?? 'poc_code',
+      item.exploitType ?? null,
+      item.maturity ?? 'poc',
+      item.verificationStatus ?? 'unreviewed',
+      item.requiresAuth ?? null,
+      item.requiresUserInteraction ?? null,
+      item.language ?? null,
+      item.platform ?? null,
+      item.author ?? null,
+      item.publishedAt ?? null,
+      item.modifiedAt ?? null,
+      item.tags ?? [],
+      JSON.stringify(item.payload ?? item)
+    ]
+  );
+}
+
 function parseCpe23(uri) {
   const raw = String(uri ?? '');
   const parts = raw.startsWith('cpe:2.3:') ? raw.split(':') : [];
