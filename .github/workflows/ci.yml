@@ -70,3 +70,41 @@ jobs:
           tags: |
             ghcr.io/${{ env.IMAGE_NAMESPACE }}/vultrack-frontend:latest
             ghcr.io/${{ env.IMAGE_NAMESPACE }}/vultrack-frontend:${{ github.sha }}
+
+  deploy:
+    runs-on: ubuntu-24.04
+    needs: docker
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Check deploy secrets
+        id: deploy_secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -n "$DEPLOY_HOST" ] && [ -n "$DEPLOY_USER" ] && [ -n "$DEPLOY_SSH_KEY" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "Deploy secrets are not configured; skipping remote deploy."
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.deploy_secrets.outputs.enabled == 'true'
+
+      - name: Deploy to server
+        if: steps.deploy_secrets.outputs.enabled == 'true'
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/vultrack_deploy
+          chmod 600 ~/.ssh/vultrack_deploy
+          port="${DEPLOY_PORT:-22}"
+          ssh -o StrictHostKeyChecking=accept-new -i ~/.ssh/vultrack_deploy -p "$port" \
+            "$DEPLOY_USER@$DEPLOY_HOST" \
+            'bash -lc "cd /home/ubuntu/vultrack && ./scripts/deploy-prod.sh"'
