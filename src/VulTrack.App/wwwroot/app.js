@@ -452,6 +452,7 @@ function renderDetail(data) {
   const records = data.records || [];
   const severities = data.severities || [];
   const refs = data.references || [];
+  const exploits = data.exploits || [];
   const descriptions = aggregateDescriptions(data.descriptions || []);
   const affected = data.affectedComponents || [];
   const sourceUrls = data.sourceUrls || {};
@@ -476,7 +477,7 @@ function renderDetail(data) {
           <p class="summary cve-summary">${escapeHtml(primaryDescription)}</p>
           ${v.maxCvssVector ? cvssVectorBlock(v.maxCvssVersion, v.maxCvssVector) : ''}
         </div>
-        ${renderHeroFacts(v, affectedByEco, records, refs)}
+          ${renderHeroFacts(v, affectedByEco, records, refs, exploits)}
       </header>
 
       ${renderDetailNav()}
@@ -489,6 +490,7 @@ function renderDetail(data) {
         <div class="detail-main-column">
           ${descriptions.length ? renderDescriptionCards(descriptions) : ''}
           ${renderMitreData(v, records, sourceUrls)}
+          ${renderExploitSignals(exploits)}
           ${renderCpeConfigurations(affected)}
           ${renderAffectedGrouped(affected)}
           ${renderAdvisories(refs)}
@@ -512,7 +514,7 @@ function renderDetail(data) {
   });
 }
 
-function renderHeroFacts(v, affectedByEco, records, refs) {
+function renderHeroFacts(v, affectedByEco, records, refs, exploits = []) {
   const sourceCount = new Set(records.map(r => r.code).filter(Boolean)).size;
   return `
     <div class="hero-facts" aria-label="Vulnerability facts">
@@ -524,6 +526,7 @@ function renderHeroFacts(v, affectedByEco, records, refs) {
       ${factCard('Action', deriveAction(v), 'action')}
       ${factCard('Sources', fmt(sourceCount))}
       ${factCard('Affected', `${fmt(v.affectedComponentCount)} / ${fmt(Object.keys(affectedByEco).length)} ecosystems`)}
+      ${factCard('PoC', exploits.length ? fmt(exploits.length) : 'No data', exploits.length ? 'warn' : '')}
       ${factCard('References', fmt(refs.length))}
     </div>
   `;
@@ -542,6 +545,7 @@ function renderDetailNav() {
   const items = [
     ['AI Analysis', 'ai-analysis'],
     ['Mitre Data', 'mitre-data'],
+    ['PoC / Exploit', 'exploit-signals'],
     ['CPE Configurations', 'cpe-configurations'],
     ['Affected Packages', 'affected-packages'],
     ['Enrichment', 'enrichment'],
@@ -578,6 +582,70 @@ function renderAiAnalysisPlan(v, affected, refs, records) {
       <div class="analysis-field">
         <span>Evidence inputs</span>
         <p>${fmt(records.length)} source records and ${fmt(refs.length)} references are available for the future AI pipeline.</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderExploitSignals(exploits) {
+  if (!exploits.length) {
+    return `
+      <section class="detail-section" id="exploit-signals">
+        <div class="section-title-row">
+          <h3 class="section-h">PoC / Exploit</h3>
+          <span class="badge none">No signal</span>
+        </div>
+        ${renderDataGap('No public PoC, exploit module, or detection template has been linked yet.')}
+      </section>
+    `;
+  }
+  const grouped = {};
+  exploits.forEach((item) => {
+    const key = item.code || 'source';
+    if (!grouped[key]) grouped[key] = [];
+    grouped[key].push(item);
+  });
+  return `
+    <section class="detail-section" id="exploit-signals">
+      <div class="section-title-row">
+        <h3 class="section-h">PoC / Exploit</h3>
+        <span class="badge warn">${fmt(exploits.length)} signal${exploits.length > 1 ? 's' : ''}</span>
+      </div>
+      <div class="exploit-grid">
+        ${Object.entries(grouped).map(([source, items]) => `
+          <div class="exploit-source-group">
+            <div class="affected-group-head">
+              <strong>${escapeHtml(source)}</strong>
+              <span class="badge">${fmt(items.length)}</span>
+            </div>
+            <div class="exploit-list">
+              ${items.slice(0, 12).map(renderExploitItem).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderExploitItem(item) {
+  const title = item.title || item.source_key || item.sourceKey || 'PoC';
+  const url = item.source_url || item.sourceUrl || item.artifact_url || item.artifactUrl || '';
+  const maturity = item.maturity || 'poc';
+  const type = item.exploit_type || item.exploitType || item.artifact_type || item.artifactType || 'artifact';
+  const verification = item.verification_status || item.verificationStatus || 'unreviewed';
+  return `
+    <div class="exploit-item">
+      <div>
+        <strong>${url ? `<a href="${escapeAttr(url)}" target="_blank" rel="noreferrer">${escapeHtml(title)}</a>` : escapeHtml(title)}</strong>
+        <small>${escapeHtml(item.source_key || item.sourceKey || '')}</small>
+      </div>
+      <div class="chips">
+        <span class="badge risk">${escapeHtml(maturity)}</span>
+        <span class="badge">${escapeHtml(type)}</span>
+        <span class="badge ${verification === 'unreviewed' ? 'none' : 'warn'}">${escapeHtml(verification)}</span>
+        ${item.requires_auth ? '<span class="badge">auth</span>' : ''}
+        ${item.language ? `<span class="badge">${escapeHtml(item.language)}</span>` : ''}
       </div>
     </div>
   `;

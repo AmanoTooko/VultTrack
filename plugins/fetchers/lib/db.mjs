@@ -117,6 +117,55 @@ export async function writeRecord(client, ctx, record) {
   return rawResult.rows[0].id;
 }
 
+export async function writeArtifact(client, ctx, artifact) {
+  const body = Buffer.isBuffer(artifact.body)
+    ? artifact.body
+    : Buffer.from(String(artifact.body ?? ''), artifact.encoding ?? 'utf8');
+  const compressed = await gzip(body);
+  const contentHash = sha256(body);
+  const dir = getRootPath(
+    getEnv('RAW_OBJECT_PATH', './data/raw-objects'),
+    ctx.source.code,
+    'artifacts',
+    new Date().toISOString().slice(0, 10)
+  );
+  await fs.mkdir(dir, { recursive: true });
+  const safeName = String(artifact.externalKey ?? artifact.filename ?? contentHash)
+    .replaceAll('/', '_')
+    .replaceAll('\\', '_')
+    .slice(0, 160);
+  const extension = artifact.compressedExtension ?? '.gz';
+  const file = path.join(dir, `${safeName}-${contentHash.slice(0, 12)}${extension}`);
+  await fs.writeFile(file, compressed);
+
+  const result = await client.query(
+    `insert into source_objects
+       (source_id, sync_run_id, object_uri, content_type, compression, sha256, size_bytes, compressed_size_bytes, schema_hint, retention_class)
+     values ($1,$2,$3,$4,'gzip',$5,$6,$7,$8,$9)
+     on conflict (source_id, sha256) do update set fetched_at = now()
+     returning id`,
+    [
+      ctx.source.id,
+      ctx.run.id,
+      `file://${file}`,
+      artifact.contentType ?? 'application/octet-stream',
+      contentHash,
+      body.length,
+      compressed.length,
+      artifact.schemaHint ?? `${ctx.source.code}-artifact`,
+      artifact.retentionClass ?? 'hot'
+    ]
+  );
+
+  return {
+    objectId: result.rows[0].id,
+    sha256: contentHash,
+    sizeBytes: body.length,
+    compressedSizeBytes: compressed.length,
+    objectUri: `file://${file}`
+  };
+}
+
 export async function saveCheckpoint(client, sourceId, checkpoint) {
   await client.query(
     'update sources set checkpoint_json = $2, updated_at = now() where id = $1',
