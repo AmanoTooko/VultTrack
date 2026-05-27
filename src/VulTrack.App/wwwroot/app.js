@@ -260,87 +260,294 @@ function renderDetail(data) {
   const sourceUrls = data.sourceUrls || {};
   const sourceTags = [...new Set(records.map(r => r.code).filter(Boolean))];
   const affectedByEco = groupByEco(affected);
+  const primaryDescription = descriptions[0]?.value || v.description || v.title || '';
 
   el.detailPane.innerHTML = `
-    <header class="detail-header">
-      <div class="detail-title">
-        <h2>${escapeHtml(v.primaryIdentifier)}</h2>
-        ${severityBadge(v.severityLabel, v.maxCvssScore)}
-        ${v.epssScore ? `<span class="badge warn">EPSS ${pct(v.epssScore)}</span>` : ''}
-        ${v.kevDateAdded ? '<span class="badge risk">KEV</span>' : ''}
-      </div>
-      ${v.maxCvssVector ? cvssVectorBlock(v.maxCvssVersion, v.maxCvssVector) : ''}
-      <p class="summary">${escapeHtml(v.title || v.description || '')}</p>
-      <div class="detail-meta-row">
-        <span class="kv-inline">Published <b>${date(v.publishedAt)}</b></span>
-        <span class="kv-inline">Modified <b>${date(v.modifiedAt)}</b></span>
-        <span class="kv-inline">Sources <b>${fmt(sourceTags.length)}</b></span>
-        <span class="kv-inline">Affected <b>${fmt(v.affectedComponentCount)}</b></span>
-        <span class="kv-inline">Ecosystems <b>${fmt(Object.keys(affectedByEco).length)}</b></span>
-      </div>
-      <div class="chips" style="margin-top:4px">
-        ${sourceTags.map(s => `<span class="badge tag-source">${escapeHtml(s)}</span>`).join('')}
-      </div>
-      ${Object.keys(sourceUrls).length ? `<div style="margin-top:8px">${Object.entries(sourceUrls).map(([k,u]) =>
-        `<a href="${escapeAttr(u)}" target="_blank" rel="noreferrer" class="badge" style="text-decoration:none;margin:2px">&#128279; ${escapeHtml(k)}</a>`
-      ).join('')}</div>` : ''}
-    </header>
+    <article class="cve-page">
+      <header class="cve-hero">
+        <div class="cve-hero-main">
+          <div class="eyebrow-row">
+            <span class="eyebrow">Vulnerability Details</span>
+            ${sourceTags.slice(0, 6).map(s => `<span class="badge tag-source">${escapeHtml(s)}</span>`).join('')}
+          </div>
+          <div class="detail-title">
+            <h2>${escapeHtml(v.primaryIdentifier)}</h2>
+            ${severityBadge(v.severityLabel, v.maxCvssScore)}
+            ${v.epssScore ? `<span class="badge warn">EPSS ${pct(v.epssScore)}</span>` : ''}
+            ${v.kevDateAdded ? '<span class="badge risk">KEV</span>' : ''}
+          </div>
+          <p class="summary cve-summary">${escapeHtml(primaryDescription)}</p>
+          ${v.maxCvssVector ? cvssVectorBlock(v.maxCvssVersion, v.maxCvssVector) : ''}
+        </div>
+        ${renderHeroFacts(v, affectedByEco, records, refs)}
+      </header>
 
-    <div class="detail-tabs">
-      ${['Overview','Affected','Sources','References'].map((t,i) =>
-        `<button class="tab detail-tab ${i === 0 ? 'is-active' : ''}" data-dtab="${i}">${t}</button>`
-      ).join('')}
-    </div>
+      ${renderDetailNav()}
 
-    <div id="dt-0" class="detail-sections">
-      ${renderOverviewCards(v, affectedByEco, records, refs)}
-      ${descriptions.length ? renderDescriptionCards(descriptions) : ''}
-      ${severities.length ? renderSeverityCards(severities) : ''}
-      ${refs.length ? renderSourceLinks(refs) : ''}
-    </div>
-    <div id="dt-1" class="detail-sections" style="display:none">
-      ${renderAffectedGrouped(affected, v.primaryIdentifier)}
-    </div>
-    <div id="dt-2" class="detail-sections" style="display:none">
-      ${renderRecordsBySource(records)}
-    </div>
-    <div id="dt-3" class="detail-sections" style="display:none">
-      ${refs.length ? renderReferenceCards(refs) : '<p class="muted">No references</p>'}
-    </div>
+      <section class="detail-section ai-analysis-card" id="ai-analysis">
+        ${renderAiAnalysisPlan(v, affected, refs, records)}
+      </section>
+
+      <div class="detail-two-column">
+        <div class="detail-main-column">
+          ${descriptions.length ? renderDescriptionCards(descriptions) : ''}
+          ${renderMitreData(v, records, sourceUrls)}
+          ${renderCpeConfigurations(affected)}
+          ${renderAffectedGrouped(affected)}
+          ${renderAdvisories(refs)}
+          ${refs.length ? renderReferenceCards(refs) : '<section class="detail-section" id="references"><h3 class="section-h">References</h3><p class="muted">No references</p></section>'}
+          ${renderRecordsBySource(records)}
+        </div>
+        <aside class="detail-rail">
+          ${renderEnrichmentPanel(v, severities)}
+          ${renderTrackingPanel(v, records, refs)}
+        </aside>
+      </div>
+    </article>
   `;
 
-  el.detailPane.querySelectorAll('.detail-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      el.detailPane.querySelectorAll('.detail-tab').forEach(t => t.classList.remove('is-active'));
-      tab.classList.add('is-active');
-      el.detailPane.querySelectorAll('[id^="dt-"]').forEach(d => d.style.display = 'none');
-      const target = document.getElementById('dt-' + tab.dataset.dtab);
-      if (target) target.style.display = '';
+  const affectedFilter = el.detailPane.querySelector('[data-affected-filter]');
+  affectedFilter?.addEventListener('input', () => {
+    const value = affectedFilter.value.toLowerCase();
+    el.detailPane.querySelectorAll('.aff-eco-group').forEach((group) => {
+      group.style.display = !value || (group.textContent || '').toLowerCase().includes(value) ? '' : 'none';
     });
   });
 }
 
-function sourceTag(code) {
-  return `<span class="badge tag-source">${escapeHtml(code || '?')}</span>`;
-}
-
-function renderOverviewCards(v, affectedByEco, records, refs) {
-  const topEcosystems = Object.entries(affectedByEco)
-    .sort((a, b) => b[1].length - a[1].length)
-    .slice(0, 8);
+function renderHeroFacts(v, affectedByEco, records, refs) {
   const sourceCount = new Set(records.map(r => r.code).filter(Boolean)).size;
   return `
-    <section class="detail-section">
-      <h3 class="section-h">Overview</h3>
-      <div class="overview-grid">
-        <div class="stat-card"><span>${fmt(v.affectedComponentCount)}</span><small>Affected facts</small></div>
-        <div class="stat-card"><span>${fmt(sourceCount)}</span><small>Sources</small></div>
-        <div class="stat-card"><span>${fmt(refs.length)}</span><small>References</small></div>
-        <div class="stat-card"><span>${v.kevDateAdded ? 'Yes' : 'No'}</span><small>CISA KEV</small></div>
+    <div class="hero-facts" aria-label="Vulnerability facts">
+      ${factCard('Published', date(v.publishedAt))}
+      ${factCard('Score', v.maxCvssScore != null ? `${Number(v.maxCvssScore).toFixed(1)} ${v.severityLabel || ''}` : 'N/A', 'strong')}
+      ${factCard('EPSS', v.epssScore ? `${pct(v.epssScore)}${v.epssPercentile ? ` / P${Math.round(Number(v.epssPercentile) * 100)}` : ''}` : 'No data')}
+      ${factCard('KEV', v.kevDateAdded ? `Yes, ${date(v.kevDateAdded)}` : 'No')}
+      ${factCard('Impact', deriveImpact(v))}
+      ${factCard('Action', deriveAction(v), 'action')}
+      ${factCard('Sources', fmt(sourceCount))}
+      ${factCard('Affected', `${fmt(v.affectedComponentCount)} / ${fmt(Object.keys(affectedByEco).length)} ecosystems`)}
+      ${factCard('References', fmt(refs.length))}
+    </div>
+  `;
+}
+
+function factCard(label, value, tone = '') {
+  return `
+    <div class="fact-card ${tone}">
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(value || '-')}</strong>
+    </div>
+  `;
+}
+
+function renderDetailNav() {
+  const items = [
+    ['AI Analysis', 'ai-analysis'],
+    ['Mitre Data', 'mitre-data'],
+    ['CPE Configurations', 'cpe-configurations'],
+    ['Affected Packages', 'affected-packages'],
+    ['Enrichment', 'enrichment'],
+    ['Tracking', 'tracking'],
+    ['References', 'references'],
+    ['Raw Data', 'raw-data']
+  ];
+  return `
+    <nav class="detail-nav" aria-label="Detail sections">
+      ${items.map(([label, id]) => `<a href="#${id}">${escapeHtml(label)}</a>`).join('')}
+    </nav>
+  `;
+}
+
+function renderAiAnalysisPlan(v, affected, refs, records) {
+  return `
+    <div class="section-title-row">
+      <h3 class="section-h">AI Analysis</h3>
+      <span class="badge warn">Planned</span>
+    </div>
+    <div class="ai-grid">
+      <div class="analysis-field">
+        <span>Impact brief</span>
+        <p>Pending AI-generated explanation based on descriptions, CVSS metrics, affected components, and source advisories.</p>
       </div>
-      ${topEcosystems.length ? `<div class="chips compact-chips">${topEcosystems.map(([eco, items]) => `<span class="badge">${escapeHtml(eco)} ${fmt(items.length)}</span>`).join('')}</div>` : ''}
+      <div class="analysis-field">
+        <span>Affected systems</span>
+        <p>${fmt(affected.length)} current affected facts across ${fmt(new Set(affected.map(a => a.ecosystem || 'unknown')).size)} ecosystems.</p>
+      </div>
+      <div class="analysis-field">
+        <span>Exploitability signals</span>
+        <p>CVSS ${v.maxCvssScore ?? 'N/A'}, EPSS ${v.epssScore ? pct(v.epssScore) : 'not loaded'}, KEV ${v.kevDateAdded ? 'yes' : 'no'}.</p>
+      </div>
+      <div class="analysis-field">
+        <span>Evidence inputs</span>
+        <p>${fmt(records.length)} source records and ${fmt(refs.length)} references are available for the future AI pipeline.</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderMitreData(v, records, sourceUrls) {
+  const cveListRecords = records.filter(r => ['cve-list-v5', 'nvd-cve', 'nvd-cve-init'].includes(String(r.code || '').toLowerCase()));
+  const aliases = [...new Set([...(v.identifiers || []), ...(v.aliases || [])].filter(Boolean))];
+  return `
+    <section class="detail-section" id="mitre-data">
+      <div class="section-title-row">
+        <h3 class="section-h">Mitre Data</h3>
+        <span class="badge">${cveListRecords.length ? 'Loaded' : 'Partial'}</span>
+      </div>
+      <div class="kv-grid">
+        <div><span>Status</span><strong>${escapeHtml(v.status || 'unknown')}</strong></div>
+        <div><span>Published</span><strong>${date(v.publishedAt)}</strong></div>
+        <div><span>Modified</span><strong>${date(v.modifiedAt)}</strong></div>
+        <div><span>Updated</span><strong>${date(v.updatedAt)}</strong></div>
+      </div>
+      ${aliases.length ? `<div class="chips compact-chips">${aliases.slice(0, 14).map(a => `<span class="badge">${escapeHtml(a)}</span>`).join('')}</div>` : ''}
+      ${Object.keys(sourceUrls).length ? `
+        <div class="link-grid">
+          ${Object.entries(sourceUrls).map(([k, u]) => `
+            <a href="${escapeAttr(u)}" target="_blank" rel="noreferrer" class="source-link-pill">${escapeHtml(k)}</a>
+          `).join('')}
+        </div>
+      ` : renderDataGap('CVE List / NVD source URLs are not attached to this normalized record yet.')}
     </section>
   `;
+}
+
+function renderCpeConfigurations(affected) {
+  const cpeItems = affected.filter(a => a.primary_cpe23_uri);
+  const purlOnly = affected.filter(a => !a.primary_cpe23_uri && a.primary_purl);
+  if (!cpeItems.length) {
+    return `
+      <section class="detail-section" id="cpe-configurations">
+        <div class="section-title-row">
+          <h3 class="section-h">CPE Configurations</h3>
+          <span class="badge none">No CPE tree</span>
+        </div>
+        ${renderDataGap(`No NVD CPE configuration tree is stored for this record yet. ${purlOnly.length ? `${fmt(purlOnly.length)} purl-based package facts are available below.` : 'Package facts are not available yet.'}`)}
+      </section>
+    `;
+  }
+  const grouped = {};
+  cpeItems.forEach((item) => {
+    const cpe = item.primary_cpe23_uri;
+    if (!grouped[cpe]) grouped[cpe] = [];
+    grouped[cpe].push(item);
+  });
+  return `
+    <section class="detail-section" id="cpe-configurations">
+      <div class="section-title-row">
+        <h3 class="section-h">CPE Configurations</h3>
+        <span class="badge">${fmt(cpeItems.length)} matches</span>
+      </div>
+      <div class="config-list">
+        ${Object.entries(grouped).slice(0, 24).map(([cpe, items], index) => `
+          <div class="config-row">
+            <div class="config-op">OR</div>
+            <div>
+              <strong>Configuration ${index + 1}</strong>
+              <code>${escapeHtml(cpe)}</code>
+              <div class="chips">
+                ${items.slice(0, 6).map(a => `<span class="badge">${escapeHtml(a.ecosystem || 'unknown')}</span>`).join('')}
+              </div>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderAdvisories(refs) {
+  const advisoryRefs = refs.filter(r => {
+    const text = `${r.ref_type || ''} ${(r.tags || []).join(' ')} ${r.url || ''}`.toLowerCase();
+    return text.includes('advisory') || text.includes('patch') || text.includes('vendor') || text.includes('errata') || text.includes('security');
+  });
+  const display = (advisoryRefs.length ? advisoryRefs : refs).slice(0, 12);
+  return `
+    <section class="detail-section" id="advisories">
+      <div class="section-title-row">
+        <h3 class="section-h">Advisories / Patches</h3>
+        <span class="badge">${fmt(display.length)}</span>
+      </div>
+      ${display.length ? `
+        <div class="mini-table">
+          <div class="mini-table-head"><span>Source</span><span>Link</span><span>Type</span></div>
+          ${display.map(r => `
+            <div class="mini-table-row">
+              <span>${escapeHtml(r.code || 'source')}</span>
+              <a href="${escapeAttr(r.url)}" target="_blank" rel="noreferrer">${escapeHtml(shortUrl(r.url))}</a>
+              <span>${escapeHtml(r.ref_type || (Array.isArray(r.tags) ? r.tags.slice(0, 2).join(', ') : '') || '-')}</span>
+            </div>
+          `).join('')}
+        </div>
+      ` : renderDataGap('No advisory or patch references are linked yet.')}
+    </section>
+  `;
+}
+
+function renderEnrichmentPanel(v, severities) {
+  return `
+    <section class="detail-section rail-section" id="enrichment">
+      <h3 class="section-h">Enrichment</h3>
+      <div class="rail-stack">
+        <div class="rail-metric"><span>CVSS</span><strong>${v.maxCvssScore != null ? Number(v.maxCvssScore).toFixed(1) : 'N/A'}</strong><small>${escapeHtml(v.maxCvssVersion || v.severityLabel || '')}</small></div>
+        <div class="rail-metric"><span>EPSS</span><strong>${v.epssScore ? pct(v.epssScore) : 'N/A'}</strong><small>${v.epssPercentile ? `Percentile ${pct(v.epssPercentile)}` : 'No score loaded'}</small></div>
+        <div class="rail-metric"><span>KEV</span><strong>${v.kevDateAdded ? 'Yes' : 'No'}</strong><small>${v.knownRansomware ? 'Known ransomware use' : 'Ransomware unknown'}</small></div>
+        <div class="rail-metric"><span>SSVC</span><strong>N/A</strong><small>Source not integrated</small></div>
+      </div>
+      ${severities.length ? renderSeverityCards(severities) : ''}
+    </section>
+  `;
+}
+
+function renderTrackingPanel(v, records, refs) {
+  const dates = [
+    ['Published', v.publishedAt],
+    ['Modified', v.modifiedAt],
+    ['Normalized', v.updatedAt],
+    ['Latest source update', records.map(r => r.updatedAt).filter(Boolean).sort().at(-1)]
+  ];
+  return `
+    <section class="detail-section rail-section" id="tracking">
+      <h3 class="section-h">Tracking</h3>
+      <div class="timeline-list">
+        ${dates.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${date(value)}</strong></div>`).join('')}
+        <div><span>Source records</span><strong>${fmt(records.length)}</strong></div>
+        <div><span>References</span><strong>${fmt(refs.length)}</strong></div>
+      </div>
+    </section>
+  `;
+}
+
+function renderDataGap(message) {
+  return `<div class="data-gap"><p>${escapeHtml(message)}</p></div>`;
+}
+
+function deriveAction(v) {
+  const score = Number(v.maxCvssScore || 0);
+  const severity = String(v.severityLabel || '').toLowerCase();
+  if (v.kevDateAdded) return 'Patch or mitigate now';
+  if (score >= 9 || severity === 'critical') return 'Emergency review';
+  if (score >= 7 || severity === 'high') return 'High priority fix';
+  if (v.epssScore && Number(v.epssScore) >= 0.1) return 'Raise priority';
+  return 'Track exposure';
+}
+
+function deriveImpact(v) {
+  if (!v.maxCvssVector) return 'N/A';
+  const metrics = parseCvssVector(v.maxCvssVector);
+  const wanted = new Set(['C', 'I', 'A']);
+  const parts = metrics
+    .map(m => {
+      const key = m.metric.split(' - ')[0];
+      return wanted.has(key) ? `${key}:${m.value}` : null;
+    })
+    .filter(Boolean);
+  return parts.length ? parts.join(' ') : 'N/A';
+}
+
+function sourceTag(code) {
+  return `<span class="badge tag-source">${escapeHtml(code || '?')}</span>`;
 }
 
 function aggregateDescriptions(descriptions) {
@@ -364,7 +571,7 @@ function renderDescriptionCards(descriptions) {
   if (!descriptions.length) return '';
   const [primary, ...rest] = descriptions;
   return `
-    <section class="detail-section">
+    <section class="detail-section" id="description">
       <h3 class="section-h">Description</h3>
       <div class="info-card description-primary">
         <p class="info-card-body">${escapeHtml(primary.value || '')}</p>
@@ -396,50 +603,61 @@ function renderDescriptionCards(descriptions) {
 function renderSeverityCards(severities) {
   if (!severities.length) return '';
   return `
-    <section class="detail-section">
-      <h3 class="section-h">CVSS / Severity</h3>
-      <div class="card-stack">
-        ${severities.map(s => `
-          <div class="info-card">
-            <div class="info-card-row">
-              <strong>${s.scoring_system || 'severity'} ${s.scoring_version || ''}</strong>
-              ${s.score != null ? severityBadge(s.severity_label, s.score) : `<span class="badge">${escapeHtml(s.severity_label || 'N/A')}</span>`}
-            </div>
-            ${s.vector_string ? `<code class="cvss-vector-string">${escapeHtml(s.vector_string)}</code>` : ''}
-            <div class="chips">${sourceTag(s.code)}</div>
+    <div class="severity-list">
+      ${severities.map(s => `
+        <div class="severity-item">
+          <div class="info-card-row">
+            <strong>${escapeHtml(s.scoring_system || 'severity')} ${escapeHtml(s.scoring_version || '')}</strong>
+            ${s.score != null ? severityBadge(s.severity_label, s.score) : `<span class="badge">${escapeHtml(s.severity_label || 'N/A')}</span>`}
           </div>
-        `).join('')}
-      </div>
-    </section>
+          ${s.vector_string ? `<code class="cvss-vector-string">${escapeHtml(s.vector_string)}</code>` : ''}
+          <div class="chips">${sourceTag(s.code)}</div>
+        </div>
+      `).join('')}
+    </div>
   `;
 }
 
 function renderAffectedGrouped(affected) {
-  if (!affected.length) return '<p class="muted">No affected components</p>';
-  return `
-    <div style="margin-bottom:10px">
-      <input type="text" id="affectedFilter" placeholder="Filter components..."
-        style="width:100%;padding:6px 10px;border:1px solid var(--line);border-radius:6px;font-size:13px"
-        oninput="document.querySelectorAll('.aff-eco-group').forEach(g=>{const v=this.value.toLowerCase();g.style.display=v===''?'' : (g.textContent||'').toLowerCase().includes(v)?'':'none'})">
-    </div>
-    <div id="affectedGroups">
-    ${Object.entries(groupByEco(affected)).sort((a,b)=>b[1].length-a[1].length).map(([eco,items])=>`
-      <section class="detail-section aff-eco-group">
-        <h3 class="section-h">${escapeHtml(eco)} (${items.length})</h3>
-        <div class="card-stack" style="max-height:400px;overflow:auto">
-          ${items.map(a=>`
-            <div class="info-card">
-              <div class="info-card-row">
-                <strong>${escapeHtml(a.display_name||a.package_name||'-')}</strong>
-                <span class="badge ${a.normalized_range?'':'none'}">${escapeHtml((a.normalized_range||'no range').slice(0,60))}</span>
-                ${a.range_type?`<span class="badge tag-source">${escapeHtml(a.range_type)}</span>`:''}
-              </div>
-            </div>
-          `).join('')}
-        </div>
+  if (!affected.length) {
+    return `
+      <section class="detail-section" id="affected-packages">
+        <h3 class="section-h">Affected Packages</h3>
+        <p class="muted">No affected components</p>
       </section>
-    `).join('')}
-    </div>`;
+    `;
+  }
+  return `
+    <section class="detail-section" id="affected-packages">
+      <div class="section-title-row">
+        <h3 class="section-h">Affected Packages</h3>
+        <span class="badge">${fmt(affected.length)} facts</span>
+      </div>
+      <input class="filter-input" type="text" data-affected-filter placeholder="Filter packages, ecosystems, ranges">
+      <div id="affectedGroups" class="affected-groups">
+      ${Object.entries(groupByEco(affected)).sort((a,b)=>b[1].length-a[1].length).map(([eco,items])=>`
+        <div class="aff-eco-group">
+          <div class="affected-group-head">
+            <strong>${escapeHtml(eco)}</strong>
+            <span class="badge">${fmt(items.length)}</span>
+          </div>
+          <div class="affected-table">
+            ${items.map(a=>`
+              <div class="affected-row">
+                <div>
+                  <strong>${escapeHtml(a.display_name||a.package_name||'-')}</strong>
+                  <small>${escapeHtml(a.primary_purl || a.primary_cpe23_uri || '')}</small>
+                </div>
+                <span class="badge ${a.normalized_range?'':'none'}">${escapeHtml(a.normalized_range||'no range')}</span>
+                ${a.range_type?`<span class="badge tag-source">${escapeHtml(a.range_type)}</span>`:''}
+                ${a.resolution_status?`<span class="badge">${escapeHtml(a.resolution_status)}</span>`:''}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `).join('')}
+      </div>
+    </section>`;
 }
 function groupByEco(affected) {
   const m={};
@@ -448,7 +666,14 @@ function groupByEco(affected) {
 }
 
 function renderRecordsBySource(records) {
-  if (!records.length) return '<p class="muted">No source records</p>';
+  if (!records.length) {
+    return `
+      <section class="detail-section" id="raw-data">
+        <h3 class="section-h">Raw Data</h3>
+        <p class="muted">No source records</p>
+      </section>
+    `;
+  }
   const bySrc = {};
   records.forEach(r => {
     const code = r.code || '?';
@@ -456,9 +681,12 @@ function renderRecordsBySource(records) {
     bySrc[code].push(r);
   });
   return Object.entries(bySrc).map(([code, items]) => `
-    <section class="detail-section">
-      <h3 class="section-h">${escapeHtml(code)} (${items.length})</h3>
-      <div class="card-stack" style="max-height:300px;overflow:auto">
+    <section class="detail-section" id="${code === Object.keys(bySrc)[0] ? 'raw-data' : ''}">
+      <div class="section-title-row">
+        <h3 class="section-h">Raw Data: ${escapeHtml(code)}</h3>
+        <span class="badge">${fmt(items.length)}</span>
+      </div>
+      <div class="card-stack scroll-stack">
         ${items.map(r => `
           <div class="info-card">
             <div class="info-card-row"><strong>${escapeHtml(r.recordId || '-')}</strong></div>
@@ -471,41 +699,15 @@ function renderRecordsBySource(records) {
   `).join('');
 }
 
-function renderSourceLinks(refs) {
-  const bySource = {};
-  refs.forEach(r => {
-    const src = r.code || 'unknown';
-    if (!bySource[src]) bySource[src] = [];
-    bySource[src].push(r);
-  });
-  return `
-    <section class="detail-section">
-      <h3 class="section-h">Source Links</h3>
-      <div class="card-stack">
-        ${Object.entries(bySource).map(([src, items]) => `
-          <div class="info-card">
-            <div class="info-card-row"><strong>${escapeHtml(src)}</strong></div>
-            <div style="margin-top:6px">
-              ${items.slice(0, 5).map(r => `
-                <a href="${escapeAttr(r.url)}" target="_blank" rel="noreferrer" class="ref-link" style="display:block;margin:2px 0">
-                  ${escapeHtml(shortUrl(r.url))}
-                </a>
-              `).join('')}
-              ${items.length > 5 ? `<span class="muted">+${items.length - 5} more</span>` : ''}
-            </div>
-          </div>
-        `).join('')}
-      </div>
-    </section>
-  `;
-}
-
 function renderReferenceCards(refs) {
   if (!refs.length) return '';
   const display = refs.slice(0, 30);
   return `
-    <section class="detail-section">
-      <h3 class="section-h">References (${fmt(refs.length)})</h3>
+    <section class="detail-section" id="references">
+      <div class="section-title-row">
+        <h3 class="section-h">References</h3>
+        <span class="badge">${fmt(refs.length)}</span>
+      </div>
       <div class="card-stack">
         ${display.map(r => `
           <div class="info-card">

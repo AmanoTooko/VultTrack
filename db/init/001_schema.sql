@@ -404,6 +404,9 @@ create table if not exists vulnerability_weaknesses (
   source_json_path text
 );
 
+create unique index if not exists ux_weaknesses_dedup
+  on vulnerability_weaknesses(vulnerability_id, source_id, coalesce(weakness_id, ''));
+
 create table if not exists vulnerability_references (
   id uuid primary key default gen_random_uuid(),
   vulnerability_id uuid references vulnerabilities(id),
