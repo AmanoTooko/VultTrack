@@ -14,8 +14,17 @@
         <p id="statusLine">Loading pipeline state</p>
       </div>
       <div class="topbar-actions">
+        <div class="theme-controls" aria-label="Theme color">
+          <button class="theme-swatch is-active" type="button" data-theme-color="#2f7da7" style="--swatch:#2f7da7" title="Ocean"></button>
+          <button class="theme-swatch" type="button" data-theme-color="#2f9f86" style="--swatch:#2f9f86" title="Mint"></button>
+          <button class="theme-swatch" type="button" data-theme-color="#d86f73" style="--swatch:#d86f73" title="Coral"></button>
+          <button class="theme-swatch" type="button" data-theme-color="#8b6fd6" style="--swatch:#8b6fd6" title="Berry"></button>
+          <label class="color-picker" title="Custom accent color">
+            <input id="themeColorInput" type="color" value="#2f7da7" aria-label="Custom accent color">
+          </label>
+        </div>
         <button id="sidebarToggle" class="icon-button" type="button" title="Toggle sidebar" aria-label="Toggle sidebar">
-          <span aria-hidden="true">☰</span>
+          <span aria-hidden="true" class="sidebar-toggle-icon">☰</span>
         </button>
         <button id="refreshButton" class="icon-button" type="button" title="Refresh data" aria-label="Refresh data">
           <span aria-hidden="true">&#8635;</span>
@@ -33,8 +42,8 @@
     <section class="workspace">
       <aside class="search-pane">
         <div class="tabs" role="tablist" aria-label="Search mode">
-          <button class="tab is-active" type="button" data-mode="vulnerability">Vulnerability</button>
-          <button class="tab" type="button" data-mode="component">Component</button>
+          <button class="tab is-active" type="button" data-mode="vulnerability">Vulns</button>
+          <button class="tab" type="button" data-mode="component">Package</button>
           <button class="tab" type="button" data-mode="sbom">SBOM</button>
         </div>
 

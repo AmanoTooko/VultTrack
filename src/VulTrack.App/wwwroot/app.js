@@ -1,12 +1,15 @@
 const state = {
   mode: 'vulnerability',
   selectedId: null,
-  sidebarCollapsed: localStorage.getItem('vultrack.sidebarCollapsed') === 'true'
+  sidebarCollapsed: localStorage.getItem('vultrack.sidebarCollapsed') === 'true',
+  themeColor: localStorage.getItem('vultrack.themeColor') || '#2f7da7'
 };
 
 const el = {
   shell: document.querySelector('.shell'),
   sidebarToggle: document.querySelector('#sidebarToggle'),
+  themeColorInput: document.querySelector('#themeColorInput'),
+  themeSwatches: [...document.querySelectorAll('.theme-swatch')],
   statusLine: document.querySelector('#statusLine'),
   refreshButton: document.querySelector('#refreshButton'),
   metricVulns: document.querySelector('#metricVulns'),
@@ -26,11 +29,24 @@ const el = {
 };
 
 el.shell.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+applyThemeColor(state.themeColor);
+updateSidebarToggleLabel();
 
 el.sidebarToggle?.addEventListener('click', () => {
   state.sidebarCollapsed = !state.sidebarCollapsed;
   localStorage.setItem('vultrack.sidebarCollapsed', String(state.sidebarCollapsed));
   el.shell.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+  updateSidebarToggleLabel();
+});
+
+el.themeSwatches.forEach((button) => {
+  button.addEventListener('click', () => {
+    applyThemeColor(button.dataset.themeColor);
+  });
+});
+
+el.themeColorInput?.addEventListener('input', (event) => {
+  applyThemeColor(event.target.value);
 });
 
 el.refreshButton.addEventListener('click', () => {
@@ -65,6 +81,47 @@ el.detailPane.addEventListener('click', (event) => {
   toggle.setAttribute('aria-expanded', !expanded);
   target.hidden = expanded;
 });
+
+function updateSidebarToggleLabel() {
+  if (!el.sidebarToggle) return;
+  const label = state.sidebarCollapsed ? 'Show filters' : 'Hide filters';
+  el.sidebarToggle.setAttribute('title', label);
+  el.sidebarToggle.setAttribute('aria-label', label);
+}
+
+function applyThemeColor(color) {
+  const normalized = normalizeHexColor(color) || '#2f7da7';
+  state.themeColor = normalized;
+  localStorage.setItem('vultrack.themeColor', normalized);
+  document.documentElement.style.setProperty('--accent', normalized);
+  document.documentElement.style.setProperty('--accent-soft', mixHex(normalized, '#ffffff', 0.84));
+  document.documentElement.style.setProperty('--accent-wash', mixHex(normalized, '#ffffff', 0.94));
+  if (el.themeColorInput) el.themeColorInput.value = normalized;
+  el.themeSwatches.forEach((button) => {
+    button.classList.toggle('is-active', normalizeHexColor(button.dataset.themeColor) === normalized);
+  });
+}
+
+function normalizeHexColor(color) {
+  if (!color) return null;
+  const match = String(color).trim().match(/^#?([0-9a-f]{6})$/i);
+  return match ? `#${match[1].toLowerCase()}` : null;
+}
+
+function mixHex(color, base, baseWeight) {
+  const a = hexToRgb(color);
+  const b = hexToRgb(base);
+  if (!a || !b) return base;
+  const weight = Math.max(0, Math.min(1, baseWeight));
+  const mixed = a.map((value, index) => Math.round(value * (1 - weight) + b[index] * weight));
+  return `#${mixed.map(v => v.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function hexToRgb(color) {
+  const normalized = normalizeHexColor(color);
+  if (!normalized) return null;
+  return [1, 3, 5].map(index => parseInt(normalized.slice(index, index + 2), 16));
+}
 
 async function api(path, options = {}) {
   const res = await fetch(path, {
@@ -305,20 +362,33 @@ function aggregateDescriptions(descriptions) {
 
 function renderDescriptionCards(descriptions) {
   if (!descriptions.length) return '';
+  const [primary, ...rest] = descriptions;
   return `
     <section class="detail-section">
       <h3 class="section-h">Description</h3>
-      <div class="card-stack">
-        ${descriptions.map(d => `
-          <div class="info-card">
-            <p class="info-card-body">${escapeHtml(d.value || '')}</p>
-            <div class="chips">
-              ${(d.sources || [d.code]).filter(Boolean).map(sourceTag).join('')}
-              ${(d.langs || (d.lang ? [d.lang] : [])).map(lang => `<span class="badge">${escapeHtml(lang)}</span>`).join('')}
-            </div>
-          </div>
-        `).join('')}
+      <div class="info-card description-primary">
+        <p class="info-card-body">${escapeHtml(primary.value || '')}</p>
+        <div class="chips">
+          ${(primary.sources || [primary.code]).filter(Boolean).map(sourceTag).join('')}
+          ${(primary.langs || (primary.lang ? [primary.lang] : [])).map(lang => `<span class="badge">${escapeHtml(lang)}</span>`).join('')}
+        </div>
       </div>
+      ${rest.length ? `
+        <details class="description-more">
+          <summary>${fmt(rest.length)} additional description${rest.length > 1 ? 's' : ''}</summary>
+          <div class="card-stack">
+            ${rest.map(d => `
+              <div class="info-card">
+                <p class="info-card-body">${escapeHtml(d.value || '')}</p>
+                <div class="chips">
+                  ${(d.sources || [d.code]).filter(Boolean).map(sourceTag).join('')}
+                  ${(d.langs || (d.lang ? [d.lang] : [])).map(lang => `<span class="badge">${escapeHtml(lang)}</span>`).join('')}
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </details>
+      ` : ''}
     </section>
   `;
 }
