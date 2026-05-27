@@ -1,4 +1,5 @@
 .env
+ssh-key-*.key
 data/
 pgdata/
 node_modules/

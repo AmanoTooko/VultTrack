@@ -39,7 +39,7 @@ create table if not exists sbom_vulnerabilities (
   normalized_range text,
   version_matched boolean,
   created_at timestamptz not null default now(),
-  unique(sbom_component_id, vulnerability_id, coalesce(normalized_range, ''))
+  unique(sbom_component_id, vulnerability_id)
 );
 
 create index ix_sbom_vulns_component on sbom_vulnerabilities(sbom_component_id);

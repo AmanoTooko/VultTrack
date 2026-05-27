@@ -1,0 +1,85 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: vultrack-postgres
+    restart: unless-stopped
+    command:
+      - postgres
+      - -c
+      - shared_buffers=6GB
+      - -c
+      - effective_cache_size=18GB
+      - -c
+      - work_mem=64MB
+      - -c
+      - maintenance_work_mem=2GB
+      - -c
+      - checkpoint_timeout=15min
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=100
+      - -c
+      - autovacuum_vacuum_scale_factor=0.05
+      - -c
+      - autovacuum_analyze_scale_factor=0.05
+      - -c
+      - autovacuum_vacuum_cost_limit=2000
+      - -c
+      - max_wal_size=8GB
+      - -c
+      - max_worker_processes=8
+      - -c
+      - max_parallel_workers=4
+      - -c
+      - max_parallel_workers_per_gather=2
+    shm_size: "2g"
+    env_file:
+      - .env.production
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vultrack -d vultrack"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  api:
+    build:
+      context: .
+      dockerfile: src/VulTrack.App/Dockerfile
+    container_name: vultrack-api
+    restart: unless-stopped
+    working_dir: /workspace/src/VulTrack.App
+    env_file:
+      - .env.production
+    environment:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_SYSTEM_NET_DISABLEIPV6: "1"
+    volumes:
+      - .:/workspace
+      - nuget-cache:/root/.nuget/packages
+    command:
+      - sh
+      - -lc
+      - >
+        cd /workspace &&
+        (test -d node_modules/pg || npm ci --omit=dev) &&
+        cd /workspace/src/VulTrack.App &&
+        dotnet run --urls http://0.0.0.0:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: vultrack-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:80"
+    depends_on:
+      - api
+
+volumes:
+  nuget-cache:
