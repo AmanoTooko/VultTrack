@@ -35,6 +35,7 @@ const el = {
   detailPane: document.querySelector('#detailPane'),
   resultsTitle: document.querySelector('#resultsTitle'),
   resultsMeta: document.querySelector('#resultsMeta'),
+  syntaxHint: document.querySelector('#syntaxHint'),
   pager: document.querySelector('#pager'),
   pageLabel: document.querySelector('#pageLabel'),
   prevPageButton: document.querySelector('#prevPageButton'),
@@ -43,6 +44,8 @@ const el = {
 
 if (el.limitSelect) el.limitSelect.value = String(state.pageSize);
 if (el.sortSelect) el.sortSelect.value = state.sort;
+document.body.dataset.mode = state.mode;
+if (el.syntaxHint) el.syntaxHint.innerHTML = syntaxHintHtml(state.mode);
 applyThemeColor(state.themeColor);
 
 el.themeSwatches.forEach((button) => {
@@ -114,6 +117,15 @@ el.detailPane.addEventListener('click', (event) => {
   target.hidden = expanded;
 });
 
+function showDetailPane() {
+  el.detailPane.hidden = false;
+}
+
+function hideDetailPane() {
+  el.detailPane.hidden = true;
+  el.detailPane.innerHTML = '';
+}
+
 function applyThemeColor(color) {
   const normalized = normalizeHexColor(color) || '#2f7da7';
   state.themeColor = normalized;
@@ -181,6 +193,7 @@ async function loadStatus() {
 
 function activateMode(tab) {
   state.mode = tab.dataset.mode;
+  document.body.dataset.mode = state.mode;
   state.page = 1;
   state.hasMore = false;
   el.tabs.forEach((item) => item.classList.toggle('is-active', item === tab));
@@ -190,11 +203,43 @@ function activateMode(tab) {
   el.queryInput.placeholder = state.mode === 'component' ? 'pkg:maven/org.apache.logging.log4j/log4j-core' : 'CVE-2021-44228';
   if (el.sortSelect) el.sortSelect.disabled = state.mode !== 'vulnerability';
   if (el.pager) el.pager.hidden = state.mode === 'sbom' || state.mode === 'status';
+  if (el.syntaxHint) el.syntaxHint.innerHTML = syntaxHintHtml(state.mode);
   if (el.resultsTitle) el.resultsTitle.textContent = modeTitle(state.mode);
+  if (el.resultsMeta) el.resultsMeta.textContent = modeDescription(state.mode);
   updatePager();
   if (state.mode === 'sbom') loadSbomList();
   else if (state.mode === 'status') loadStatusPage();
   else runSearch();
+}
+
+function syntaxHintHtml(mode) {
+  const items = {
+    vulnerability: [
+      ['CVE prefix', 'CVE-2021'],
+      ['Exact CVE', 'CVE-2021-44228'],
+      ['Keyword', 'log4j remote code execution'],
+      ['Sort', 'Updated, Published, CVSS, CVE ID']
+    ],
+    component: [
+      ['PURL', 'pkg:maven/org.apache.logging.log4j/log4j-core@2.14.1'],
+      ['Name', 'log4j-core'],
+      ['Vendor', 'org.apache.logging.log4j'],
+      ['Version', '2.14.1']
+    ],
+    sbom: [
+      ['Formats', 'CycloneDX JSON'],
+      ['Matching', 'PURL + CPE'],
+      ['Export', 'Excel-compatible .xls'],
+      ['Output', 'Component, CVE, CVSS, CWE, URLs']
+    ],
+    status: [
+      ['Default', 'Fast snapshot'],
+      ['Exact', 'Exact refresh'],
+      ['Queues', 'Normalizer and fetch status'],
+      ['Sources', 'Schedule and latest run']
+    ]
+  }[mode] || [];
+  return items.map(([label, value]) => `<span>${escapeHtml(label)} <code>${escapeHtml(value)}</code></span>`).join('');
 }
 
 function modeTitle(mode) {
@@ -204,6 +249,15 @@ function modeTitle(mode) {
     sbom: 'SBOM uploads',
     status: 'Pipeline status'
   }[mode] || 'Vulnerabilities';
+}
+
+function modeDescription(mode) {
+  return {
+    vulnerability: 'Search CVE identifiers, affected packages, titles, and source aliases.',
+    component: 'Search package names, purl coordinates, vendor hints, ecosystems, and versions.',
+    sbom: 'Upload, match, inspect, and export CycloneDX SBOM findings with PURL and CPE evidence.',
+    status: 'Fast source snapshot with optional exact counts for raw-row queues.'
+  }[mode] || '';
 }
 
 function searchMetaText(query) {
@@ -237,6 +291,7 @@ function updatePager(itemCount = null) {
 async function loadStatusPage() {
   if (el.resultsMeta) el.resultsMeta.textContent = 'Fast source snapshot. Use exact refresh when you need full raw-row counts.';
   el.resultList.innerHTML = '<div class="muted result-item">Pipeline sources</div>';
+  showDetailPane();
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading status</h2></div>';
   try {
     const data = await api('/api/v1/system.status?fast=true');
@@ -249,6 +304,7 @@ async function loadStatusPage() {
 }
 
 async function loadExactStatusPage() {
+  showDetailPane();
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading exact status</h2><p>This scans raw status rows and can take a few seconds.</p></div>';
   try {
     const data = await api('/api/v1/system.status');
@@ -264,6 +320,7 @@ async function loadExactStatusPage() {
 async function runSearch() {
   const query = el.queryInput.value.trim();
   state.hasMore = false;
+  hideDetailPane();
   updatePager();
   if (el.resultsMeta) el.resultsMeta.textContent = searchMetaText(query);
   el.resultList.innerHTML = '<div class="muted result-item">Loading</div>';
@@ -370,10 +427,12 @@ async function loadVulnerabilityDetail(id) {
   el.resultList.querySelectorAll('.result-item').forEach((item) => {
     item.classList.toggle('is-active', item.dataset.vulnerabilityId === id);
   });
+  showDetailPane();
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading</h2></div>';
   try {
     const data = await api(`/api/v1/vulnerability.detail?id=${encodeURIComponent(id)}`);
     renderDetail(data);
+    el.detailPane.scrollIntoView({ block: 'start', behavior: 'smooth' });
   } catch (error) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Request failed</h2><p>${escapeHtml(error.message)}</p></div>`;
   }
@@ -1288,7 +1347,8 @@ setTimeout(() => runSearch(), 100);
 
 async function loadSbomList() {
   el.searchForm.hidden = true;
-  el.detailPane.innerHTML = '';
+  if (el.resultsMeta) el.resultsMeta.textContent = modeDescription('sbom');
+  hideDetailPane();
   renderSbomUpload();
   try {
     const data = await api('/api/v1/sbom.list');
@@ -1358,10 +1418,12 @@ function setupSbomUpload() {
 }
 
 async function loadSbomDetail(sbomId) {
+  showDetailPane();
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading...</h2></div>';
   try {
     const data = await api(`/api/v1/sbom.get?id=${encodeURIComponent(sbomId)}`);
     renderSbomDetail(data, sbomId);
+    el.detailPane.scrollIntoView({ block: 'start', behavior: 'smooth' });
   } catch (e) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Error</h2><p>${escapeHtml(e.message)}</p></div>`;
   }

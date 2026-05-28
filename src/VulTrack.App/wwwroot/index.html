@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VulTrack</title>
-  <link rel="stylesheet" href="/styles.css?v=20260528-search-ui">
+  <link rel="stylesheet" href="/styles.css?v=20260528-cms-ui">
 </head>
 <body>
   <main class="shell">
@@ -45,11 +45,6 @@
               <h2 id="resultsTitle">Vulnerabilities</h2>
               <p id="resultsMeta">Search CVE identifiers, affected packages, titles, and source aliases.</p>
             </div>
-            <div class="pager" id="pager">
-              <button id="prevPageButton" class="icon-button" type="button" title="Previous page" aria-label="Previous page">&#8592;</button>
-              <span id="pageLabel">Page 1</span>
-              <button id="nextPageButton" class="icon-button" type="button" title="Next page" aria-label="Next page">&#8594;</button>
-            </div>
           </div>
           <form id="searchForm" class="search-form panel-tools">
             <label class="query-field">
@@ -71,15 +66,6 @@
               </label>
             </div>
             <label class="compact-field">
-              <span>Limit</span>
-              <select id="limitSelect" name="limit">
-                <option value="10">10</option>
-                <option value="25" selected>25</option>
-                <option value="50">50</option>
-                <option value="100">100</option>
-              </select>
-            </label>
-            <label class="compact-field">
               <span>Sort</span>
               <select id="sortSelect" name="sort">
                 <option value="modifiedDesc" selected>Updated</option>
@@ -91,13 +77,27 @@
             </label>
             <button type="submit" class="primary-button">Search</button>
           </form>
+          <div class="syntax-hint" id="syntaxHint"></div>
           <div class="result-list" id="resultList" aria-live="polite"></div>
+          <div class="results-footer" id="pager">
+            <div class="pager">
+              <button id="prevPageButton" class="icon-button" type="button" title="Previous page" aria-label="Previous page">&#8592;</button>
+              <span id="pageLabel">Page 1</span>
+              <button id="nextPageButton" class="icon-button" type="button" title="Next page" aria-label="Next page">&#8594;</button>
+            </div>
+            <label class="page-size-field">
+              <span>Rows per page</span>
+              <select id="limitSelect" name="limit">
+                <option value="10">10</option>
+                <option value="25" selected>25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+          </div>
         </section>
 
-        <section class="detail-pane" id="detailPane" aria-live="polite">
-          <div class="empty-state">
-            <h2>No selection</h2>
-          </div>
+        <section class="detail-pane" id="detailPane" aria-live="polite" hidden>
         </section>
       </section>
     </section>
@@ -115,6 +115,6 @@
     </footer>
   </main>
 
-  <script src="/app.js?v=20260528-search-ui" defer></script>
+  <script src="/app.js?v=20260528-cms-ui" defer></script>
 </body>
 </html>
