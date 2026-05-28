@@ -162,7 +162,7 @@ async function api(path, options = {}) {
 
 async function loadStatus() {
   try {
-    const data = await api('/api/v1/system.status');
+    const data = await api('/api/v1/system.status?fast=true');
     state.statusData = data;
     el.metricVulns.textContent = fmt(data.vulnerabilities);
     el.metricRecords.textContent = fmt(data.vulnerabilityRecords);
@@ -235,14 +235,27 @@ function updatePager(itemCount = null) {
 }
 
 async function loadStatusPage() {
-  if (el.resultsMeta) el.resultsMeta.textContent = 'Source freshness, normalizer queues, and scheduler progress.';
+  if (el.resultsMeta) el.resultsMeta.textContent = 'Fast source snapshot. Use exact refresh when you need full raw-row counts.';
   el.resultList.innerHTML = '<div class="muted result-item">Pipeline sources</div>';
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading status</h2></div>';
+  try {
+    const data = await api('/api/v1/system.status?fast=true');
+    state.statusData = data;
+    renderStatusPage(data);
+    renderStatusSourceList(data);
+  } catch (error) {
+    el.detailPane.innerHTML = `<div class="empty-state"><h2>Status unavailable</h2><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+async function loadExactStatusPage() {
+  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading exact status</h2><p>This scans raw status rows and can take a few seconds.</p></div>';
   try {
     const data = await api('/api/v1/system.status');
     state.statusData = data;
     renderStatusPage(data);
     renderStatusSourceList(data);
+    loadStatus();
   } catch (error) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Status unavailable</h2><p>${escapeHtml(error.message)}</p></div>`;
   }
@@ -435,7 +448,11 @@ function renderStatusPage(data) {
       <section class="detail-section">
         <div class="section-title-row">
           <h3 class="section-h">Normalizer Queue</h3>
-          <span class="badge">${dateTime(data.generatedAt)}</span>
+          <div class="chips">
+            <span class="badge ${data.countsEstimated ? 'warn' : 'low'}">${data.countsEstimated ? 'estimated snapshot' : 'exact counts'}</span>
+            <span class="badge">${dateTime(data.generatedAt)}</span>
+            ${data.countsEstimated ? '<button class="tab" type="button" data-exact-status>Exact refresh</button>' : ''}
+          </div>
         </div>
         <div class="queue-grid">
           ${(data.normalizeStatus || []).map(item => `
@@ -461,6 +478,7 @@ function renderStatusPage(data) {
       </section>
     </article>
   `;
+  el.detailPane.querySelector('[data-exact-status]')?.addEventListener('click', loadExactStatusPage);
 }
 
 function statusKpi(label, value, tone = '') {
@@ -1374,7 +1392,8 @@ function renderSbomDetail(data, sbomId) {
         <span class="kv-inline">Format <b>${s.format}</b></span>
       </div>
       <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="tab" type="button" id="sbomMatchBtn" style="height:32px;padding:0 12px">Match Vulnerabilities</button>
+        <button class="tab" type="button" id="sbomMatchBtn" style="height:32px;padding:0 12px">Match PURL + CPE</button>
+        <button class="tab" type="button" id="sbomExportBtn" style="height:32px;padding:0 12px">Export Excel</button>
         <button class="tab" type="button" id="sbomDeleteBtn" style="height:32px;padding:0 12px;color:var(--risk)">Delete</button>
       </div>
     </header>
@@ -1388,14 +1407,17 @@ function renderSbomDetail(data, sbomId) {
             return `
               <div class="info-card" style="border-left:3px solid ${hasVulns ? 'var(--risk)' : 'var(--line)'}">
                 <div class="info-card-row" ${hasVulns ? `style="cursor:pointer" data-expand="${escapeAttr(c.id)}"` : ''}>
-                  <strong>${escapeHtml(c.name || c.purl)}</strong>
+                  <strong>${escapeHtml(c.name || c.product || c.purl || c.cpe23Uri || 'component')}</strong>
                   ${c.version ? `<span class="badge">${escapeHtml(c.version)}</span>` : ''}
                   <span class="badge ${hasVulns ? 'risk' : ''}">${c.vulnCount || 0} affected</span>
                   ${hasVulns ? '<span class="badge" style="font-size:10px">&#9660;</span>' : ''}
                 </div>
                 <div class="chips">
                   ${c.ecosystem ? `<span class="badge">${escapeHtml(c.ecosystem)}</span>` : ''}
-                  <code style="font-size:11px;color:var(--muted)">${escapeHtml(c.purl)}</code>
+                  ${c.vendor ? `<span class="badge">${escapeHtml(c.vendor)}</span>` : ''}
+                  ${c.product ? `<span class="badge">${escapeHtml(c.product)}</span>` : ''}
+                  ${c.purl ? `<code style="font-size:11px;color:var(--muted)">${escapeHtml(c.purl)}</code>` : ''}
+                  ${c.cpe23Uri ? `<code style="font-size:11px;color:var(--muted)">${escapeHtml(c.cpe23Uri)}</code>` : ''}
                 </div>
                 ${hasVulns ? `
                 <div class="sbom-expand" id="expand-${c.id}" style="display:none;margin-top:10px">
@@ -1433,6 +1455,10 @@ function renderSbomDetail(data, sbomId) {
       await api('/api/v1/sbom.match', { method: 'POST', body: JSON.stringify({ sbomId }) });
       loadSbomDetail(sbomId);
     } catch(e) { alert('Match failed: ' + e.message); }
+  });
+
+  document.getElementById('sbomExportBtn')?.addEventListener('click', () => {
+    window.location.href = `/api/v1/sbom.export?id=${encodeURIComponent(sbomId)}`;
   });
 
   document.getElementById('sbomDeleteBtn')?.addEventListener('click', async () => {

@@ -76,9 +76,13 @@ app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken 
 });
 
 var systemStatusCache = new StatusCache();
+var systemStatusFastCache = new StatusCache();
 
-app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToken ct) =>
+app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, bool? fast, CancellationToken ct) =>
 {
+    if (fast == true)
+        return ApiResult.Ok(await GetFastSystemStatusAsync(db, systemStatusFastCache, ct));
+
     var now = DateTimeOffset.UtcNow;
     if (systemStatusCache.Value is not null && systemStatusCache.ExpiresAt > now)
         return ApiResult.Ok(systemStatusCache.Value);
@@ -973,7 +977,15 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_vuln_modified on vulnerabilities(modified_at desc nulls last)",
         "create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last)",
         "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
-        "create index if not exists ix_raw_source_status_cover on source_raw_index(source_id) include(parse_status, normalize_status, updated_at)"
+        "create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier)",
+        "create index if not exists ix_raw_source_status_cover on source_raw_index(source_id) include(parse_status, normalize_status, updated_at)",
+        "alter table if exists sbom_components alter column purl drop not null",
+        "alter table if exists sbom_components add column if not exists vendor text",
+        "alter table if exists sbom_components add column if not exists product text",
+        "alter table if exists sbom_components add column if not exists cpe23_uri text",
+        "create index if not exists ix_sbom_components_purl on sbom_components(purl) where purl is not null",
+        "create index if not exists ix_sbom_components_cpe on sbom_components(cpe23_uri) where cpe23_uri is not null",
+        "create index if not exists ix_affected_components_cpe_prefix on vulnerability_affected_components(primary_cpe23_uri text_pattern_ops, vulnerability_id) where primary_cpe23_uri is not null"
     })
     {
         await using var cmd = db.CreateCommand(statement);
@@ -1079,6 +1091,162 @@ static async Task<IReadOnlyDictionary<string, long>> CountTablesAsync(NpgsqlData
         Count = await CountTableAsync(db, tableName, ct)
     }));
     return rows.ToDictionary(x => x.TableName, x => x.Count, StringComparer.Ordinal);
+}
+
+static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCache cache, CancellationToken ct)
+{
+    var now = DateTimeOffset.UtcNow;
+    if (cache.Value is not null && cache.ExpiresAt > now)
+        return cache.Value;
+
+    await cache.RefreshLock.WaitAsync(ct);
+    try
+    {
+        now = DateTimeOffset.UtcNow;
+        if (cache.Value is not null && cache.ExpiresAt > now)
+            return cache.Value;
+
+        var sourceStatus = new List<object>();
+        long parsedTotal = 0;
+        long normalizedTotal = 0;
+        long errorTotal = 0;
+        await using (var cmd = db.CreateCommand("""
+            with latest_runs as (
+              select distinct on (source_id)
+                     source_id, status, trigger, started_at, finished_at,
+                     fetched_count, changed_count, parsed_count, normalized_count,
+                     error_count, log_summary
+              from source_sync_runs
+              order by source_id, started_at desc
+            ),
+            successful_runs as (
+              select source_id, max(finished_at) as last_success_at
+              from source_sync_runs
+              where status = 'succeeded'
+              group by source_id
+            )
+            select s.code, s.name, s.kind, s.enabled, s.plugin_name, s.schedule_cron,
+                   s.config_json->>'runMode' as run_mode,
+                   lr.status, lr.trigger, lr.started_at, lr.finished_at,
+                   coalesce(lr.fetched_count, 0), coalesce(lr.changed_count, 0),
+                   coalesce(lr.parsed_count, 0), coalesce(lr.normalized_count, 0),
+                   coalesce(lr.error_count, 0), lr.log_summary,
+                   sr.last_success_at
+            from sources s
+            left join latest_runs lr on lr.source_id = s.id
+            left join successful_runs sr on sr.source_id = s.id
+            order by s.enabled desc, s.kind, s.code
+            """))
+        await using (var reader = await cmd.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                var fetched = reader.GetInt32(11);
+                var parsed = reader.GetInt32(13);
+                var normalized = reader.GetInt32(14);
+                var errors = reader.GetInt32(15);
+                parsedTotal += parsed;
+                normalizedTotal += normalized;
+                errorTotal += errors;
+                sourceStatus.Add(new
+                {
+                    code = reader.GetString(0),
+                    name = reader.GetString(1),
+                    kind = reader.GetString(2),
+                    enabled = reader.GetBoolean(3),
+                    pluginName = reader.GetString(4),
+                    scheduleCron = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    runMode = reader.IsDBNull(6) ? null : reader.GetString(6),
+                    rawTotal = fetched,
+                    parsePending = 0L,
+                    parseSucceeded = parsed,
+                    parseFailed = errors,
+                    normalizePending = 0L,
+                    normalizeSucceeded = normalized,
+                    normalizeFailed = errors,
+                    normalizeProgress = fetched <= 0 ? 0 : Math.Round((double)normalized / fetched * 100, 2),
+                    rawUpdatedAt = reader.IsDBNull(10) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(10),
+                    latestRun = reader.IsDBNull(7) ? null : new
+                    {
+                        status = reader.GetString(7),
+                        trigger = reader.IsDBNull(8) ? null : reader.GetString(8),
+                        startedAt = reader.GetFieldValue<DateTimeOffset>(9),
+                        finishedAt = reader.IsDBNull(10) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(10),
+                        fetchedCount = fetched,
+                        changedCount = reader.GetInt32(12),
+                        parsedCount = parsed,
+                        normalizedCount = normalized,
+                        errorCount = errors,
+                        logSummary = reader.IsDBNull(16) ? null : reader.GetString(16)
+                    },
+                    lastSuccessAt = reader.IsDBNull(17) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(17)
+                });
+            }
+        }
+
+        var tables = await EstimateTablesAsync(db, [
+            "vulnerabilities",
+            "vulnerability_records",
+            "vulnerability_exploits",
+            "vulnerability_affected_components",
+            "components",
+            "registry_packages",
+            "cpe_entries",
+            "source_raw_index"
+        ], ct);
+
+        var status = new
+        {
+            vulnerabilities = tables["vulnerabilities"],
+            vulnerabilityRecords = tables["vulnerability_records"],
+            vulnerabilityExploits = tables["vulnerability_exploits"],
+            affectedComponents = tables["vulnerability_affected_components"],
+            components = tables["components"],
+            registryPackages = tables["registry_packages"],
+            cpeEntries = tables["cpe_entries"],
+            sourceRawRecords = tables["source_raw_index"],
+            sources = sourceStatus.Count,
+            countsEstimated = true,
+            parseStatus = new List<object>
+            {
+                new { status = "pending", count = 0L, estimated = true },
+                new { status = "failed", count = errorTotal, estimated = true },
+                new { status = "succeeded", count = parsedTotal, estimated = true }
+            },
+            normalizeStatus = new List<object>
+            {
+                new { status = "pending", count = 0L, estimated = true },
+                new { status = "failed", count = errorTotal, estimated = true },
+                new { status = "succeeded", count = normalizedTotal, estimated = true }
+            },
+            pendingBySource = Array.Empty<object>(),
+            sourceStatus,
+            generatedAt = DateTimeOffset.UtcNow
+        };
+
+        cache.Value = status;
+        cache.ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(60);
+        return status;
+    }
+    finally
+    {
+        cache.RefreshLock.Release();
+    }
+}
+
+static async Task<IReadOnlyDictionary<string, long>> EstimateTablesAsync(NpgsqlDataSource db, IReadOnlyList<string> tableNames, CancellationToken ct)
+{
+    var values = tableNames.ToDictionary(x => x, _ => 0L, StringComparer.Ordinal);
+    await using var cmd = db.CreateCommand("""
+        select relname, greatest(reltuples::bigint, 0)
+        from pg_class
+        where relkind in ('r', 'p') and relname = any($1)
+        """);
+    cmd.Parameters.AddWithValue(tableNames.ToArray());
+    await using var reader = await cmd.ExecuteReaderAsync(ct);
+    while (await reader.ReadAsync(ct))
+        values[reader.GetString(0)] = reader.GetInt64(1);
+    return values;
 }
 
 static async Task<IReadOnlyList<Dictionary<string, object?>>> QueryRowsAsync(NpgsqlDataSource db, string sql, Guid id, CancellationToken ct)

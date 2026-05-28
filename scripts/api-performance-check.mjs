@@ -3,6 +3,7 @@ import { performance } from 'node:perf_hooks';
 
 const baseUrl = process.env.API_BASE_URL ?? 'http://127.0.0.1:5099';
 const includeMutating = process.env.INCLUDE_MUTATING === '1';
+const includeExactStatus = process.env.INCLUDE_EXACT_STATUS === '1';
 
 const cyclonedx = {
   bomFormat: 'CycloneDX',
@@ -87,9 +88,14 @@ await timed('GET /api/v1/system.ready', get('/api/v1/system.ready'));
 await timed('GET /api/v1/source.list', get('/api/v1/source.list'), (data) => {
   if (!Array.isArray(data) || data.length === 0) throw new Error('empty source list');
 });
-await timed('GET /api/v1/system.status', get('/api/v1/system.status'), (data) => {
+await timed('GET /api/v1/system.status fast', get('/api/v1/system.status?fast=true'), (data) => {
   if (typeof data.vulnerabilities !== 'number') throw new Error('missing vulnerability count');
 });
+if (includeExactStatus) {
+  await timed('GET /api/v1/system.status exact', get('/api/v1/system.status'), (data) => {
+    if (typeof data.vulnerabilities !== 'number' || data.countsEstimated) throw new Error('missing exact vulnerability count');
+  });
+}
 
 await timed('POST /api/v1/vulnerability.search latest', post('/api/v1/vulnerability.search', {
   query: '',
@@ -156,6 +162,9 @@ await timed('GET /api/v1/sbom.list', get('/api/v1/sbom.list'));
 if (tempSbomId) {
   await timed('GET /api/v1/sbom.get', get(`/api/v1/sbom.get?id=${encodeURIComponent(tempSbomId)}`));
   await timed('POST /api/v1/sbom.match', post('/api/v1/sbom.match', { sbomId: tempSbomId }));
+  await timedRaw('GET /api/v1/sbom.export', get(`/api/v1/sbom.export?id=${encodeURIComponent(tempSbomId)}`), (text) => {
+    if (!text.includes('Component Name') || !text.includes('CVE')) throw new Error('missing export columns');
+  });
   await timed('GET /api/v1/benchmark.matchingQuality sbom', get(`/api/v1/benchmark.matchingQuality?sbomId=${encodeURIComponent(tempSbomId)}`));
   await timed('POST /api/v1/sbom.delete', post('/api/v1/sbom.delete', { sbomId: tempSbomId }));
 }
@@ -174,6 +183,7 @@ console.table(rows);
 console.log(JSON.stringify({
   baseUrl,
   includeMutating,
+  includeExactStatus,
   total: rows.length,
   failed: failed.length,
   slow: slow.map((row) => ({ name: row.name, durationMs: row.durationMs }))

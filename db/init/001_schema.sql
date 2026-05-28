@@ -720,6 +720,7 @@ create index if not exists ix_vuln_title_trgm on vulnerabilities using gin(title
 create index if not exists ix_vuln_modified on vulnerabilities(modified_at desc nulls last);
 create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last);
 create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last);
+create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier);
 create index if not exists ix_records_vulnerability_detail on vulnerability_records(vulnerability_id, source_id, updated_at desc);
 create index if not exists ix_severity_vuln_system_version on vulnerability_severity_scores(vulnerability_id, scoring_system, scoring_version);
 create index if not exists ix_severity_selected on vulnerability_severity_scores(vulnerability_id) where is_selected = true;
@@ -743,6 +744,7 @@ create index if not exists ix_affected_components_component on vulnerability_aff
 create index if not exists ix_affected_components_package_lower on vulnerability_affected_components(lower(package_name), lower(ecosystem), vulnerability_id) where package_name is not null;
 create index if not exists ix_affected_components_display_lower on vulnerability_affected_components(lower(display_name), lower(ecosystem), vulnerability_id);
 create index if not exists ix_affected_components_purl_prefix on vulnerability_affected_components(primary_purl text_pattern_ops, lower(ecosystem), vulnerability_id) where primary_purl is not null;
+create index if not exists ix_affected_components_cpe_prefix on vulnerability_affected_components(primary_cpe23_uri text_pattern_ops, vulnerability_id) where primary_cpe23_uri is not null;
 create index if not exists ix_affected_facts_vuln on vulnerability_affected_facts(vulnerability_id, ecosystem, normalized_package_name);
 create table if not exists stg_android_osv (
   raw_index_id uuid primary key references source_raw_index(id) on delete cascade,

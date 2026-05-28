@@ -1,3 +1,3 @@
 FROM nginx:alpine
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY wwwroot /usr/share/nginx/html
+COPY frontend/nginx.conf /etc/nginx/conf.d/default.conf
+COPY src/VulTrack.App/wwwroot /usr/share/nginx/html

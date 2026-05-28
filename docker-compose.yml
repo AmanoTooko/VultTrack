@@ -76,7 +76,9 @@ services:
         condition: service_healthy
 
   frontend:
-    build: ./frontend
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
     container_name: vultrack-frontend
     ports:
       - "3000:80"

@@ -15,19 +15,23 @@ create table if not exists sbom_uploads (
 create table if not exists sbom_components (
   id uuid primary key default gen_random_uuid(),
   sbom_id uuid not null references sbom_uploads(id) on delete cascade,
-  purl text not null,
+  purl text,
   name text,
   version text,
   ecosystem text,
   group_name text,
+  vendor text,
+  product text,
+  cpe23_uri text,
   component_type text,
   metadata jsonb not null default '{}',
   vuln_count int not null default 0,
   created_at timestamptz not null default now()
 );
 
-create index ix_sbom_components_sbom on sbom_components(sbom_id);
-create index ix_sbom_components_purl on sbom_components(purl);
+create index if not exists ix_sbom_components_sbom on sbom_components(sbom_id);
+create index if not exists ix_sbom_components_purl on sbom_components(purl) where purl is not null;
+create index if not exists ix_sbom_components_cpe on sbom_components(cpe23_uri) where cpe23_uri is not null;
 
 create table if not exists sbom_vulnerabilities (
   id uuid primary key default gen_random_uuid(),
