@@ -10,6 +10,7 @@
     "normalize:parallel": "node scripts/run-parallel-normalization.mjs",
     "normalize:sources": "node scripts/normalize-source-smoke.mjs",
     "benchmark:matching": "node scripts/benchmark-matching-quality.mjs",
+    "benchmark:api": "node scripts/api-performance-check.mjs",
     "lint": "eslint plugins scripts tests frontend/wwwroot src/VulTrack.App/wwwroot",
     "test": "node --test tests/node/*.test.mjs",
     "test:integration": "node --test tests/integration/*.test.mjs",

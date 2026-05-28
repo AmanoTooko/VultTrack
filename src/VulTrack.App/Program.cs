@@ -35,6 +35,8 @@ app.UseStaticFiles();
 
 app.MapGet("/", () => Results.Redirect("/index.html"));
 
+await EnsureRuntimeIndexesAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
+
 app.MapGet("/api/v1/system.health", () => ApiResult.Ok(new
 {
     status = "healthy",
@@ -73,18 +75,31 @@ app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken 
     return ApiResult.Ok(rows);
 });
 
+var systemStatusCache = new StatusCache();
+
 app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToken ct) =>
 {
-    var sourceStatus = new List<object>();
-    var sourcePendingRows = new List<(string SourceCode, long Pending)>();
-    var totalRaw = 0L;
-    var parsePendingTotal = 0L;
-    var parseSucceededTotal = 0L;
-    var parseFailedTotal = 0L;
-    var normalizePendingTotal = 0L;
-    var normalizeSucceededTotal = 0L;
-    var normalizeFailedTotal = 0L;
-    await using (var cmd = db.CreateCommand("""
+    var now = DateTimeOffset.UtcNow;
+    if (systemStatusCache.Value is not null && systemStatusCache.ExpiresAt > now)
+        return ApiResult.Ok(systemStatusCache.Value);
+
+    await systemStatusCache.RefreshLock.WaitAsync(ct);
+    try
+    {
+        now = DateTimeOffset.UtcNow;
+        if (systemStatusCache.Value is not null && systemStatusCache.ExpiresAt > now)
+            return ApiResult.Ok(systemStatusCache.Value);
+
+        var sourceStatus = new List<object>();
+        var sourcePendingRows = new List<(string SourceCode, long Pending)>();
+        var totalRaw = 0L;
+        var parsePendingTotal = 0L;
+        var parseSucceededTotal = 0L;
+        var parseFailedTotal = 0L;
+        var normalizePendingTotal = 0L;
+        var normalizeSucceededTotal = 0L;
+        var normalizeFailedTotal = 0L;
+        await using (var cmd = db.CreateCommand("""
         with raw_counts as (
           select source_id,
                  count(*) as raw_total,
@@ -129,109 +144,117 @@ app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, CancellationToke
         left join successful_runs sr on sr.source_id = s.id
         order by s.enabled desc, s.kind, s.code
         """))
-    await using (var reader = await cmd.ExecuteReaderAsync(ct))
-    {
-        while (await reader.ReadAsync(ct))
+        await using (var reader = await cmd.ExecuteReaderAsync(ct))
         {
-            var rawTotal = reader.GetInt64(7);
-            var parsePending = reader.GetInt64(8);
-            var parseSucceeded = reader.GetInt64(9);
-            var parseFailed = reader.GetInt64(10);
-            var normalizePending = reader.GetInt64(11);
-            var normalizeSucceeded = reader.GetInt64(12);
-            var normalizeFailed = reader.GetInt64(13);
-            totalRaw += rawTotal;
-            parsePendingTotal += parsePending;
-            parseSucceededTotal += parseSucceeded;
-            parseFailedTotal += parseFailed;
-            normalizePendingTotal += normalizePending;
-            normalizeSucceededTotal += normalizeSucceeded;
-            normalizeFailedTotal += normalizeFailed;
-            if (normalizePending + normalizeFailed > 0)
-                sourcePendingRows.Add((reader.GetString(0), normalizePending + normalizeFailed));
-            sourceStatus.Add(new
+            while (await reader.ReadAsync(ct))
             {
-                code = reader.GetString(0),
-                name = reader.GetString(1),
-                kind = reader.GetString(2),
-                enabled = reader.GetBoolean(3),
-                pluginName = reader.GetString(4),
-                scheduleCron = reader.IsDBNull(5) ? null : reader.GetString(5),
-                runMode = reader.IsDBNull(6) ? null : reader.GetString(6),
-                rawTotal,
-                parsePending,
-                parseSucceeded,
-                parseFailed,
-                normalizePending,
-                normalizeSucceeded,
-                normalizeFailed,
-                normalizeProgress = rawTotal <= 0 ? 0 : Math.Round((double)normalizeSucceeded / rawTotal * 100, 2),
-                rawUpdatedAt = reader.IsDBNull(14) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(14),
-                latestRun = reader.IsDBNull(15) ? null : new
+                var rawTotal = reader.GetInt64(7);
+                var parsePending = reader.GetInt64(8);
+                var parseSucceeded = reader.GetInt64(9);
+                var parseFailed = reader.GetInt64(10);
+                var normalizePending = reader.GetInt64(11);
+                var normalizeSucceeded = reader.GetInt64(12);
+                var normalizeFailed = reader.GetInt64(13);
+                totalRaw += rawTotal;
+                parsePendingTotal += parsePending;
+                parseSucceededTotal += parseSucceeded;
+                parseFailedTotal += parseFailed;
+                normalizePendingTotal += normalizePending;
+                normalizeSucceededTotal += normalizeSucceeded;
+                normalizeFailedTotal += normalizeFailed;
+                if (normalizePending + normalizeFailed > 0)
+                    sourcePendingRows.Add((reader.GetString(0), normalizePending + normalizeFailed));
+                sourceStatus.Add(new
                 {
-                    status = reader.GetString(15),
-                    trigger = reader.IsDBNull(16) ? null : reader.GetString(16),
-                    startedAt = reader.GetFieldValue<DateTimeOffset>(17),
-                    finishedAt = reader.IsDBNull(18) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(18),
-                    fetchedCount = reader.GetInt32(19),
-                    changedCount = reader.GetInt32(20),
-                    parsedCount = reader.GetInt32(21),
-                    normalizedCount = reader.GetInt32(22),
-                    errorCount = reader.GetInt32(23),
-                    logSummary = reader.IsDBNull(24) ? null : reader.GetString(24)
-                },
-                lastSuccessAt = reader.IsDBNull(25) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(25)
-            });
+                    code = reader.GetString(0),
+                    name = reader.GetString(1),
+                    kind = reader.GetString(2),
+                    enabled = reader.GetBoolean(3),
+                    pluginName = reader.GetString(4),
+                    scheduleCron = reader.IsDBNull(5) ? null : reader.GetString(5),
+                    runMode = reader.IsDBNull(6) ? null : reader.GetString(6),
+                    rawTotal,
+                    parsePending,
+                    parseSucceeded,
+                    parseFailed,
+                    normalizePending,
+                    normalizeSucceeded,
+                    normalizeFailed,
+                    normalizeProgress = rawTotal <= 0 ? 0 : Math.Round((double)normalizeSucceeded / rawTotal * 100, 2),
+                    rawUpdatedAt = reader.IsDBNull(14) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(14),
+                    latestRun = reader.IsDBNull(15) ? null : new
+                    {
+                        status = reader.GetString(15),
+                        trigger = reader.IsDBNull(16) ? null : reader.GetString(16),
+                        startedAt = reader.GetFieldValue<DateTimeOffset>(17),
+                        finishedAt = reader.IsDBNull(18) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(18),
+                        fetchedCount = reader.GetInt32(19),
+                        changedCount = reader.GetInt32(20),
+                        parsedCount = reader.GetInt32(21),
+                        normalizedCount = reader.GetInt32(22),
+                        errorCount = reader.GetInt32(23),
+                        logSummary = reader.IsDBNull(24) ? null : reader.GetString(24)
+                    },
+                    lastSuccessAt = reader.IsDBNull(25) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(25)
+                });
+            }
         }
-    }
 
-    var normalizeStatus = new List<object>
+        var normalizeStatus = new List<object>
     {
         new { status = "pending", count = normalizePendingTotal, estimated = false },
         new { status = "failed", count = normalizeFailedTotal, estimated = false },
         new { status = "succeeded", count = normalizeSucceededTotal, estimated = false }
     };
-    var parseStatus = new List<object>
+        var parseStatus = new List<object>
     {
         new { status = "pending", count = parsePendingTotal, estimated = false },
         new { status = "failed", count = parseFailedTotal, estimated = false },
         new { status = "succeeded", count = parseSucceededTotal, estimated = false }
     };
-    var pendingBySource = sourcePendingRows
-        .OrderByDescending(x => x.Pending)
-        .ThenBy(x => x.SourceCode, StringComparer.Ordinal)
-        .Take(25)
-        .Select(x => new { sourceCode = x.SourceCode, pending = x.Pending })
-        .ToList<object>();
+        var pendingBySource = sourcePendingRows
+            .OrderByDescending(x => x.Pending)
+            .ThenBy(x => x.SourceCode, StringComparer.Ordinal)
+            .Take(25)
+            .Select(x => new { sourceCode = x.SourceCode, pending = x.Pending })
+            .ToList<object>();
 
-    var totals = await CountTablesAsync(db, [
-        "vulnerabilities",
+        var totals = await CountTablesAsync(db, [
+            "vulnerabilities",
         "vulnerability_records",
         "vulnerability_exploits",
         "vulnerability_affected_components",
         "components",
         "registry_packages",
         "cpe_entries"
-    ], ct);
+        ], ct);
 
-    return ApiResult.Ok(new
+        var status = new
+        {
+            vulnerabilities = totals["vulnerabilities"],
+            vulnerabilityRecords = totals["vulnerability_records"],
+            vulnerabilityExploits = totals["vulnerability_exploits"],
+            affectedComponents = totals["vulnerability_affected_components"],
+            components = totals["components"],
+            registryPackages = totals["registry_packages"],
+            cpeEntries = totals["cpe_entries"],
+            sourceRawRecords = totalRaw,
+            sources = sourceStatus.Count,
+            countsEstimated = false,
+            parseStatus,
+            normalizeStatus,
+            pendingBySource,
+            sourceStatus,
+            generatedAt = DateTimeOffset.UtcNow
+        };
+        systemStatusCache.Value = status;
+        systemStatusCache.ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(15);
+        return ApiResult.Ok(status);
+    }
+    finally
     {
-        vulnerabilities = totals["vulnerabilities"],
-        vulnerabilityRecords = totals["vulnerability_records"],
-        vulnerabilityExploits = totals["vulnerability_exploits"],
-        affectedComponents = totals["vulnerability_affected_components"],
-        components = totals["components"],
-        registryPackages = totals["registry_packages"],
-        cpeEntries = totals["cpe_entries"],
-        sourceRawRecords = totalRaw,
-        sources = sourceStatus.Count,
-        countsEstimated = false,
-        parseStatus,
-        normalizeStatus,
-        pendingBySource,
-        sourceStatus,
-        generatedAt = DateTimeOffset.UtcNow
-    });
+        systemStatusCache.RefreshLock.Release();
+    }
 });
 
 app.MapPost("/api/v1/nvd.processPending", async (NvdRawProcessor processor, ProcessPendingRequest request, CancellationToken ct) =>
@@ -259,12 +282,19 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     var rawQuery = (request.Query ?? "").Trim();
     var pattern = $"%{rawQuery}%";
     var exact = string.IsNullOrWhiteSpace(rawQuery) ? "" : rawQuery;
+    var normalizedExact = string.IsNullOrWhiteSpace(exact) ? "" : Identifier.Normalize(exact);
+    var page = Math.Max(1, request.Page);
+    var pageSize = ClampPageSize(request.PageSize);
+    var fetchLimit = pageSize + 1;
+    var offset = (page - 1) * pageSize;
+    var sort = NormalizeVulnerabilitySort(request.Sort);
+    var orderBy = VulnerabilityOrderBy(sort, "v");
 
     var ecosystemVersion = ParseEcosystemVersion(rawQuery);
 
     if (ecosystemVersion is not null)
     {
-        await using var cmd = db.CreateCommand("""
+        await using var cmd = db.CreateCommand($"""
             select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
                    v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
             from vulnerabilities v
@@ -274,11 +304,12 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 where lower(c.ecosystem) = lower($1)
                   and (c.display_name is not null or c.package_name is not null)
             )
-            order by coalesce(v.max_cvss_score, 0) desc, v.modified_at desc nulls last
-            limit $2
+            order by {orderBy}
+            limit $2 offset $3
             """);
         cmd.Parameters.AddWithValue(ecosystemVersion.Value.Ecosystem);
-        cmd.Parameters.AddWithValue(request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200));
+        cmd.Parameters.AddWithValue(fetchLimit);
+        cmd.Parameters.AddWithValue(offset);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -303,7 +334,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
         var hasQuery = !string.IsNullOrWhiteSpace(rawQuery);
         if (hasQuery && !string.IsNullOrWhiteSpace(exact))
         {
-            await using var fastCmd = db.CreateCommand("""
+            await using var fastCmd = db.CreateCommand($"""
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
                        v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
                 from vulnerabilities v
@@ -311,11 +342,11 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                     select 1 from vulnerability_identifier_index i
                     where i.canonical_vulnerability_id = v.id and i.normalized_value = $1
                 )
-                order by coalesce(v.max_cvss_score, 0) desc
+                order by {orderBy}
                 limit $2
                 """);
-            fastCmd.Parameters.AddWithValue(exact);
-            fastCmd.Parameters.AddWithValue(request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200));
+            fastCmd.Parameters.AddWithValue(normalizedExact);
+            fastCmd.Parameters.AddWithValue(fetchLimit);
             await using var fastReader = await fastCmd.ExecuteReaderAsync(ct);
             var found = 0;
             while (await fastReader.ReadAsync(ct))
@@ -325,34 +356,62 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
             }
             if (found > 0)
             {
-                return ApiResult.Ok(new { items = rows, page = 1, pageSize = request.PageSize <= 0 ? 50 : request.PageSize });
+                var exactHasMore = rows.Count > pageSize;
+                if (exactHasMore) rows.RemoveAt(rows.Count - 1);
+                return ApiResult.Ok(new { items = rows, page = 1, pageSize, sort, hasMore = exactHasMore });
             }
         }
 
-        await using var cmd = hasQuery
-            ? db.CreateCommand("""
-                select id, primary_identifier, title, severity_label, max_cvss_score,
-                       affected_component_count, affected_component_names, published_at, modified_at
-                from vulnerabilities
-                where ($1 = any(identifiers))
-                   or (search_text @@ plainto_tsquery('simple', $3))
-                   or (primary_identifier ilike $2)
-                   or (title ilike $2)
-                   or ($1 = any(affected_component_names))
-                order by coalesce(max_cvss_score, 0) desc, modified_at desc nulls last
-                limit $4
-                """)
-            : db.CreateCommand("""
+        var cveRange = TryGetCvePrefixRange(rawQuery);
+        await using var cmd = cveRange is not null
+            ? db.CreateCommand($"""
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
                        v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
                 from vulnerabilities v
-                inner join (select id from vulnerabilities order by modified_at desc nulls last limit $4) t on t.id = v.id
-                order by v.modified_at desc nulls last
+                where v.primary_identifier >= $1 and v.primary_identifier < $2
+                order by {orderBy}
+                limit $3 offset $4
+                """)
+            : hasQuery
+            ? db.CreateCommand($"""
+                select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                from vulnerabilities v
+                where ($1 = any(identifiers))
+                   or (search_text @@ plainto_tsquery('simple', $3))
+                   or (v.primary_identifier ilike $2)
+                   or (v.title ilike $2)
+                   or ($1 = any(affected_component_names))
+                order by {orderBy}
+                limit $4 offset $5
+                """)
+            : db.CreateCommand($"""
+                select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                from vulnerabilities v
+                order by {orderBy}
+                limit $1 offset $2
                 """);
-        cmd.Parameters.AddWithValue(exact);
-        cmd.Parameters.AddWithValue(pattern);
-        cmd.Parameters.AddWithValue(rawQuery);
-        cmd.Parameters.AddWithValue(request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200));
+        if (cveRange is not null)
+        {
+            cmd.Parameters.AddWithValue(cveRange.Value.Start);
+            cmd.Parameters.AddWithValue(cveRange.Value.End);
+            cmd.Parameters.AddWithValue(fetchLimit);
+            cmd.Parameters.AddWithValue(offset);
+        }
+        else if (hasQuery)
+        {
+            cmd.Parameters.AddWithValue(normalizedExact);
+            cmd.Parameters.AddWithValue(pattern);
+            cmd.Parameters.AddWithValue(rawQuery);
+            cmd.Parameters.AddWithValue(fetchLimit);
+            cmd.Parameters.AddWithValue(offset);
+        }
+        else
+        {
+            cmd.Parameters.AddWithValue(fetchLimit);
+            cmd.Parameters.AddWithValue(offset);
+        }
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -360,7 +419,9 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
         }
     }
 
-    return ApiResult.Ok(new { items = rows, page = 1, pageSize = request.PageSize <= 0 ? 50 : request.PageSize });
+    var hasMore = rows.Count > pageSize;
+    if (hasMore) rows.RemoveAt(rows.Count - 1);
+    return ApiResult.Ok(new { items = rows, page, pageSize, sort, hasMore });
 });
 
 app.MapGet("/api/v1/vulnerability.getByIdentifier", async (NpgsqlDataSource db, string identifier, CancellationToken ct) =>
@@ -712,11 +773,11 @@ app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (NpgsqlDataSource db, st
 app.MapGet("/api/v1/benchmark.packageCves", async (NpgsqlDataSource db, string name, CancellationToken ct) =>
 {
     await using var cmd = db.CreateCommand("""
-        SELECT lower(coalesce(display_name,'')), count(DISTINCT vulnerability_id) as cves,
+        SELECT lower(display_name), count(DISTINCT vulnerability_id) as cves,
                count(*) as facts, string_agg(DISTINCT ecosystem, ', ') as ecosystems
         FROM vulnerability_affected_components
-        WHERE lower(coalesce(display_name,'')) = lower($1)
-        GROUP BY lower(coalesce(display_name,''))
+        WHERE lower(display_name) = lower($1)
+        GROUP BY lower(display_name)
         """);
     cmd.Parameters.AddWithValue(name);
     await using var r = await cmd.ExecuteReaderAsync(ct);
@@ -728,26 +789,66 @@ app.MapGet("/api/v1/benchmark.packageCves", async (NpgsqlDataSource db, string n
 app.MapGet("/api/v1/benchmark.matchingQuality", async (NpgsqlDataSource db, string? ecosystem, string? packageName, Guid? sbomId, CancellationToken ct) =>
 {
     var affectedSummary = new List<object>();
-    await using (var cmd = db.CreateCommand("""
-        select
-          coalesce(nullif(lower(ecosystem), ''), 'unknown') as ecosystem,
-          count(*) as facts,
-          count(distinct vulnerability_id) as vulnerabilities,
-          count(*) filter (where primary_purl is not null and primary_purl <> '') as purl_facts,
-          count(*) filter (where primary_cpe23_uri is not null and primary_cpe23_uri <> '') as cpe_facts,
-          count(*) filter (where normalized_range is null or normalized_range = '') as no_range,
-          count(*) filter (where normalized_range ~ '^[[:space:]]*>[[:space:]]*0(\.0+)*[[:space:]]*$') as open_lower_bound,
-          count(*) filter (where normalized_range is not null and normalized_range <> '' and normalized_range !~ '(<=|>=|==|=|<|>)') as unparseable_range
-        from vulnerability_affected_components
-        where ($1::text is null or lower(ecosystem) = lower($1))
-          and ($2::text is null or lower(package_name) = lower($2) or lower(display_name) = lower($2))
-        group by coalesce(nullif(lower(ecosystem), ''), 'unknown')
-        order by facts desc
-        limit 50
-        """))
+    var useSbomScope = sbomId is not null && string.IsNullOrWhiteSpace(ecosystem) && string.IsNullOrWhiteSpace(packageName);
+    await using (var cmd = useSbomScope
+        ? db.CreateCommand("""
+            with sbom_names as (
+              select distinct lower(coalesce(ecosystem, '')) as ecosystem, lower(name) as name
+              from sbom_components
+              where sbom_id = $1 and name is not null and name <> ''
+            ),
+            scoped as (
+              select c.id, c.ecosystem, c.vulnerability_id, c.primary_purl, c.primary_cpe23_uri, c.normalized_range
+              from vulnerability_affected_components c
+              join sbom_names s on lower(c.display_name) = s.name
+                and (s.ecosystem = '' or lower(coalesce(c.ecosystem, '')) = s.ecosystem)
+              union
+              select c.id, c.ecosystem, c.vulnerability_id, c.primary_purl, c.primary_cpe23_uri, c.normalized_range
+              from vulnerability_affected_components c
+              join sbom_names s on lower(c.package_name) = s.name
+                and (s.ecosystem = '' or lower(coalesce(c.ecosystem, '')) = s.ecosystem)
+            )
+            select
+              coalesce(nullif(lower(ecosystem), ''), 'unknown') as ecosystem,
+              count(*) as facts,
+              count(distinct vulnerability_id) as vulnerabilities,
+              count(*) filter (where primary_purl is not null and primary_purl <> '') as purl_facts,
+              count(*) filter (where primary_cpe23_uri is not null and primary_cpe23_uri <> '') as cpe_facts,
+              count(*) filter (where normalized_range is null or normalized_range = '') as no_range,
+              count(*) filter (where normalized_range ~ '^[[:space:]]*>[[:space:]]*0(\.0+)*[[:space:]]*$') as open_lower_bound,
+              count(*) filter (where normalized_range is not null and normalized_range <> '' and normalized_range !~ '(<=|>=|==|=|<|>)') as unparseable_range
+            from scoped
+            group by coalesce(nullif(lower(ecosystem), ''), 'unknown')
+            order by facts desc
+            limit 50
+            """)
+        : db.CreateCommand("""
+            select
+              coalesce(nullif(lower(ecosystem), ''), 'unknown') as ecosystem,
+              count(*) as facts,
+              count(distinct vulnerability_id) as vulnerabilities,
+              count(*) filter (where primary_purl is not null and primary_purl <> '') as purl_facts,
+              count(*) filter (where primary_cpe23_uri is not null and primary_cpe23_uri <> '') as cpe_facts,
+              count(*) filter (where normalized_range is null or normalized_range = '') as no_range,
+              count(*) filter (where normalized_range ~ '^[[:space:]]*>[[:space:]]*0(\.0+)*[[:space:]]*$') as open_lower_bound,
+              count(*) filter (where normalized_range is not null and normalized_range <> '' and normalized_range !~ '(<=|>=|==|=|<|>)') as unparseable_range
+            from vulnerability_affected_components
+            where ($1::text is null or lower(ecosystem) = lower($1))
+              and ($2::text is null or lower(package_name) = lower($2) or lower(display_name) = lower($2))
+            group by coalesce(nullif(lower(ecosystem), ''), 'unknown')
+            order by facts desc
+            limit 50
+            """))
     {
-        cmd.Parameters.AddWithValue((object?)ecosystem ?? DBNull.Value);
-        cmd.Parameters.AddWithValue((object?)packageName ?? DBNull.Value);
+        if (useSbomScope)
+        {
+            cmd.Parameters.AddWithValue(sbomId!.Value);
+        }
+        else
+        {
+            cmd.Parameters.AddWithValue((object?)ecosystem ?? DBNull.Value);
+            cmd.Parameters.AddWithValue((object?)packageName ?? DBNull.Value);
+        }
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -864,6 +965,71 @@ static async Task<List<object>> QueryRecordsGroupedAsync(NpgsqlDataSource db, Gu
 }
 
 app.Run();
+
+static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
+{
+    foreach (var statement in new[]
+    {
+        "create index if not exists ix_vuln_modified on vulnerabilities(modified_at desc nulls last)",
+        "create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last)",
+        "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
+        "create index if not exists ix_raw_source_status_cover on source_raw_index(source_id) include(parse_status, normalize_status, updated_at)"
+    })
+    {
+        await using var cmd = db.CreateCommand(statement);
+        await cmd.ExecuteNonQueryAsync();
+    }
+}
+
+static int ClampPageSize(int pageSize) => pageSize <= 0 ? 25 : Math.Min(pageSize, 200);
+
+static string NormalizeVulnerabilitySort(string? sort) =>
+    (sort ?? "").Trim().ToLowerInvariant() switch
+    {
+        "cvssdesc" or "cvss_desc" => "cvssDesc",
+        "cvssasc" or "cvss_asc" => "cvssAsc",
+        "publisheddesc" or "published_desc" => "publishedDesc",
+        "publishedasc" or "published_asc" => "publishedAsc",
+        "identifierasc" or "identifier_asc" => "identifierAsc",
+        "identifierdesc" or "identifier_desc" => "identifierDesc",
+        _ => "modifiedDesc"
+    };
+
+static string VulnerabilityOrderBy(string sort, string alias)
+{
+    var p = string.IsNullOrWhiteSpace(alias) ? "" : $"{alias}.";
+    return sort switch
+    {
+        "cvssDesc" => $"coalesce({p}max_cvss_score, 0) desc, {p}modified_at desc nulls last, {p}primary_identifier desc",
+        "cvssAsc" => $"coalesce({p}max_cvss_score, 0) asc, {p}modified_at desc nulls last, {p}primary_identifier desc",
+        "publishedDesc" => $"{p}published_at desc nulls last, {p}primary_identifier desc",
+        "publishedAsc" => $"{p}published_at asc nulls last, {p}primary_identifier asc",
+        "identifierAsc" => $"{p}primary_identifier asc",
+        "identifierDesc" => $"{p}primary_identifier desc",
+        _ => $"{p}modified_at desc nulls last, {p}primary_identifier desc"
+    };
+}
+
+static (string Start, string End)? TryGetCvePrefixRange(string query)
+{
+    if (string.IsNullOrWhiteSpace(query)) return null;
+    var prefix = query.Trim().ToUpperInvariant();
+    if (!System.Text.RegularExpressions.Regex.IsMatch(prefix, @"^CVE-\d{4}(?:-\d*)?$"))
+        return null;
+    return (prefix, NextPrefix(prefix));
+}
+
+static string NextPrefix(string prefix)
+{
+    var chars = prefix.ToCharArray();
+    for (var i = chars.Length - 1; i >= 0; i--)
+    {
+        if (chars[i] == char.MaxValue) continue;
+        chars[i]++;
+        return new string(chars, 0, i + 1);
+    }
+    return prefix + char.MinValue;
+}
 
 static string ToNpgsqlConnectionString(string value)
 {
@@ -1034,6 +1200,13 @@ static (string Ecosystem, string? Version)? ParseEcosystemVersion(string query)
 
     if (foundEcosystem is null) return null;
     return (foundEcosystem, version);
+}
+
+sealed class StatusCache
+{
+    public object? Value { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
+    public SemaphoreSlim RefreshLock { get; } = new(1, 1);
 }
 
 public partial class Program;

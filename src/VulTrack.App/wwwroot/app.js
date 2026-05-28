@@ -1,13 +1,15 @@
 const state = {
   mode: 'vulnerability',
   selectedId: null,
-  sidebarCollapsed: localStorage.getItem('vultrack.sidebarCollapsed') === 'true',
-  themeColor: localStorage.getItem('vultrack.themeColor') || '#2f7da7'
+  themeColor: localStorage.getItem('vultrack.themeColor') || '#2f7da7',
+  page: 1,
+  pageSize: Number(localStorage.getItem('vultrack.pageSize') || 25),
+  sort: localStorage.getItem('vultrack.sort') || 'modifiedDesc',
+  hasMore: false
 };
 
 const el = {
   shell: document.querySelector('.shell'),
-  sidebarToggle: document.querySelector('#sidebarToggle'),
   themeColorInput: document.querySelector('#themeColorInput'),
   themeSwatches: [...document.querySelectorAll('.theme-swatch')],
   statusLine: document.querySelector('#statusLine'),
@@ -25,22 +27,23 @@ const el = {
   vendorInput: document.querySelector('#vendorInput'),
   versionInput: document.querySelector('#versionInput'),
   ecosystemInput: document.querySelector('#ecosystemInput'),
+  limitSelect: document.querySelector('#limitSelect'),
+  sortSelect: document.querySelector('#sortSelect'),
   queryLabel: document.querySelector('#queryLabel'),
   componentFields: document.querySelector('#componentFields'),
   resultList: document.querySelector('#resultList'),
-  detailPane: document.querySelector('#detailPane')
+  detailPane: document.querySelector('#detailPane'),
+  resultsTitle: document.querySelector('#resultsTitle'),
+  resultsMeta: document.querySelector('#resultsMeta'),
+  pager: document.querySelector('#pager'),
+  pageLabel: document.querySelector('#pageLabel'),
+  prevPageButton: document.querySelector('#prevPageButton'),
+  nextPageButton: document.querySelector('#nextPageButton')
 };
 
-el.shell.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+if (el.limitSelect) el.limitSelect.value = String(state.pageSize);
+if (el.sortSelect) el.sortSelect.value = state.sort;
 applyThemeColor(state.themeColor);
-updateSidebarToggleLabel();
-
-el.sidebarToggle?.addEventListener('click', () => {
-  state.sidebarCollapsed = !state.sidebarCollapsed;
-  localStorage.setItem('vultrack.sidebarCollapsed', String(state.sidebarCollapsed));
-  el.shell.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
-  updateSidebarToggleLabel();
-});
 
 el.themeSwatches.forEach((button) => {
   button.addEventListener('click', () => {
@@ -71,6 +74,33 @@ el.tabs.forEach((tab) => {
 
 el.searchForm.addEventListener('submit', (event) => {
   event.preventDefault();
+  state.page = 1;
+  runSearch();
+});
+
+el.limitSelect?.addEventListener('change', () => {
+  state.pageSize = Number(el.limitSelect.value || 25);
+  localStorage.setItem('vultrack.pageSize', String(state.pageSize));
+  state.page = 1;
+  runSearch();
+});
+
+el.sortSelect?.addEventListener('change', () => {
+  state.sort = el.sortSelect.value || 'modifiedDesc';
+  localStorage.setItem('vultrack.sort', state.sort);
+  state.page = 1;
+  runSearch();
+});
+
+el.prevPageButton?.addEventListener('click', () => {
+  if (state.page <= 1) return;
+  state.page--;
+  runSearch();
+});
+
+el.nextPageButton?.addEventListener('click', () => {
+  if (!state.hasMore) return;
+  state.page++;
   runSearch();
 });
 
@@ -83,13 +113,6 @@ el.detailPane.addEventListener('click', (event) => {
   toggle.setAttribute('aria-expanded', !expanded);
   target.hidden = expanded;
 });
-
-function updateSidebarToggleLabel() {
-  if (!el.sidebarToggle) return;
-  const label = state.sidebarCollapsed ? 'Show filters' : 'Hide filters';
-  el.sidebarToggle.setAttribute('title', label);
-  el.sidebarToggle.setAttribute('aria-label', label);
-}
 
 function applyThemeColor(color) {
   const normalized = normalizeHexColor(color) || '#2f7da7';
@@ -158,17 +181,61 @@ async function loadStatus() {
 
 function activateMode(tab) {
   state.mode = tab.dataset.mode;
+  state.page = 1;
+  state.hasMore = false;
   el.tabs.forEach((item) => item.classList.toggle('is-active', item === tab));
   el.componentFields.hidden = state.mode !== 'component';
   el.searchForm.hidden = state.mode === 'sbom' || state.mode === 'status';
   el.queryLabel.textContent = state.mode === 'component' ? 'Component name, vendor, or purl' : 'Identifier or keyword';
   el.queryInput.placeholder = state.mode === 'component' ? 'pkg:maven/org.apache.logging.log4j/log4j-core' : 'CVE-2021-44228';
+  if (el.sortSelect) el.sortSelect.disabled = state.mode !== 'vulnerability';
+  if (el.pager) el.pager.hidden = state.mode === 'sbom' || state.mode === 'status';
+  if (el.resultsTitle) el.resultsTitle.textContent = modeTitle(state.mode);
+  updatePager();
   if (state.mode === 'sbom') loadSbomList();
   else if (state.mode === 'status') loadStatusPage();
   else runSearch();
 }
 
+function modeTitle(mode) {
+  return {
+    vulnerability: 'Vulnerabilities',
+    component: 'Components',
+    sbom: 'SBOM uploads',
+    status: 'Pipeline status'
+  }[mode] || 'Vulnerabilities';
+}
+
+function searchMetaText(query) {
+  if (state.mode === 'component') return 'Search package names, purl coordinates, vendor hints, ecosystems, and versions.';
+  if (state.mode === 'vulnerability') {
+    const label = query ? `"${query}"` : 'latest indexed vulnerabilities';
+    return `${label} · ${sortLabel(state.sort)} · ${state.pageSize} per page`;
+  }
+  return '';
+}
+
+function sortLabel(sort) {
+  return {
+    modifiedDesc: 'updated first',
+    publishedDesc: 'published first',
+    identifierDesc: 'CVE ID descending',
+    cvssDesc: 'highest CVSS',
+    cvssAsc: 'lowest CVSS'
+  }[sort] || 'updated first';
+}
+
+function updatePager(itemCount = null) {
+  if (el.pageLabel) {
+    const suffix = itemCount == null ? '' : ` · ${fmt(itemCount)} shown`;
+    el.pageLabel.textContent = `Page ${fmt(state.page)}${suffix}`;
+  }
+  if (el.prevPageButton) el.prevPageButton.disabled = state.page <= 1;
+  if (el.nextPageButton) el.nextPageButton.disabled = !state.hasMore;
+}
+
 async function loadStatusPage() {
+  if (el.resultsMeta) el.resultsMeta.textContent = 'Source freshness, normalizer queues, and scheduler progress.';
   el.resultList.innerHTML = '<div class="muted result-item">Pipeline sources</div>';
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading status</h2></div>';
   try {
@@ -183,6 +250,9 @@ async function loadStatusPage() {
 
 async function runSearch() {
   const query = el.queryInput.value.trim();
+  state.hasMore = false;
+  updatePager();
+  if (el.resultsMeta) el.resultsMeta.textContent = searchMetaText(query);
   el.resultList.innerHTML = '<div class="muted result-item">Loading</div>';
   try {
     if (state.mode === 'component') {
@@ -198,8 +268,18 @@ async function runSearch() {
 async function runVulnerabilitySearch(query) {
   const data = await api('/api/v1/vulnerability.search', {
     method: 'POST',
-    body: JSON.stringify({ query, pageSize: query ? 50 : 10 })
+    body: JSON.stringify({
+      query,
+      page: state.page,
+      pageSize: state.pageSize,
+      sort: state.sort
+    })
   });
+  state.page = data.page || state.page;
+  state.pageSize = data.pageSize || state.pageSize;
+  state.sort = data.sort || state.sort;
+  state.hasMore = Boolean(data.hasMore);
+  updatePager(data.items.length);
 
   if (!data.items.length) {
     el.resultList.innerHTML = '<div class="muted result-item">No vulnerabilities found</div>';
@@ -208,6 +288,8 @@ async function runVulnerabilitySearch(query) {
 
   if (!query) {
     el.resultList.innerHTML = '<div class="muted result-item" style="font-weight:600">Recently updated</div>';
+  } else {
+    el.resultList.innerHTML = '';
   }
   el.resultList.innerHTML += data.items.map((item) => vulnerabilityResult(item)).join('');
   el.resultList.querySelectorAll('[data-vulnerability-id]').forEach((button) => {
@@ -236,7 +318,7 @@ async function runComponentSearch(query) {
       purl,
       ecosystem: ecosystem || null,
       version: detectedVersion || null,
-      pageSize: 25
+      pageSize: state.pageSize
     })
   });
   const vulns = await api('/api/v1/component.vulnerabilitySearch', {
@@ -248,9 +330,11 @@ async function runComponentSearch(query) {
       purl,
       ecosystem: ecosystem || null,
       version: detectedVersion || null,
-      pageSize: 25
+      pageSize: state.pageSize
     })
   });
+  state.hasMore = false;
+  updatePager(vulns.items.length + catalog.components.length + catalog.registryPackages.length);
 
   const blocks = [];
   if (vulns.items.length) {
@@ -997,7 +1081,10 @@ function vulnerabilityResult(item) {
         <span class="result-title">${escapeHtml(item.primaryIdentifier)}</span>
         ${severityBadge(item.severityLabel, item.maxCvssScore)}
       </div>
+      <div class="result-summary">${escapeHtml(item.title || '')}</div>
       <div class="result-meta">
+        ${item.publishedAt ? `<span class="badge">published ${date(item.publishedAt)}</span>` : ''}
+        ${item.modifiedAt ? `<span class="badge">updated ${date(item.modifiedAt)}</span>` : ''}
         ${names.length ? `<span class="badge" title="${escapeHtml(names.join(', '))}">${escapeHtml(names.join(', '))}</span>` : ''}
         ${item.affectedComponentCount ? `<span class="badge muted">${fmt(item.affectedComponentCount)} affected</span>` : ''}
       </div>

@@ -272,7 +272,11 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertWeaknessesAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, IReadOnlyList<WeaknessDraft> weaknesses, CancellationToken ct)
     {
-        var valid = weaknesses.Where(x => !string.IsNullOrWhiteSpace(x.WeaknessId) || !string.IsNullOrWhiteSpace(x.Description)).ToList();
+        var valid = weaknesses
+            .Where(x => !string.IsNullOrWhiteSpace(x.WeaknessId) || !string.IsNullOrWhiteSpace(x.Description))
+            .GroupBy(x => string.IsNullOrWhiteSpace(x.WeaknessId) ? "" : x.WeaknessId.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .ToList();
         if (valid.Count == 0) return;
 
         if (valid.Count == 1)
@@ -308,7 +312,7 @@ public abstract class NormalizerBase(
         }
 
         await using var batchCmd = new NpgsqlCommand(
-            $"insert into vulnerability_weaknesses (vulnerability_id, vulnerability_record_id, source_id, weakness_type, weakness_id, description) values {string.Join(",", values)}",
+            $"insert into vulnerability_weaknesses (vulnerability_id, vulnerability_record_id, source_id, weakness_type, weakness_id, description) values {string.Join(",", values)} on conflict (vulnerability_id, source_id, coalesce(weakness_id,'')) do nothing",
             connection);
         for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
         await batchCmd.ExecuteNonQueryAsync(ct);

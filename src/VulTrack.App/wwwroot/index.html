@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VulTrack</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=20260528-search-ui">
 </head>
 <body>
   <main class="shell">
@@ -13,36 +13,16 @@
         <h1>VulTrack</h1>
         <p id="statusLine">Loading pipeline state</p>
       </div>
-      <div class="topbar-actions">
-        <div class="theme-controls" aria-label="Theme color">
-          <button class="theme-swatch is-active" type="button" data-theme-color="#2f7da7" style="--swatch:#2f7da7" title="Ocean"></button>
-          <button class="theme-swatch" type="button" data-theme-color="#2f9f86" style="--swatch:#2f9f86" title="Mint"></button>
-          <button class="theme-swatch" type="button" data-theme-color="#d86f73" style="--swatch:#d86f73" title="Coral"></button>
-          <button class="theme-swatch" type="button" data-theme-color="#8b6fd6" style="--swatch:#8b6fd6" title="Berry"></button>
-          <label class="color-picker" title="Custom accent color">
-            <input id="themeColorInput" type="color" value="#2f7da7" aria-label="Custom accent color">
-          </label>
-        </div>
-        <button id="sidebarToggle" class="icon-button" type="button" title="Toggle sidebar" aria-label="Toggle sidebar">
-          <span aria-hidden="true" class="sidebar-toggle-icon">☰</span>
-        </button>
-        <button id="refreshButton" class="icon-button" type="button" title="Refresh data" aria-label="Refresh data">
-          <span aria-hidden="true">&#8635;</span>
-        </button>
-      </div>
-    </header>
-
-    <section class="workspace">
-      <aside class="search-pane">
+      <div class="search-console" aria-label="Search console">
         <div class="tabs" role="tablist" aria-label="Search mode">
-          <button class="tab is-active" type="button" data-mode="vulnerability">Vulns</button>
-          <button class="tab" type="button" data-mode="component">Package</button>
+          <button class="tab is-active" type="button" data-mode="vulnerability">Vulnerabilities</button>
+          <button class="tab" type="button" data-mode="component">Components</button>
           <button class="tab" type="button" data-mode="sbom">SBOM</button>
           <button class="tab" type="button" data-mode="status">Status</button>
         </div>
 
         <form id="searchForm" class="search-form">
-          <label>
+          <label class="query-field">
             <span id="queryLabel">Identifier or keyword</span>
             <input id="queryInput" name="query" autocomplete="off" placeholder="CVE-2021-44228">
           </label>
@@ -60,16 +40,66 @@
               <input id="ecosystemInput" name="ecosystem" autocomplete="off" placeholder="maven">
             </label>
           </div>
+          <label class="compact-field">
+            <span>Limit</span>
+            <select id="limitSelect" name="limit">
+              <option value="10">10</option>
+              <option value="25" selected>25</option>
+              <option value="50">50</option>
+              <option value="100">100</option>
+            </select>
+          </label>
+          <label class="compact-field">
+            <span>Sort</span>
+            <select id="sortSelect" name="sort">
+              <option value="modifiedDesc" selected>Updated</option>
+              <option value="publishedDesc">Published</option>
+              <option value="identifierDesc">CVE ID</option>
+              <option value="cvssDesc">CVSS</option>
+              <option value="cvssAsc">CVSS low</option>
+            </select>
+          </label>
           <button type="submit" class="primary-button">Search</button>
         </form>
-
-        <div class="result-list" id="resultList" aria-live="polite"></div>
-      </aside>
-
-      <section class="detail-pane" id="detailPane" aria-live="polite">
-        <div class="empty-state">
-          <h2>No selection</h2>
+      </div>
+      <div class="topbar-actions">
+        <div class="theme-controls" aria-label="Theme color">
+          <button class="theme-swatch is-active" type="button" data-theme-color="#2f7da7" style="--swatch:#2f7da7" title="Ocean"></button>
+          <button class="theme-swatch" type="button" data-theme-color="#2f9f86" style="--swatch:#2f9f86" title="Mint"></button>
+          <button class="theme-swatch" type="button" data-theme-color="#d86f73" style="--swatch:#d86f73" title="Coral"></button>
+          <button class="theme-swatch" type="button" data-theme-color="#8b6fd6" style="--swatch:#8b6fd6" title="Berry"></button>
+          <label class="color-picker" title="Custom accent color">
+            <input id="themeColorInput" type="color" value="#2f7da7" aria-label="Custom accent color">
+          </label>
         </div>
+        <button id="refreshButton" class="icon-button" type="button" title="Refresh data" aria-label="Refresh data">
+          <span aria-hidden="true">&#8635;</span>
+        </button>
+      </div>
+    </header>
+
+    <section class="workspace">
+      <section class="content-pane">
+        <section class="results-panel" aria-label="Search results">
+          <div class="results-header">
+            <div>
+              <h2 id="resultsTitle">Vulnerabilities</h2>
+              <p id="resultsMeta">Search CVE identifiers, affected packages, titles, and source aliases.</p>
+            </div>
+            <div class="pager" id="pager">
+              <button id="prevPageButton" class="icon-button" type="button" title="Previous page" aria-label="Previous page">&#8592;</button>
+              <span id="pageLabel">Page 1</span>
+              <button id="nextPageButton" class="icon-button" type="button" title="Next page" aria-label="Next page">&#8594;</button>
+            </div>
+          </div>
+          <div class="result-list" id="resultList" aria-live="polite"></div>
+        </section>
+
+        <section class="detail-pane" id="detailPane" aria-live="polite">
+          <div class="empty-state">
+            <h2>No selection</h2>
+          </div>
+        </section>
       </section>
     </section>
 
@@ -86,6 +116,6 @@
     </footer>
   </main>
 
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=20260528-search-ui" defer></script>
 </body>
 </html>

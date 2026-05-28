@@ -97,6 +97,8 @@ create index if not exists ix_raw_identifier_summary
   on source_raw_index using gin(identifier_summary);
 create index if not exists ix_raw_source_modified
   on source_raw_index(source_id, source_modified_at desc);
+create index if not exists ix_raw_source_status_cover
+  on source_raw_index(source_id) include(parse_status, normalize_status, updated_at);
 create index if not exists ix_raw_pending_by_source
   on source_raw_index(source_id, updated_at, id)
   where normalize_status <> 'succeeded';
@@ -715,6 +717,9 @@ create index if not exists ix_vuln_search_text on vulnerabilities using gin(sear
 create index if not exists ix_vuln_identifiers on vulnerabilities using gin(identifiers);
 create index if not exists ix_vuln_affected_names on vulnerabilities using gin(affected_component_names);
 create index if not exists ix_vuln_title_trgm on vulnerabilities using gin(title gin_trgm_ops);
+create index if not exists ix_vuln_modified on vulnerabilities(modified_at desc nulls last);
+create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last);
+create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last);
 create index if not exists ix_records_vulnerability_detail on vulnerability_records(vulnerability_id, source_id, updated_at desc);
 create index if not exists ix_severity_vuln_system_version on vulnerability_severity_scores(vulnerability_id, scoring_system, scoring_version);
 create index if not exists ix_severity_selected on vulnerability_severity_scores(vulnerability_id) where is_selected = true;
