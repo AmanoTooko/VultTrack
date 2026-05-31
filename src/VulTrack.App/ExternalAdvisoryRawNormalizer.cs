@@ -88,6 +88,7 @@ public sealed class ExternalAdvisoryRawNormalizer(
             try
             {
                 var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, draft, cache, ct);
+                await AppendIdentifiersAsync(connection, vulnerabilityId, draft.Identifiers, ct);
                 var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.AdvisoryId, row.Title, row.Description ?? row.Summary, "active", row.Payload, ct);
                 await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, Descriptions(row), ct);
                 await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, SourceFactExtractor.LabelSeverity(row.SeverityLabel, row.Payload), ct);
@@ -173,6 +174,24 @@ public sealed class ExternalAdvisoryRawNormalizer(
         cmd.Parameters.AddWithValue(vulnerabilityId);
         cmd.Parameters.AddWithValue(row.SeverityLabel);
         cmd.Parameters.AddWithValue(row.Provider);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task AppendIdentifiersAsync(NpgsqlConnection connection, Guid vulnerabilityId, string[] identifiers, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("""
+            update vulnerabilities
+            set identifiers = (select array(select distinct unnest(vulnerabilities.identifiers || $2::text[]))),
+                aliases = (select array(
+                    select distinct identifier
+                    from unnest(vulnerabilities.aliases || $2::text[]) identifier
+                    where identifier <> vulnerabilities.primary_identifier
+                )),
+                updated_at = now()
+            where id = $1
+            """, connection);
+        cmd.Parameters.AddWithValue(vulnerabilityId);
+        cmd.Parameters.AddWithValue(identifiers);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 
