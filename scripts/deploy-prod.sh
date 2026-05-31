@@ -13,5 +13,9 @@ if command -v systemctl >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   sudo systemctl restart vultrack-docker-forward.service || true
 fi
 
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d postgres
+docker compose --env-file .env.production -f docker-compose.prod.yml exec -T postgres \
+  sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+  < db/init/001_schema.sql
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 docker compose --env-file .env.production -f docker-compose.prod.yml ps
