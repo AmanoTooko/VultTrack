@@ -21,6 +21,7 @@ builder.Services.AddSingleton<IRawNormalizer, PypiRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, CveListRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ThreatIntelRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ExploitPocRawNormalizer>();
+builder.Services.AddSingleton<IRawNormalizer, ExternalAdvisoryRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, DistroRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ComponentCatalogNormalizer>();
 builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>();
@@ -921,17 +922,17 @@ app.MapGet("/api/v1/benchmark.matchingQuality", async (NpgsqlDataSource db, stri
     });
 });
 
-static Dictionary<string, string> BuildSourceUrls(string cveId, string[] aliases)
+static Dictionary<string, string> BuildSourceUrls(string primaryIdentifier, string[] aliases)
 {
     var urls = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-    if (!string.IsNullOrWhiteSpace(cveId) && cveId.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase))
+    if (!string.IsNullOrWhiteSpace(primaryIdentifier) && primaryIdentifier.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase))
     {
-        urls["NVD"] = $"https://nvd.nist.gov/vuln/detail/{cveId}";
-        urls["CVE.org"] = $"https://www.cve.org/CVERecord?id={cveId}";
-        urls["MITRE"] = $"https://cve.mitre.org/cgi-bin/cvename.cgi?name={cveId}";
-        urls["OSV"] = $"https://osv.dev/vulnerability/{cveId}";
+        urls["NVD"] = $"https://nvd.nist.gov/vuln/detail/{primaryIdentifier}";
+        urls["CVE.org"] = $"https://www.cve.org/CVERecord?id={primaryIdentifier}";
+        urls["MITRE"] = $"https://cve.mitre.org/cgi-bin/cvename.cgi?name={primaryIdentifier}";
+        urls["OSV"] = $"https://osv.dev/vulnerability/{primaryIdentifier}";
     }
-    foreach (var alias in aliases)
+    foreach (var alias in aliases.Prepend(primaryIdentifier).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase))
     {
         if (alias.StartsWith("GHSA-", StringComparison.OrdinalIgnoreCase))
             urls["GitHub Advisory"] = $"https://github.com/advisories/{alias}";
@@ -939,6 +940,20 @@ static Dictionary<string, string> BuildSourceUrls(string cveId, string[] aliases
             urls["OSV"] = $"https://osv.dev/vulnerability/{alias}";
         if (alias.StartsWith("USN-", StringComparison.OrdinalIgnoreCase))
             urls["Ubuntu"] = $"https://ubuntu.com/security/notices/{alias}";
+        if (alias.StartsWith("CNNVD-", StringComparison.OrdinalIgnoreCase))
+            urls["CNNVD"] = $"https://www.cnnvd.org.cn/home/detail?cnnvdCode={Uri.EscapeDataString(alias)}";
+        if (alias.StartsWith("CNVD-", StringComparison.OrdinalIgnoreCase))
+            urls["CNVD"] = $"https://www.cnvd.org.cn/flaw/show/{Uri.EscapeDataString(alias)}";
+        if (alias.StartsWith("SSV-", StringComparison.OrdinalIgnoreCase))
+            urls["Seebug"] = $"https://www.seebug.org/vuldb/ssvid-{Uri.EscapeDataString(alias[4..])}";
+        if (alias.StartsWith("AVD-", StringComparison.OrdinalIgnoreCase))
+            urls["Aliyun AVD"] = $"https://avd.aliyun.com/detail?id={Uri.EscapeDataString(alias)}";
+        if (alias.StartsWith("CT-", StringComparison.OrdinalIgnoreCase))
+            urls["Chaitin"] = $"https://stack.chaitin.com/vuldb/index?search={Uri.EscapeDataString(alias)}";
+        if (alias.StartsWith("NSFOCUS-", StringComparison.OrdinalIgnoreCase))
+            urls["NSFOCUS"] = $"https://www.nsfocus.net/vulndb/{Uri.EscapeDataString(alias[8..])}";
+        if (alias.StartsWith("CERT360-", StringComparison.OrdinalIgnoreCase))
+            urls["360CERT"] = $"https://cert.360.cn/report/detail?id={Uri.EscapeDataString(alias[8..])}";
     }
     return urls;
 }

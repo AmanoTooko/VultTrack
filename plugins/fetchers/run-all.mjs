@@ -35,6 +35,10 @@ async function discoverSources() {
       console.error(`[run-all] skipping init-only source ${source}`);
       continue;
     }
+    if (mod.runMode === 'manual') {
+      console.error(`[run-all] skipping manual-only source ${source}`);
+      continue;
+    }
     discovered.push(source);
   }
   return discovered;

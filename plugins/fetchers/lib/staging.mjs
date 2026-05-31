@@ -290,6 +290,50 @@ export async function upsertExploitPoc(client, rawIndexId, item) {
   );
 }
 
+export async function upsertExternalAdvisory(client, rawIndexId, item) {
+  await client.query(
+    `insert into stg_external_advisories
+       (raw_index_id, provider, advisory_id, identifiers, title, summary, description,
+        severity_label, references_json, affected_products, affected_vendors, poc_available,
+        detail_available, published_at, modified_at, payload)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+     on conflict (raw_index_id) do update set
+       provider = excluded.provider,
+       advisory_id = excluded.advisory_id,
+       identifiers = excluded.identifiers,
+       title = excluded.title,
+       summary = excluded.summary,
+       description = excluded.description,
+       severity_label = excluded.severity_label,
+       references_json = excluded.references_json,
+       affected_products = excluded.affected_products,
+       affected_vendors = excluded.affected_vendors,
+       poc_available = excluded.poc_available,
+       detail_available = excluded.detail_available,
+       published_at = excluded.published_at,
+       modified_at = excluded.modified_at,
+       payload = excluded.payload`,
+    [
+      rawIndexId,
+      item.provider,
+      item.advisoryId,
+      item.identifiers ?? [],
+      item.title ?? null,
+      item.summary ?? null,
+      item.description ?? null,
+      item.severityLabel ?? null,
+      JSON.stringify(item.references ?? []),
+      JSON.stringify(item.affectedProducts ?? []),
+      JSON.stringify(item.affectedVendors ?? []),
+      item.pocAvailable ?? null,
+      item.detailAvailable ?? null,
+      item.publishedAt ?? null,
+      item.modifiedAt ?? null,
+      JSON.stringify(item.payload ?? item)
+    ]
+  );
+}
+
 function parseCpe23(uri) {
   const raw = String(uri ?? '');
   const parts = raw.startsWith('cpe:2.3:') ? raw.split(':') : [];

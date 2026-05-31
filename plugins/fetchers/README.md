@@ -29,6 +29,7 @@ export const sourceCode = '<source-code>';
 // 可选：初始化/基线导入源使用 runMode = 'init'。
 // run-all 默认跳过 init-only source，除非设置 FETCHER_INCLUDE_INIT=1。
 // export const runMode = 'init';
+// 需要显式指定的源使用 runMode = 'manual'，run-all 始终默认跳过。
 
 export async function run(client, ctx) {
   // client: pg client，由 run-fetcher 注入
@@ -85,6 +86,28 @@ Exploit/PoC sources:
 
 GitHub 公开 API 不强制要求 token，但全量跑 `poc-in-github`、`trickest-cve` 或开启 GitHub repo zipball 归档时，建议申请并配置 `GITHUB_TOKEN`，否则容易遇到 GitHub rate limit。当前 fetcher 不会自动执行任何 PoC，只保存元数据、来源 URL、hash 和压缩归档对象。
 
+中国境内漏洞情报源：
+
+- `cnnvd`：使用 CNNVD 的公开 JSON 列表和详情接口，抓取中文描述、厂商、影响产品、参考链接和补丁信息。
+- `seebug`：抓取 Seebug 漏洞库公开列表和详情页，保留 SSV、CVE、危险等级以及 PoC 可用信号。
+- `aliyun-avd`：抓取阿里云 AVD 公开列表，覆盖 CVE、非 CVE 和 PoC 已公开信号。详情页默认不抓，因为站点可能启用验证码保护；需要时设置 `ALIYUN_AVD_FETCH_DETAILS=1`。
+- `nsfocus-vulndb`：抓取绿盟 NSFOCUS 漏洞库公开列表和详情页，补充中文描述、受影响系统和修复引用。
+- `chaitin-vuldb`：抓取长亭漏洞库公开 API，保留 CT、CVE、CNVD、CNNVD 映射、中文摘要、修复建议和 PoC/EXP 披露信号。
+- `cnvd`：CNVD 会触发反爬挑战，默认禁用。只支持在许可范围内提供 `CNVD_COOKIE`，并可用 `CNVD_IDS=CNVD-2024-...` 定向同步；不要尝试自动绕过验证码。
+- `cert-360`：360CERT RSS 当前 TLS 和内容时效不稳定，默认禁用。如明确接受 TLS 风险，可设置 `CERT360_ALLOW_INSECURE_TLS=1` 后定向运行。
+
+这些来源统一写入 `stg_external_advisories`，再由 `ExternalAdvisoryRawNormalizer` 合并。能解析出 CVE 时优先归并到 CVE；没有 CVE 时保留来源编号，例如 `CNNVD-*`、`CNVD-*`、`SSV-*`、`AVD-*` 或 `CT-*`。产品名称作为弱结构化事实保存，不会伪造 purl。
+
+奇安信 TI 的公开 advisory 页面目前是 SPA，没有发现可稳定复用的公开 API。接入前需要向奇安信申请正式 API 地址和凭据，再按其授权接口补 fetcher，不要依赖页面脚本里出现的内部地址。
+
+建议先用小批量真实数据 smoke：
+
+```bash
+FETCHER_MAX_RECORDS=1 npm run fetch -- --source cnnvd
+FETCHER_MAX_RECORDS=1 npm run fetch -- --source chaitin-vuldb
+FETCHER_MAX_RECORDS=1 npm run fetch -- --source seebug
+```
+
 需要显式 smoke 时，使用 `FETCHER_SMOKE=1`，或提供 source 专属 ID/组件环境变量，例如 `OSV_IDS`、`MAVEN_OSV_IDS`、`ANDROID_OSV_IDS`、`GOOGLE_OSV_IDS`、`UBUNTU_OSV_IDS`、`MAVEN_COMPONENTS`。这些变量表示“按指定对象查询”，不表示全量或日常增量。
 
 初始化/基线源默认不参与日常全量或定时更新。镜像、archive、仓库全量重放类任务用 `runMode = 'init'`，通常命名为 `<source>-init`；日常 source 只做 API 或 `modified_id.csv` 等增量。
@@ -116,7 +139,7 @@ FETCHER_INCLUDE_INIT=1 npm run fetch -- --source android-osv-init
 
 ## 运行所有 Fetcher
 
-`run-all.mjs` 默认动态发现 `sources/*.mjs`，并跳过 `runMode = 'init'` 的初始化源：
+`run-all.mjs` 默认动态发现 `sources/*.mjs`，并跳过 `runMode = 'init'` 的初始化源与 `runMode = 'manual'` 的手动源：
 
 ```bash
 FETCHER_MAX_RECORDS=1 node plugins/fetchers/run-all.mjs
