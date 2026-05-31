@@ -1408,7 +1408,7 @@ function setupSbomUpload() {
     status.textContent = 'Uploading...';
     try {
       const text = await file.text();
-      const data = await api('/api/v1/sbom.upload', { method: 'POST', body: text });
+      const data = await api(`/api/v1/sbom.upload?name=${encodeURIComponent(file.name)}`, { method: 'POST', body: text });
       status.textContent = `Uploaded: ${data.name} (${data.componentCount} components)`;
       loadSbomList();
     } catch (e) {

@@ -23,8 +23,24 @@ public sealed class SourceScheduler(
         var normalizeInterval = TimeSpan.FromSeconds(EnvInt("SCHEDULER_INTERVAL_SECONDS", Options.NormalizeIntervalSeconds, 1));
         var fetchInterval = TimeSpan.FromHours(Math.Max(1, Options.FetchIntervalHours));
 
+        await CloseInterruptedRunsAsync(stoppingToken);
         _ = Task.Run(() => RunFetchLoopAsync(fetchInterval, stoppingToken), stoppingToken);
         await RunNormalizeLoopAsync(normalizeInterval, stoppingToken);
+    }
+
+    private async Task CloseInterruptedRunsAsync(CancellationToken ct)
+    {
+        await using var cmd = db.CreateCommand("""
+            update source_sync_runs
+            set status = 'failed',
+                finished_at = now(),
+                error_count = greatest(error_count, 1),
+                log_summary = coalesce(nullif(log_summary, ''), 'Interrupted before completion; scheduler restarted.')
+            where status = 'running'
+            """);
+        var count = await cmd.ExecuteNonQueryAsync(ct);
+        if (count > 0)
+            logger.LogWarning("Closed {Count} interrupted source sync runs left by an earlier scheduler process.", count);
     }
 
     private async Task RunNormalizeLoopAsync(TimeSpan interval, CancellationToken ct)

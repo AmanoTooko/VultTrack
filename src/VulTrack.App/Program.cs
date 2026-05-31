@@ -985,7 +985,23 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "alter table if exists sbom_components add column if not exists cpe23_uri text",
         "create index if not exists ix_sbom_components_purl on sbom_components(purl) where purl is not null",
         "create index if not exists ix_sbom_components_cpe on sbom_components(cpe23_uri) where cpe23_uri is not null",
-        "create index if not exists ix_affected_components_cpe_prefix on vulnerability_affected_components(primary_cpe23_uri text_pattern_ops, vulnerability_id) where primary_cpe23_uri is not null"
+        "create index if not exists ix_affected_components_cpe_prefix on vulnerability_affected_components(primary_cpe23_uri text_pattern_ops, vulnerability_id) where primary_cpe23_uri is not null",
+        """
+        insert into sources (code, name, kind, homepage_url, plugin_name, schedule_cron)
+        values
+          ('exploitdb', 'Exploit-DB Public Exploits', 'exploit', 'https://www.exploit-db.com/', 'exploit-intel', '0 */12 * * *'),
+          ('metasploit', 'Metasploit Framework Modules', 'exploit', 'https://github.com/rapid7/metasploit-framework', 'exploit-intel', '0 */12 * * *'),
+          ('nuclei-templates', 'ProjectDiscovery Nuclei Templates', 'exploit', 'https://github.com/projectdiscovery/nuclei-templates', 'exploit-intel', '0 */12 * * *'),
+          ('poc-in-github', 'PoC-in-GitHub CVE Repository Index', 'exploit', 'https://github.com/nomi-sec/PoC-in-GitHub', 'exploit-intel', '0 */12 * * *'),
+          ('trickest-cve', 'Trickest CVE PoC Index', 'exploit', 'https://github.com/trickest/cve', 'exploit-intel', '0 */12 * * *')
+        on conflict (code) do update set
+          name = excluded.name,
+          kind = excluded.kind,
+          homepage_url = excluded.homepage_url,
+          plugin_name = excluded.plugin_name,
+          schedule_cron = excluded.schedule_cron,
+          updated_at = now()
+        """
     })
     {
         await using var cmd = db.CreateCommand(statement);

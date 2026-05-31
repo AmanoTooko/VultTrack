@@ -4,6 +4,7 @@ import { writeRecord } from '../lib/db.mjs';
 import { upsertDebian } from '../lib/staging.mjs';
 
 export const sourceCode = 'debian-security-tracker';
+const TRANSFORM_VERSION = 2;
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
@@ -16,14 +17,15 @@ export async function run(client, ctx) {
   const text = await resp.text();
   const contentHash = sha256(Buffer.from(text));
 
-  if (checkpoint.contentHash === contentHash) {
+  if (checkpoint.contentHash === contentHash && checkpoint.transformVersion === TRANSFORM_VERSION) {
     console.error('Debian tracker unchanged, skipping.');
-    return { fetchedCount: 0, parsedCount: 0, checkpoint: { contentHash, skipped: true } };
+    return { fetchedCount: 0, parsedCount: 0, checkpoint: { contentHash, transformVersion: TRANSFORM_VERSION, skipped: true } };
   }
 
   const data = JSON.parse(text);
+  const records = groupByCve(data);
   let count = 0;
-  for (const [cveId, packages] of Object.entries(data)) {
+  for (const [cveId, packages] of records) {
     if (count >= max) break;
     const payload = { cveId, packages };
     const rawIndexId = await writeRecord(client, ctx, {
@@ -37,5 +39,17 @@ export async function run(client, ctx) {
     await upsertDebian(client, rawIndexId, cveId, packages, payload);
     count++;
   }
-  return { fetchedCount: count, parsedCount: count, checkpoint: { contentHash, lastFetched: new Date().toISOString() } };
+  return { fetchedCount: count, parsedCount: count, checkpoint: { contentHash, transformVersion: TRANSFORM_VERSION, lastFetched: new Date().toISOString() } };
+}
+
+export function groupByCve(data) {
+  const records = new Map();
+  for (const [packageName, advisories] of Object.entries(data ?? {})) {
+    for (const [cveId, advisory] of Object.entries(advisories ?? {})) {
+      if (!/^(CVE|TEMP)-/i.test(cveId)) continue;
+      if (!records.has(cveId)) records.set(cveId, {});
+      records.get(cveId)[packageName] = advisory;
+    }
+  }
+  return records;
 }

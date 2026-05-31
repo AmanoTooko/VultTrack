@@ -5,7 +5,7 @@ import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeArtifact, writeRecord } from '../lib/db.mjs';
 import { upsertExploitPoc } from '../lib/staging.mjs';
-import { classifyExploitType, ensureGitMirror, identifiersFromText, maturityFor, walkFiles } from '../lib/exploit-utils.mjs';
+import { classifyExploitType, ensureGitMirror, identifiersFromText, maturityFor, sanitizeUnicode, walkFiles } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'nuclei-templates';
 
@@ -45,7 +45,7 @@ export async function run(client, ctx) {
       contentType: 'application/yaml',
       schemaHint: 'nuclei-template'
     });
-    const item = {
+    const item = sanitizeUnicode({
       provider: 'nuclei-templates',
       sourceKey: doc?.id || rel,
       identifiers,
@@ -66,7 +66,7 @@ export async function run(client, ctx) {
       modifiedAt: new Date().toISOString(),
       tags,
       payload: { id: doc?.id, info: doc?.info, path: rel, gitRevision: mirror.revision }
-    };
+    });
     const rawIndexId = await writeRecord(client, ctx, {
       externalKey: item.sourceKey,
       externalId: item.sourceKey,

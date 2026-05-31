@@ -13,3 +13,33 @@ test('all fetchers export matching sourceCode and run()', async () => {
     assert.equal(mod.sourceCode, source);
   }
 });
+
+test('debian tracker package index is grouped into CVE records', async () => {
+  const { groupByCve } = await import('../../plugins/fetchers/sources/debian-security-tracker.mjs');
+  const records = groupByCve({
+    apt: {
+      'CVE-2011-3374': { releases: { bookworm: { status: 'open' } } },
+      description: 'ignored'
+    },
+    zlib: {
+      'CVE-2023-45853': { releases: { bookworm: { status: 'open' } } },
+      'TEMP-123': { releases: { sid: { status: 'open' } } }
+    }
+  });
+
+  assert.deepEqual([...records.keys()], ['CVE-2011-3374', 'CVE-2023-45853', 'TEMP-123']);
+  assert.deepEqual(records.get('CVE-2011-3374'), {
+    apt: { releases: { bookworm: { status: 'open' } } }
+  });
+});
+
+test('exploit metadata sanitizer replaces only invalid Unicode surrogates', async () => {
+  const { sanitizeUnicode } = await import('../../plugins/fetchers/lib/exploit-utils.mjs');
+  assert.deepEqual(sanitizeUnicode({
+    valid: 'before \uD83D\uDE00 after',
+    invalid: ['high \uD800', 'low \uDC00']
+  }), {
+    valid: 'before \uD83D\uDE00 after',
+    invalid: ['high \uFFFD', 'low \uFFFD']
+  });
+});

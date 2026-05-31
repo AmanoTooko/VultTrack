@@ -27,12 +27,21 @@ public static class SbomEndpoints
             if (doc is null) return ApiResult.Error("INVALID", "Cannot parse JSON");
 
             var meta = doc["metadata"];
-            var name = $"{meta?["component"]?["name"]?.GetValue<string>() ?? "unknown"} {meta?["component"]?["version"]?.GetValue<string>() ?? ""}".Trim();
+            var metadataName = $"{Text(meta?["component"]?["name"])} {Text(meta?["component"]?["version"])}".Trim();
+            var name = FirstText(
+                request.Query["name"].ToString(),
+                metadataName,
+                SbomNameFromSerial(Text(doc["serialNumber"])),
+                "CycloneDX SBOM");
             var sid = Guid.NewGuid();
 
             var comps = (doc["components"]?.AsArray() ?? [])
                 .Select(ToSbomComponent)
                 .Where(x => !string.IsNullOrWhiteSpace(x.Purl) || !string.IsNullOrWhiteSpace(x.Cpe23Uri))
+                .ToList();
+            var deduped = comps
+                .GroupBy(x => (x.Purl ?? "", x.Cpe23Uri ?? "", x.Name ?? "", x.Version ?? "", x.Ecosystem ?? ""))
+                .Select(g => g.First())
                 .ToList();
 
             await using var cmd = db.CreateCommand(
@@ -40,16 +49,11 @@ public static class SbomEndpoints
             cmd.Parameters.AddWithValue(sid);
             cmd.Parameters.AddWithValue(name);
             cmd.Parameters.AddWithValue(json);
-            cmd.Parameters.AddWithValue(comps.Count);
+            cmd.Parameters.AddWithValue(deduped.Count);
             await cmd.ExecuteNonQueryAsync(ct);
 
-            if (comps.Count > 0)
+            if (deduped.Count > 0)
             {
-                var deduped = comps
-                    .GroupBy(x => (x.Purl ?? "", x.Cpe23Uri ?? "", x.Name ?? "", x.Version ?? "", x.Ecosystem ?? ""))
-                    .Select(g => g.First())
-                    .ToList();
-
                 var p = 1;
                 var vals = new List<string>();
                 var pl = new List<object>();
@@ -73,7 +77,7 @@ public static class SbomEndpoints
                 await uc.ExecuteNonQueryAsync(ct);
             }
 
-            return ApiResult.Ok(new { id = sid, name, componentCount = comps.Count });
+            return ApiResult.Ok(new { id = sid, name, componentCount = deduped.Count });
         }
         catch (Exception ex) { return ApiResult.Error("UPLOAD_FAILED", ex.Message); }
     }
@@ -164,6 +168,7 @@ public static class SbomEndpoints
     {
         var m = 0;
         await using var conn = await db.OpenConnectionAsync(ct);
+        await using var transaction = await conn.BeginTransactionAsync(ct);
         var comps = new List<(Guid Id, string? Purl, string? Name, string? Version, string? Eco, string? Vendor, string? Product, string? Cpe23Uri)>();
         await using (var s = new NpgsqlCommand(
             "SELECT id,purl,name,version,ecosystem,vendor,product,cpe23_uri FROM sbom_components WHERE sbom_id=$1", conn))
@@ -174,6 +179,22 @@ public static class SbomEndpoints
                     r.IsDBNull(3) ? null : r.GetString(3), r.IsDBNull(4) ? null : r.GetString(4),
                     r.IsDBNull(5) ? null : r.GetString(5), r.IsDBNull(6) ? null : r.GetString(6),
                     r.IsDBNull(7) ? null : r.GetString(7)));
+        }
+
+        await using (var clear = new NpgsqlCommand("""
+            delete from sbom_vulnerabilities sv
+            using sbom_components sc
+            where sc.id = sv.sbom_component_id and sc.sbom_id = $1
+            """, conn))
+        {
+            clear.Parameters.AddWithValue(req.SbomId);
+            await clear.ExecuteNonQueryAsync(ct);
+        }
+        await using (var reset = new NpgsqlCommand(
+            "update sbom_components set vuln_count = 0 where sbom_id = $1", conn))
+        {
+            reset.Parameters.AddWithValue(req.SbomId);
+            await reset.ExecuteNonQueryAsync(ct);
         }
 
         foreach (var (cid, purl, name, ver, eco, vendor, product, cpe23Uri) in comps)
@@ -193,6 +214,7 @@ public static class SbomEndpoints
                   select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 2 as match_priority, 'purl' as match_basis
                   from vulnerability_affected_components c
                   where $1::text is not null and (c.primary_purl = $2 or c.primary_purl like $1 || '%')
+                    and ($4::text is null or lower(coalesce(c.ecosystem,'')) like lower($4) || '%')
                   union all
                   select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 3 as match_priority, 'name' as match_basis
                   from vulnerability_affected_components c
@@ -240,8 +262,7 @@ public static class SbomEndpoints
             {
                 var vm = ResolveSbomVersionMatch(ver, range, cpe23Uri, matchedCpe, basis);
 
-                if (vm == false) continue;
-                if (vm is null && string.IsNullOrEmpty(range)) continue;
+                if (vm != true) continue;
 
                 await using var ins = new NpgsqlCommand(@"
                     INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched)
@@ -269,6 +290,7 @@ public static class SbomEndpoints
         us.Parameters.AddWithValue(req.SbomId);
         await us.ExecuteNonQueryAsync(ct);
 
+        await transaction.CommitAsync(ct);
         return ApiResult.Ok(new { matched = m });
     }
 
@@ -428,6 +450,17 @@ public static class SbomEndpoints
 
     private static string? Text(JsonNode? node) => node?.GetValue<string>();
 
+    private static string FirstText(params string?[] values) =>
+        values.First(x => !string.IsNullOrWhiteSpace(x))!.Trim();
+
+    private static string? SbomNameFromSerial(string? serialNumber)
+    {
+        if (string.IsNullOrWhiteSpace(serialNumber)) return null;
+        return serialNumber.StartsWith("urn:uuid:", StringComparison.OrdinalIgnoreCase)
+            ? serialNumber["urn:uuid:".Length..]
+            : serialNumber;
+    }
+
     private static string Html(string value) => WebUtility.HtmlEncode(value);
 
     private static string UnescapeCpePart(string value) => value.Replace("\\:", ":").Replace("\\\\", "\\");
@@ -466,10 +499,31 @@ public static class SbomEndpoints
         if (slash < 0) return null;
         return purl["pkg:".Length..slash].ToLowerInvariant() switch
         {
-            "deb" => "debian",
-            "apk" => "alpine",
+            "deb" => DistroEcosystem("debian", PurlQualifier(purl, "distro")),
+            "apk" => DistroEcosystem("alpine", PurlQualifier(purl, "distro")),
+            "golang" => "go",
             "rpm" => "rpm",
             var x => x
         };
+    }
+
+    private static string? PurlQualifier(string purl, string key)
+    {
+        var query = purl.Split('?', 2).ElementAtOrDefault(1);
+        if (string.IsNullOrWhiteSpace(query)) return null;
+        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = pair.Split('=', 2);
+            if (parts.Length == 2 && string.Equals(parts[0], key, StringComparison.OrdinalIgnoreCase))
+                return Uri.UnescapeDataString(parts[1]);
+        }
+        return null;
+    }
+
+    private static string DistroEcosystem(string ecosystem, string? distro)
+    {
+        if (string.IsNullOrWhiteSpace(distro)) return ecosystem;
+        var match = System.Text.RegularExpressions.Regex.Match(distro, @"(?:^|[-_])(\d+)(?:[._-]|$)");
+        return match.Success ? $"{ecosystem}:{match.Groups[1].Value}" : ecosystem;
     }
 }
