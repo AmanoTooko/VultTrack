@@ -283,6 +283,26 @@ create table if not exists stg_exploit_pocs (
   created_at timestamptz not null default now()
 );
 
+create table if not exists stg_external_advisories (
+  raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
+  provider text not null,
+  advisory_id text not null,
+  identifiers text[] not null default '{}',
+  title text,
+  summary text,
+  description text,
+  severity_label text,
+  references_json jsonb not null default '[]'::jsonb,
+  affected_products jsonb not null default '[]'::jsonb,
+  affected_vendors jsonb not null default '[]'::jsonb,
+  poc_available boolean,
+  detail_available boolean,
+  published_at timestamptz,
+  modified_at timestamptz,
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+
 create table if not exists vulnerabilities (
   id uuid primary key default gen_random_uuid(),
   canonical_key text not null unique,
@@ -729,6 +749,8 @@ create index if not exists ix_vuln_source_property_key on vulnerability_source_p
 create index if not exists ix_vuln_detail_blocks on vulnerability_detail_blocks(vulnerability_id, display_order);
 create index if not exists ix_stg_exploit_pocs_identifiers on stg_exploit_pocs using gin(identifiers);
 create index if not exists ix_stg_exploit_pocs_provider on stg_exploit_pocs(provider, modified_at desc);
+create index if not exists ix_stg_external_advisories_identifiers on stg_external_advisories using gin(identifiers);
+create index if not exists ix_stg_external_advisories_provider on stg_external_advisories(provider, modified_at desc);
 create index if not exists ix_component_identity_lookup on component_identity_index(identity_type, normalized_value);
 create index if not exists ix_component_identity_trgm on component_identity_index using gin(normalized_value gin_trgm_ops);
 create index if not exists ix_components_canonical_trgm on components using gin(canonical_name gin_trgm_ops);
@@ -814,6 +836,13 @@ values
   ('nuclei-templates', 'ProjectDiscovery Nuclei Templates', 'exploit', 'https://github.com/projectdiscovery/nuclei-templates', 'exploit-intel', '0 */12 * * *'),
   ('poc-in-github', 'PoC-in-GitHub CVE Repository Index', 'exploit', 'https://github.com/nomi-sec/PoC-in-GitHub', 'exploit-intel', '0 */12 * * *'),
   ('trickest-cve', 'Trickest CVE PoC Index', 'exploit', 'https://github.com/trickest/cve', 'exploit-intel', '0 */12 * * *'),
+  ('cnnvd', 'CNNVD 国家信息安全漏洞库', 'vulnerability', 'https://www.cnnvd.org.cn/home/loophole', 'china-advisory', '0 */6 * * *'),
+  ('cnvd', 'CNVD 国家信息安全漏洞共享平台', 'vulnerability', 'https://www.cnvd.org.cn/flaw/list', 'china-advisory', null),
+  ('seebug', 'Seebug 漏洞平台', 'vulnerability', 'https://www.seebug.org/vuldb/vulnerabilities', 'china-advisory', '0 */12 * * *'),
+  ('aliyun-avd', '阿里云漏洞库 AVD', 'vulnerability', 'https://avd.aliyun.com/', 'china-advisory', '0 */12 * * *'),
+  ('nsfocus-vulndb', '绿盟科技 NSFOCUS 漏洞库', 'vulnerability', 'https://www.nsfocus.net/index.php?act=sec_bug', 'china-advisory', '0 */12 * * *'),
+  ('chaitin-vuldb', '长亭漏洞库', 'vulnerability', 'https://stack.chaitin.com/vuldb/index', 'china-advisory', '0 */12 * * *'),
+  ('cert-360', '360CERT 安全通告', 'threat_intel', 'https://cert.360.cn/warning', 'china-advisory', null),
   ('alpine-secdb', 'Alpine SecDB', 'vulnerability', 'https://secdb.alpinelinux.org/', 'alpine', '0 4 * * *'),
   ('debian-security-tracker', 'Debian Security Tracker', 'vulnerability', 'https://security-tracker.debian.org/', 'debian', '0 4 * * *'),
   ('ubuntu-osv', 'Ubuntu OSV', 'vulnerability', 'https://documentation.ubuntu.com/security/security-updates/osv/', 'ubuntu', '0 4 * * *'),
@@ -861,3 +890,8 @@ update sources
 set config_json = config_json - 'runMode',
     updated_at = now()
 where code in ('osv', 'maven-osv');
+
+update sources
+set enabled = false,
+    updated_at = now()
+where code in ('cnvd', 'cert-360');

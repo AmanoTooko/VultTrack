@@ -16,6 +16,13 @@ public static partial class Identifier
         if (normalized.StartsWith("ASB-")) return "ASB";
         if (normalized.StartsWith("OSV-")) return "OSV";
         if (normalized.StartsWith("UBUNTU-")) return "UBUNTU";
+        if (normalized.StartsWith("CNNVD-")) return "CNNVD";
+        if (normalized.StartsWith("CNVD-")) return "CNVD";
+        if (normalized.StartsWith("SSV-")) return "SSV";
+        if (normalized.StartsWith("AVD-")) return "AVD";
+        if (normalized.StartsWith("CT-")) return "CT";
+        if (normalized.StartsWith("NSFOCUS-")) return "NSFOCUS";
+        if (normalized.StartsWith("CERT360-")) return "CERT360";
         if (CweRegex().IsMatch(normalized)) return "CWE";
         return "OTHER";
     }
