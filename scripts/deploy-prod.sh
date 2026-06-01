@@ -25,4 +25,14 @@ docker compose --env-file .env.production -f docker-compose.prod.yml exec -T pos
   ' \
   < db/init/001_schema.sql
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.production -f docker-compose.prod.yml exec -T api \
+  sh -lc '
+    for attempt in $(seq 1 60); do
+      node -e "fetch(\"http://127.0.0.1:8080/api/v1/system.ready\").then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))" &&
+        exit 0
+      sleep 2
+    done
+    echo "API readiness check timed out" >&2
+    exit 1
+  '
 docker compose --env-file .env.production -f docker-compose.prod.yml ps
