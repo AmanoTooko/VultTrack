@@ -45,7 +45,7 @@ public static class SbomEndpoints
                 .ToList();
 
             await using var cmd = db.CreateCommand(
-                "INSERT INTO sbom_uploads(id,name,format,metadata,component_count) VALUES($1,$2,'cyclonedx',$3,$4)");
+                "INSERT INTO sbom_uploads(id,name,format,metadata,component_count) VALUES($1,$2,'cyclonedx',$3::jsonb,$4)");
             cmd.Parameters.AddWithValue(sid);
             cmd.Parameters.AddWithValue(name);
             cmd.Parameters.AddWithValue(json);
@@ -59,7 +59,7 @@ public static class SbomEndpoints
                 var pl = new List<object>();
                 foreach (var item in deduped)
                 {
-                    vals.Add($"(${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++})");
+                    vals.Add($"(${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++}::jsonb)");
                     pl.Add(sid); pl.Add((object?)item.Purl ?? DBNull.Value); pl.Add((object?)item.Name ?? DBNull.Value);
                     pl.Add((object?)item.Version ?? DBNull.Value); pl.Add((object?)item.Ecosystem ?? DBNull.Value);
                     pl.Add((object?)item.GroupName ?? DBNull.Value); pl.Add((object?)item.Vendor ?? DBNull.Value);
