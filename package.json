@@ -8,6 +8,7 @@
     "fetch:all:smoke": "FETCHER_MAX_RECORDS=2 node plugins/fetchers/run-all.mjs",
     "normalize:run": "node scripts/run-full-normalization.mjs",
     "normalize:parallel": "node scripts/run-parallel-normalization.mjs",
+    "normalize:canonical-rebuild": "node scripts/run-canonical-rebuild-normalization.mjs",
     "normalize:sources": "node scripts/normalize-source-smoke.mjs",
     "benchmark:matching": "node scripts/benchmark-matching-quality.mjs",
     "benchmark:trivy": "node scripts/benchmark-trivy-sbom.mjs",

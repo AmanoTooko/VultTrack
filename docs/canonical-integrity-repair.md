@@ -40,10 +40,15 @@ Stop the API scheduler before rebuilding and create a PostgreSQL backup.
 ```bash
 npm run rebuild:canonical
 npm run rebuild:canonical -- --apply --confirm=REBUILD_CANONICAL_DATA
-npm run normalize:parallel
+npm run normalize:canonical-rebuild
 npm run audit:canonical
 ```
 
 The first rebuild command is a dry run. The apply command deletes only derived
 canonical data and requeues successfully parsed raw records for normalization.
 It does not delete raw source objects or staging records.
+
+The rebuild normalizer intentionally runs in phases: authoritative CVE records,
+package and distribution advisories, enrichment, exploit intelligence, then
+component catalogs. Do not replace it with an all-source parallel normalization
+run during repair.
