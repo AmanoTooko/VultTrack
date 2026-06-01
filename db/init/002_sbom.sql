@@ -23,6 +23,8 @@ create table if not exists sbom_components (
   vendor text,
   product text,
   cpe23_uri text,
+  source_package_name text,
+  source_package_version text,
   component_type text,
   metadata jsonb not null default '{}',
   vuln_count int not null default 0,
@@ -42,6 +44,8 @@ create table if not exists sbom_vulnerabilities (
   ecosystem text,
   normalized_range text,
   version_matched boolean,
+  match_basis text,
+  matched_version text,
   created_at timestamptz not null default now(),
   unique(sbom_component_id, vulnerability_id)
 );

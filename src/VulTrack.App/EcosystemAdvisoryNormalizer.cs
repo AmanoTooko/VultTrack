@@ -70,8 +70,14 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
         foreach (var row in rows)
         {
             var identifiers = IdentifiersFrom([row.AdvisoryId], row.Identifiers);
-            var primary = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? row.AdvisoryId;
-            drafts.Add((row, new VulnerabilityCanonicalDraft(primary, null, null, "active", row.PublishedAt, row.ModifiedAt, identifiers, row.SourceId, row.RawIndexId)));
+            var isCsaf = row.Provider is "suse-csaf" or "redhat-csaf";
+            var cves = identifiers.Where(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)).ToArray();
+            IEnumerable<string[]> identifierSets = isCsaf && cves.Length > 0 ? cves.Select(x => new[] { x }) : [identifiers];
+            foreach (var identifierSet in identifierSets)
+            {
+                var primary = identifierSet.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? row.AdvisoryId;
+                drafts.Add((row, new VulnerabilityCanonicalDraft(primary, null, null, "active", row.PublishedAt, row.ModifiedAt, identifierSet, row.SourceId, row.RawIndexId)));
+            }
         }
 
         var cache = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, drafts.Select(d => d.Draft).ToList(), ct);
@@ -88,13 +94,14 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
                 var description = ExtractDescription(payload, isCsaf, title);
                 var fullDraft = new VulnerabilityCanonicalDraft(primary, title, description, "active", row.PublishedAt, row.ModifiedAt, identifiers, row.SourceId, row.RawIndexId);
                 var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, fullDraft, cache, ct);
-                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.AdvisoryId, title, description, "active", row.Payload, ct);
+                var sourceRecordId = isCsaf ? $"{row.AdvisoryId}:{primary}" : row.AdvisoryId;
+                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, sourceRecordId, title, description, "active", row.Payload, ct);
                 await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
                 await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, description), ct);
-                var severities = ExtractSeverities(payload, isCsaf, row.SeverityLabel, row.Payload).ToList();
+                var severities = ExtractSeverities(payload, isCsaf, row.SeverityLabel, row.Payload, primary).ToList();
                 await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, severities, ct);
                 await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(JsonNode.Parse(row.ReferencesJson)), ct);
-                var facts = ExtractAffectedFacts(row, payload, isCsaf).ToList();
+                var facts = ExtractAffectedFacts(row, payload, isCsaf, primary).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                 if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
                 succeededIds.Add(row.RawIndexId);
@@ -135,7 +142,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
         return title;
     }
 
-    private static IEnumerable<SeverityScoreDraft> ExtractSeverities(JsonNode? payload, bool isCsaf, string? severityLabel, string payloadJson)
+    private static IEnumerable<SeverityScoreDraft> ExtractSeverities(JsonNode? payload, bool isCsaf, string? severityLabel, string payloadJson, string? identifier = null)
     {
         if (!isCsaf)
         {
@@ -147,6 +154,9 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
         var seen = false;
         foreach (var vuln in payload?["vulnerabilities"]?.AsArray() ?? [])
         {
+            if (!string.IsNullOrWhiteSpace(identifier)
+                && !string.Equals(vuln?["cve"]?.GetValue<string>(), identifier, StringComparison.OrdinalIgnoreCase))
+                continue;
             foreach (var scoreEntry in vuln?["scores"]?.AsArray() ?? [])
             {
                 var cvss = scoreEntry?["cvss_v3"] ?? scoreEntry?["cvss_v3_1"] ?? scoreEntry?["cvss_v3_0"] ?? scoreEntry?["cvss_v2"];
@@ -169,7 +179,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
         }
     }
 
-    private static IEnumerable<AffectedFactDraft> ExtractAffectedFacts(Row row, JsonNode? payload, bool isCsaf)
+    private static IEnumerable<AffectedFactDraft> ExtractAffectedFacts(Row row, JsonNode? payload, bool isCsaf, string? identifier = null)
     {
         if (isCsaf)
         {
@@ -178,6 +188,9 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
             foreach (var vuln in payload?["vulnerabilities"]?.AsArray() ?? [])
             {
                 var cve = vuln?["cve"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(identifier)
+                    && !string.Equals(cve, identifier, StringComparison.OrdinalIgnoreCase))
+                    continue;
                 var productStatus = vuln?["product_status"];
                 var products = productStatus?["known_affected"]?.AsArray()
                     ?? productStatus?["recommended"]?.AsArray()

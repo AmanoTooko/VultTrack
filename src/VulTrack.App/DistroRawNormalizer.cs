@@ -63,7 +63,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                     var title = $"{identifier} affects Alpine package {row.PackageName}";
                     var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, identifier, title, title, "active", null, null, ids, ct);
                     var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, $"{identifier}:{row.DistroRelease}:{row.PackageName}", title, title, "active", row.Payload, ct);
-                    var facts = new[] { new AffectedFactDraft("package", "alpine", row.PackageName, null, null, "secfixes", row.Payload) };
+                    var facts = ExtractAlpineFacts(row, identifier).ToList();
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                 }
 
@@ -140,9 +140,67 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
         foreach (var (name, value) in packages)
         {
             if (string.IsNullOrWhiteSpace(name)) continue;
-            yield return new AffectedFactDraft("package", "debian", name, null, null, "security-tracker", value?.ToJsonString() ?? "{}");
+            var releases = value?["releases"]?.AsObject();
+            if (releases is null) continue;
+            foreach (var (release, advisory) in releases)
+            {
+                var status = advisory?["status"]?.GetValue<string>()?.ToLowerInvariant();
+                var fixedVersion = advisory?["fixed_version"]?.GetValue<string>();
+                var range = status switch
+                {
+                    "open" => ">= 0",
+                    "resolved" when !string.IsNullOrWhiteSpace(fixedVersion) && fixedVersion != "0" => $"< {fixedVersion}",
+                    _ => null
+                };
+                if (range is null) continue;
+                yield return new AffectedFactDraft(
+                    "package",
+                    DebianEcosystem(release),
+                    name,
+                    $"pkg:deb/debian/{Uri.EscapeDataString(name)}",
+                    range,
+                    $"security-tracker:{status}",
+                    advisory?.ToJsonString() ?? "{}");
+            }
         }
     }
+
+    private static IEnumerable<AffectedFactDraft> ExtractAlpineFacts(AlpineRow row, string identifier)
+    {
+        var secfixes = JsonNode.Parse(row.Secfixes)?.AsObject();
+        if (secfixes is null) yield break;
+        foreach (var (fixedVersion, ids) in secfixes)
+        {
+            var matched = ids?.AsArray()
+                .Any(x => string.Equals(x?.GetValue<string>(), identifier, StringComparison.OrdinalIgnoreCase)) ?? false;
+            if (!matched || string.IsNullOrWhiteSpace(fixedVersion)) continue;
+            var release = row.DistroRelease.Split('/', 2)[0].TrimStart('v', 'V');
+            yield return new AffectedFactDraft(
+                "package",
+                $"alpine:{release}",
+                row.PackageName,
+                $"pkg:apk/alpine/{Uri.EscapeDataString(row.PackageName)}",
+                $"< {fixedVersion}",
+                "secfixes",
+                row.Payload);
+        }
+    }
+
+    private static string DebianEcosystem(string release) => release.ToLowerInvariant() switch
+    {
+        "etch" => "debian:4",
+        "lenny" => "debian:5",
+        "squeeze" => "debian:6",
+        "wheezy" => "debian:7",
+        "jessie" => "debian:8",
+        "stretch" => "debian:9",
+        "buster" => "debian:10",
+        "bullseye" => "debian:11",
+        "bookworm" => "debian:12",
+        "trixie" => "debian:13",
+        "forky" => "debian:14",
+        var value => $"debian:{value}"
+    };
 
     private static string[] ExtractAllIdentifiers(string rawId)
     {
