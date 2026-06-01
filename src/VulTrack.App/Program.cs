@@ -26,6 +26,7 @@ builder.Services.AddSingleton<IRawNormalizer, DistroRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ComponentCatalogNormalizer>();
 builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>();
 builder.Services.AddSingleton<ComponentVulnerabilitySearchService>();
+builder.Services.AddSingleton<AdminAuthService>();
 builder.Services.AddSingleton<SourceScheduler>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SourceScheduler>());
 
@@ -50,6 +51,24 @@ app.MapGet("/api/v1/system.ready", async (NpgsqlDataSource db, CancellationToken
     await using var cmd = db.CreateCommand("select 1");
     await cmd.ExecuteScalarAsync(ct);
     return ApiResult.Ok(new { status = "ready" });
+});
+
+app.MapGet("/api/v1/auth.session", (HttpContext context, AdminAuthService auth) =>
+    ApiResult.Ok(new { authenticated = auth.IsAuthenticated(context), username = auth.IsAuthenticated(context) ? auth.Username : null }));
+
+app.MapPost("/api/v1/auth.login", (HttpContext context, AdminAuthService auth, AdminLoginRequest request) =>
+{
+    if (!auth.ValidateCredentials(request.Username, request.Password))
+        return ApiResult.Unauthorized("Invalid username or password.");
+    context.Response.Cookies.Append(AdminAuthService.CookieName, auth.CreateSession(), AdminAuthService.CookieOptions(context));
+    return ApiResult.Ok(new { authenticated = true, username = auth.Username });
+});
+
+app.MapPost("/api/v1/auth.logout", (HttpContext context, AdminAuthService auth) =>
+{
+    auth.Revoke(context);
+    context.Response.Cookies.Delete(AdminAuthService.CookieName, AdminAuthService.CookieOptions(context));
+    return ApiResult.Ok(new { authenticated = false });
 });
 
 app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken ct) =>
@@ -79,8 +98,9 @@ app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken 
 var systemStatusCache = new StatusCache();
 var systemStatusFastCache = new StatusCache();
 
-app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, bool? fast, CancellationToken ct) =>
+app.MapGet("/api/v1/system.status", async (HttpContext context, AdminAuthService auth, NpgsqlDataSource db, bool? fast, CancellationToken ct) =>
 {
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     if (fast == true)
         return ApiResult.Ok(await GetFastSystemStatusAsync(db, systemStatusFastCache, ct));
 
@@ -262,23 +282,133 @@ app.MapGet("/api/v1/system.status", async (NpgsqlDataSource db, bool? fast, Canc
     }
 });
 
-app.MapPost("/api/v1/nvd.processPending", async (NvdRawProcessor processor, ProcessPendingRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/nvd.processPending", async (HttpContext context, AdminAuthService auth, NvdRawProcessor processor, ProcessPendingRequest request, CancellationToken ct) =>
 {
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     var result = await processor.ProcessPendingAsync(request.Limit <= 0 ? 100 : request.Limit, ct);
     return ApiResult.Ok(result);
 });
 
-app.MapPost("/api/v1/raw.normalizePending", async (IRawNormalizationService processor, NormalizePendingRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/raw.normalizePending", async (HttpContext context, AdminAuthService auth, IRawNormalizationService processor, NormalizePendingRequest request, CancellationToken ct) =>
 {
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     var result = await processor.ProcessPendingAsync(request.LimitPerSource <= 0 ? 100 : request.LimitPerSource, ct);
     return ApiResult.Ok(result);
 });
 
-app.MapPost("/api/v1/raw.normalizeSource", async (IRawNormalizationService processor, NormalizeSourceRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/raw.normalizeSource", async (HttpContext context, AdminAuthService auth, IRawNormalizationService processor, NormalizeSourceRequest request, CancellationToken ct) =>
 {
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     var limit = request.Limit <= 0 ? 100 : request.Limit;
     var result = await processor.ProcessSourcePendingAsync(request.SourceCode, limit, ct);
     return ApiResult.Ok(result);
+});
+
+app.MapGet("/api/v1/admin.source.list", async (HttpContext context, AdminAuthService auth, NpgsqlDataSource db, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var rows = new List<object>();
+    await using var cmd = db.CreateCommand("""
+        select s.code, s.name, s.kind, s.enabled, s.plugin_name, s.schedule_cron,
+               s.config_json->>'runMode' as run_mode, s.checkpoint_json,
+               coalesce(r.raw_total, 0), lr.status, lr.started_at, lr.finished_at,
+               coalesce(lr.fetched_count, 0), coalesce(lr.parsed_count, 0), coalesce(lr.error_count, 0)
+        from sources s
+        left join lateral (
+          select count(*) as raw_total from source_raw_index raw where raw.source_id = s.id
+        ) r on true
+        left join lateral (
+          select status, started_at, finished_at, fetched_count, parsed_count, error_count
+          from source_sync_runs run where run.source_id = s.id order by started_at desc limit 1
+        ) lr on true
+        order by s.kind, s.code
+        """);
+    await using var reader = await cmd.ExecuteReaderAsync(ct);
+    while (await reader.ReadAsync(ct))
+    {
+        rows.Add(new
+        {
+            code = reader.GetString(0),
+            name = reader.GetString(1),
+            kind = reader.GetString(2),
+            enabled = reader.GetBoolean(3),
+            pluginName = reader.GetString(4),
+            scheduleCron = reader.IsDBNull(5) ? null : reader.GetString(5),
+            runMode = reader.IsDBNull(6) ? null : reader.GetString(6),
+            checkpoint = reader.GetString(7),
+            rawTotal = reader.GetInt64(8),
+            latestRun = reader.IsDBNull(9) ? null : new
+            {
+                status = reader.GetString(9),
+                startedAt = reader.GetFieldValue<DateTimeOffset>(10),
+                finishedAt = reader.IsDBNull(11) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(11),
+                fetchedCount = reader.GetInt32(12),
+                parsedCount = reader.GetInt32(13),
+                errorCount = reader.GetInt32(14)
+            }
+        });
+    }
+    return ApiResult.Ok(rows);
+});
+
+app.MapPost("/api/v1/admin.source.update", async (HttpContext context, AdminAuthService auth, NpgsqlDataSource db, AdminSourceUpdateRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (!IsValidSourceCode(request.SourceCode)) return ApiResult.Error("INVALID_SOURCE", "Invalid source code.");
+    var runMode = string.IsNullOrWhiteSpace(request.RunMode) ? null : request.RunMode.Trim().ToLowerInvariant();
+    if (runMode is not null and not "manual" and not "init") return ApiResult.Error("INVALID_RUN_MODE", "Run mode must be manual, init, or empty.");
+    await using var cmd = db.CreateCommand("""
+        update sources
+        set enabled = $2,
+            schedule_cron = nullif($3, ''),
+            config_json = case when $4::text is null then config_json - 'runMode' else jsonb_set(config_json, '{runMode}', to_jsonb($4::text), true) end,
+            updated_at = now()
+        where code = $1
+        """);
+    cmd.Parameters.AddWithValue(request.SourceCode);
+    cmd.Parameters.AddWithValue(request.Enabled);
+    cmd.Parameters.AddWithValue(request.ScheduleCron?.Trim() ?? "");
+    cmd.Parameters.AddWithValue((object?)runMode ?? DBNull.Value);
+    return await cmd.ExecuteNonQueryAsync(ct) == 0
+        ? ApiResult.NotFound("SOURCE_NOT_FOUND", request.SourceCode)
+        : ApiResult.Ok(new { sourceCode = request.SourceCode, request.Enabled, scheduleCron = request.ScheduleCron, runMode });
+});
+
+app.MapPost("/api/v1/admin.source.fetch", async (HttpContext context, AdminAuthService auth, SourceScheduler scheduler, AdminSourceActionRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (!IsValidSourceCode(request.SourceCode)) return ApiResult.Error("INVALID_SOURCE", "Invalid source code.");
+    await scheduler.RunSourceNowAsync(request.SourceCode, request.Force, ct);
+    return ApiResult.Ok(new { sourceCode = request.SourceCode, fetched = true, request.Force });
+});
+
+app.MapPost("/api/v1/admin.source.normalize", async (HttpContext context, AdminAuthService auth, IRawNormalizationService processor, AdminSourceActionRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var result = await processor.ProcessSourcePendingAsync(request.SourceCode, request.Limit <= 0 ? 100 : request.Limit, ct);
+    return ApiResult.Ok(result);
+});
+
+app.MapPost("/api/v1/admin.source.reprocess", async (HttpContext context, AdminAuthService auth, NpgsqlDataSource db, AdminSourceActionRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (!IsValidSourceCode(request.SourceCode)) return ApiResult.Error("INVALID_SOURCE", "Invalid source code.");
+    await using var cmd = db.CreateCommand("""
+        update source_raw_index raw
+        set normalize_status = 'pending', updated_at = now()
+        from sources s
+        where raw.source_id = s.id and s.code = $1
+        """);
+    cmd.Parameters.AddWithValue(request.SourceCode);
+    var rows = await cmd.ExecuteNonQueryAsync(ct);
+    return ApiResult.Ok(new { sourceCode = request.SourceCode, queued = rows });
+});
+
+app.MapPost("/api/v1/admin.scheduler.runDue", async (HttpContext context, AdminAuthService auth, SourceScheduler scheduler, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    await scheduler.RunDueSourcesAsync(ct);
+    return ApiResult.Ok(new { completed = true });
 });
 
 app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, VulnerabilitySearchRequest request, CancellationToken ct) =>
@@ -1025,6 +1155,10 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
 }
 
 static int ClampPageSize(int pageSize) => pageSize <= 0 ? 25 : Math.Min(pageSize, 200);
+
+static bool IsValidSourceCode(string sourceCode) =>
+    !string.IsNullOrWhiteSpace(sourceCode) &&
+    System.Text.RegularExpressions.Regex.IsMatch(sourceCode, "^[a-z0-9-]+$");
 
 static string NormalizeVulnerabilitySort(string? sort) =>
     (sort ?? "").Trim().ToLowerInvariant() switch

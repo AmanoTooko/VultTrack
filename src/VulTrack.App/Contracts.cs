@@ -16,6 +16,19 @@ public sealed record NormalizeSourceRequest(
     string SourceCode,
     int Limit = 100);
 
+public sealed record AdminLoginRequest(string Username, string Password);
+
+public sealed record AdminSourceUpdateRequest(
+    string SourceCode,
+    bool Enabled,
+    string? ScheduleCron = null,
+    string? RunMode = null);
+
+public sealed record AdminSourceActionRequest(
+    string SourceCode,
+    bool Force = false,
+    int Limit = 100);
+
 public sealed record ComponentVulnerabilitySearchRequest(
     string? ComponentName = null,
     string? Name = null,

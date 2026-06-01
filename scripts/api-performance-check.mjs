@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { performance } from 'node:perf_hooks';
+import { getAdminCookie } from './lib/admin-auth.mjs';
 
 const baseUrl = process.env.API_BASE_URL ?? 'http://127.0.0.1:5099';
 const includeMutating = process.env.INCLUDE_MUTATING === '1';
 const includeExactStatus = process.env.INCLUDE_EXACT_STATUS === '1';
+const adminCookie = await getAdminCookie(baseUrl);
 
 const cyclonedx = {
   bomFormat: 'CycloneDX',
@@ -69,11 +71,11 @@ async function timedRaw(name, request, validate = () => {}) {
   rows.push({ name, ok, status, durationMs, error });
 }
 
-const get = (path) => `${baseUrl}${path}`;
+const get = (path) => ({ url: `${baseUrl}${path}`, headers: { cookie: adminCookie } });
 const post = (path, body) => ({
   url: `${baseUrl}${path}`,
   method: 'POST',
-  headers: { 'content-type': 'application/json' },
+  headers: { 'content-type': 'application/json', cookie: adminCookie },
   body: typeof body === 'string' ? body : JSON.stringify(body)
 });
 

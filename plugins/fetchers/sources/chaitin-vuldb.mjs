@@ -3,6 +3,7 @@ import { fetchJson } from '../lib/http.mjs';
 import { checkpointReached, chinaIdentifiers, latestDate, limitedUrls, persistExternalAdvisory, severityLabel, splitProducts } from '../lib/china-advisory.mjs';
 
 export const sourceCode = 'chaitin-vuldb';
+export const runMode = 'manual';
 
 const BASE = 'https://stack.chaitin.com';
 

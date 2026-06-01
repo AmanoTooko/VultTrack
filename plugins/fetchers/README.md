@@ -96,6 +96,8 @@ GitHub 公开 API 不强制要求 token，但全量跑 `poc-in-github`、`tricke
 - `cnvd`：CNVD 会触发反爬挑战，默认禁用。只支持在许可范围内提供 `CNVD_COOKIE`，并可用 `CNVD_IDS=CNVD-2024-...` 定向同步；不要尝试自动绕过验证码。
 - `cert-360`：360CERT RSS 当前 TLS 和内容时效不稳定，默认禁用。如明确接受 TLS 风险，可设置 `CERT360_ALLOW_INSECURE_TLS=1` 后定向运行。
 
+默认只有 `cnnvd` 启用定时抓取，每 6 小时运行一次。其余中国境内来源全部是 `manual` 且默认禁用，只能通过管理界面或显式 `npm run fetch -- --source <code>` 运行。
+
 这些来源统一写入 `stg_external_advisories`，再由 `ExternalAdvisoryRawNormalizer` 合并。能解析出 CVE 时优先归并到 CVE；没有 CVE 时保留来源编号，例如 `CNNVD-*`、`CNVD-*`、`SSV-*`、`AVD-*` 或 `CT-*`。产品名称作为弱结构化事实保存，不会伪造 purl。
 
 奇安信 TI 的公开 advisory 页面目前是 SPA，没有发现可稳定复用的公开 API。接入前需要向奇安信申请正式 API 地址和凭据，再按其授权接口补 fetcher，不要依赖页面脚本里出现的内部地址。

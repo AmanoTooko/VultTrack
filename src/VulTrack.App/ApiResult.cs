@@ -22,4 +22,11 @@ public static class ApiResult
         error = new { code, message },
         requestId = Guid.NewGuid().ToString("N")[..8]
     }, statusCode: StatusCodes.Status400BadRequest);
+
+    public static IResult Unauthorized(string message = "Admin login required.") => Results.Json(new
+    {
+        ok = false,
+        error = new { code = "AUTH_REQUIRED", message },
+        requestId = Guid.NewGuid().ToString("N")[..8]
+    }, statusCode: StatusCodes.Status401Unauthorized);
 }

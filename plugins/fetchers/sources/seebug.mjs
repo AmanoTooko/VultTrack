@@ -3,6 +3,7 @@ import { fetchText } from '../lib/http.mjs';
 import { checkpointReached, chinaIdentifiers, decodeHtml, htmlText, htmlUrls, latestDate, limitedUrls, persistExternalAdvisory, severityLabel, splitProducts } from '../lib/china-advisory.mjs';
 
 export const sourceCode = 'seebug';
+export const runMode = 'manual';
 
 const BASE = 'https://www.seebug.org';
 

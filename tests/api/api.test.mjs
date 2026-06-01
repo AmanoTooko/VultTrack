@@ -2,6 +2,22 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 const baseUrl = process.env.API_BASE_URL ?? 'http://localhost:8080';
+const adminUsername = process.env.VULTRACK_ADMIN_USERNAME ?? 'admin';
+const adminPassword = process.env.VULTRACK_ADMIN_PASSWORD ?? 'admin';
+let adminCookie = '';
+
+async function login() {
+  if (adminCookie) return adminCookie;
+  const res = await fetch(`${baseUrl}/api/v1/auth.login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: adminUsername, password: adminPassword })
+  });
+  assert.equal(res.status, 200);
+  adminCookie = res.headers.get('set-cookie')?.split(';')[0] ?? '';
+  assert.match(adminCookie, /^vultrack_admin=/);
+  return adminCookie;
+}
 
 test('system.health returns ok envelope', async () => {
   const res = await fetch(`${baseUrl}/api/v1/system.health`);
@@ -32,14 +48,27 @@ test('vulnerability.search returns processed NVD records', async () => {
   assert.match(body.data.items[0].primaryIdentifier, /^CVE-/);
 });
 
-test('system.status returns pipeline counters', async () => {
+test('system.status requires an admin login', async () => {
   const res = await fetch(`${baseUrl}/api/v1/system.status`);
+  assert.equal(res.status, 401);
+});
+
+test('admin login unlocks system.status and fetcher controls', async () => {
+  const cookie = await login();
+  const res = await fetch(`${baseUrl}/api/v1/system.status`, { headers: { cookie } });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.equal(typeof body.data.vulnerabilities, 'number');
   assert.ok(Array.isArray(body.data.normalizeStatus));
   assert.ok(Array.isArray(body.data.pendingBySource));
+
+  const sourceRes = await fetch(`${baseUrl}/api/v1/admin.source.list`, { headers: { cookie } });
+  assert.equal(sourceRes.status, 200);
+  const sourceBody = await sourceRes.json();
+  assert.equal(sourceBody.ok, true);
+  assert.ok(sourceBody.data.some((source) => source.code === 'cnnvd' && source.enabled === true));
+  assert.ok(sourceBody.data.some((source) => source.code === 'seebug' && source.enabled === false && source.runMode === 'manual'));
 });
 
 test('vulnerability.detail returns multi-source projections', async () => {
