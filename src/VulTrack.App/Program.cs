@@ -418,6 +418,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     var pattern = $"%{rawQuery}%";
     var exact = string.IsNullOrWhiteSpace(rawQuery) ? "" : rawQuery;
     var normalizedExact = string.IsNullOrWhiteSpace(exact) ? "" : Identifier.Normalize(exact);
+    var exactIsCve = Identifier.TypeOf(normalizedExact) == "CVE";
     var page = Math.Max(1, request.Page);
     var pageSize = ClampPageSize(request.PageSize);
     var fetchLimit = pageSize + 1;
@@ -473,14 +474,16 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
                        v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
                 from vulnerabilities v
-                where exists (
+                where v.primary_identifier = $1
+                   or ($2 = false and exists (
                     select 1 from vulnerability_identifier_index i
                     where i.canonical_vulnerability_id = v.id and i.normalized_value = $1
-                )
-                order by {orderBy}
-                limit $2
+                   ))
+                order by case when v.primary_identifier = $1 then 0 else 1 end, {orderBy}
+                limit $3
                 """);
             fastCmd.Parameters.AddWithValue(normalizedExact);
+            fastCmd.Parameters.AddWithValue(exactIsCve);
             fastCmd.Parameters.AddWithValue(fetchLimit);
             await using var fastReader = await fastCmd.ExecuteReaderAsync(ct);
             var found = 0;
@@ -489,7 +492,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 rows.Add(MakeResult(fastReader));
                 found++;
             }
-            if (found > 0)
+            if (found > 0 || exactIsCve)
             {
                 var exactHasMore = rows.Count > pageSize;
                 if (exactHasMore) rows.RemoveAt(rows.Count - 1);
@@ -564,12 +567,18 @@ app.MapGet("/api/v1/vulnerability.getByIdentifier", async (NpgsqlDataSource db, 
     var normalized = Identifier.Normalize(identifier);
     await using var cmd = db.CreateCommand("""
         select v.id, v.primary_identifier, v.title, v.description, v.severity_label, v.max_cvss_score
-        from vulnerability_identifier_index i
-        join vulnerabilities v on v.id = i.canonical_vulnerability_id
-        where i.normalized_value = $1
+        from vulnerabilities v
+        where v.primary_identifier = $1
+           or ($2 = false and exists (
+                select 1
+                from vulnerability_identifier_index i
+                where i.canonical_vulnerability_id = v.id and i.normalized_value = $1
+           ))
+        order by case when v.primary_identifier = $1 then 0 else 1 end
         limit 1
         """);
     cmd.Parameters.AddWithValue(normalized);
+    cmd.Parameters.AddWithValue(Identifier.TypeOf(normalized) == "CVE");
     await using var reader = await cmd.ExecuteReaderAsync(ct);
     if (!await reader.ReadAsync(ct)) return ApiResult.NotFound("VULNERABILITY_NOT_FOUND", identifier);
     return ApiResult.Ok(new
@@ -1091,9 +1100,11 @@ static Dictionary<string, string> BuildSourceUrls(string primaryIdentifier, stri
 static async Task<List<object>> QueryRecordsGroupedAsync(NpgsqlDataSource db, Guid vulnId, CancellationToken ct)
 {
     await using var cmd = db.CreateCommand("""
-        select s.code, s.name, vr.source_record_id, left(vr.title, 200) as title, vr.updated_at
+        select s.code, s.name, vr.source_record_id, left(vr.title, 200) as title,
+               ri.source_published_at, ri.source_modified_at, ri.created_at, vr.updated_at
         from vulnerability_records vr
         join sources s on s.id = vr.source_id
+        join source_raw_index ri on ri.id = vr.raw_index_id
         where vr.vulnerability_id = $1
         order by s.code, vr.updated_at desc
         limit 100
@@ -1108,7 +1119,10 @@ static async Task<List<object>> QueryRecordsGroupedAsync(NpgsqlDataSource db, Gu
             name = r.GetString(1),
             recordId = r.GetString(2),
             title = r.IsDBNull(3) ? null : r.GetString(3),
-            updatedAt = r.GetFieldValue<DateTimeOffset>(4)
+            sourcePublishedAt = r.IsDBNull(4) ? (DateTimeOffset?)null : r.GetFieldValue<DateTimeOffset>(4),
+            sourceModifiedAt = r.IsDBNull(5) ? (DateTimeOffset?)null : r.GetFieldValue<DateTimeOffset>(5),
+            ingestedAt = r.GetFieldValue<DateTimeOffset>(6),
+            normalizedAt = r.GetFieldValue<DateTimeOffset>(7)
         });
     return rows;
 }

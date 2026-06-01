@@ -8,7 +8,7 @@ public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
     {
         foreach (var fact in facts)
         {
-            var displayName = fact.PackageName ?? fact.Purl;
+            var displayName = fact.PackageName ?? fact.Purl ?? fact.Cpe23Uri;
             if (string.IsNullOrWhiteSpace(displayName)) continue;
 
             await using var cmd = new NpgsqlCommand("""
@@ -18,14 +18,15 @@ public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
                       and coalesce(ecosystem, '') = coalesce($2, '')
                       and coalesce(display_name, '') = coalesce($4, '')
                       and coalesce(primary_purl, '') = coalesce($5, '')
-                      and coalesce(normalized_range, '') = coalesce($6, '')
-                      and coalesce(range_type, '') = coalesce($7, '')
+                      and coalesce(primary_cpe23_uri, '') = coalesce($6, '')
+                      and coalesce(normalized_range, '') = coalesce($7, '')
+                      and coalesce(range_type, '') = coalesce($8, '')
                     limit 1
                 ), inserted as (
                     insert into vulnerability_affected_components
                       (vulnerability_id, ecosystem, package_name, display_name, primary_purl,
-                       normalized_range, range_type, evidence_count, evidence_summary, selected_by_rule)
-                    select $1,$2,$3,$4,$5,$6,$7,1,'source facts','default-source-fact-hook'
+                       primary_cpe23_uri, normalized_range, range_type, evidence_count, evidence_summary, selected_by_rule)
+                    select $1,$2,$3,$4,$5,$6,$7,$8,1,'source facts','default-source-fact-hook'
                     where not exists (select 1 from existing)
                     returning id
                 )
@@ -38,6 +39,7 @@ public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
             cmd.Parameters.AddWithValue((object?)fact.PackageName ?? DBNull.Value);
             cmd.Parameters.AddWithValue(displayName);
             cmd.Parameters.AddWithValue((object?)fact.Purl ?? DBNull.Value);
+            cmd.Parameters.AddWithValue((object?)fact.Cpe23Uri ?? DBNull.Value);
             cmd.Parameters.AddWithValue((object?)fact.VersionRange ?? DBNull.Value);
             cmd.Parameters.AddWithValue((object?)fact.RangeType ?? DBNull.Value);
             await cmd.ExecuteNonQueryAsync(ct);

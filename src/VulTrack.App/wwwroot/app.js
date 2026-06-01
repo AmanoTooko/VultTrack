@@ -1046,7 +1046,9 @@ function renderExploitItem(item) {
 }
 
 function renderMitreData(v, records, sourceUrls) {
-  const cveListRecords = records.filter(r => ['cve-list-v5', 'nvd-cve', 'nvd-cve-init'].includes(String(r.code || '').toLowerCase()));
+  const cveListRecords = records.filter(r =>
+    ['cve-list-v5', 'nvd-cve', 'nvd-cve-init'].includes(String(r.code || '').toLowerCase()) &&
+    String(r.recordId || '').toUpperCase() === String(v.primaryIdentifier || '').toUpperCase());
   const aliases = [...new Set([...(v.identifiers || []), ...(v.aliases || [])].filter(Boolean))];
   return `
     <section class="detail-section" id="mitre-data">
@@ -1056,9 +1058,9 @@ function renderMitreData(v, records, sourceUrls) {
       </div>
       <div class="kv-grid">
         <div><span>Status</span><strong>${escapeHtml(v.status || 'unknown')}</strong></div>
-        <div><span>Published</span><strong>${date(v.publishedAt)}</strong></div>
-        <div><span>Modified</span><strong>${date(v.modifiedAt)}</strong></div>
-        <div><span>Updated</span><strong>${date(v.updatedAt)}</strong></div>
+        <div><span>Source published</span><strong>${date(v.publishedAt)}</strong></div>
+        <div><span>Source modified</span><strong>${date(v.modifiedAt)}</strong></div>
+        <div><span>Local normalized</span><strong>${date(v.updatedAt)}</strong></div>
       </div>
       ${aliases.length ? `<div class="chips compact-chips">${aliases.slice(0, 14).map(a => `<span class="badge">${escapeHtml(a)}</span>`).join('')}</div>` : ''}
       ${Object.keys(sourceUrls).length ? `
@@ -1161,10 +1163,11 @@ function renderEnrichmentPanel(v, severities) {
 
 function renderTrackingPanel(v, records, refs) {
   const dates = [
-    ['Published', v.publishedAt],
-    ['Modified', v.modifiedAt],
-    ['Normalized', v.updatedAt],
-    ['Latest source update', records.map(r => r.updatedAt).filter(Boolean).sort().at(-1)]
+    ['Source published', v.publishedAt],
+    ['Source modified', v.modifiedAt],
+    ['Local normalized', v.updatedAt],
+    ['Latest source modified', records.map(r => r.sourceModifiedAt).filter(Boolean).sort().at(-1)],
+    ['Latest ingest', records.map(r => r.ingestedAt).filter(Boolean).sort().at(-1)]
   ];
   return `
     <section class="detail-section rail-section" id="tracking">
@@ -1350,7 +1353,7 @@ function renderRecordsBySource(records) {
           <div class="info-card">
             <div class="info-card-row"><strong>${escapeHtml(r.recordId || '-')}</strong></div>
             <p style="font-size:12px;color:var(--muted);margin:4px 0">${escapeHtml(r.title || '')}</p>
-            <small class="muted">${date(r.updatedAt)}</small>
+            <small class="muted">source ${date(r.sourceModifiedAt)} · ingested ${date(r.ingestedAt)} · normalized ${date(r.normalizedAt)}</small>
           </div>
         `).join('')}
       </div>

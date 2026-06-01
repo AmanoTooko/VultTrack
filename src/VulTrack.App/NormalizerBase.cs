@@ -54,7 +54,7 @@ public abstract class NormalizerBase(
         }
 
         var dedupedFacts = facts
-            .GroupBy(f => $"{f.FactType}|{f.PackageName ?? ""}|{f.VersionRange ?? ""}|{f.RangeType ?? ""}|{f.Purl ?? ""}|{f.Ecosystem ?? ""}")
+            .GroupBy(f => $"{f.FactType}|{f.PackageName ?? ""}|{f.VersionRange ?? ""}|{f.RangeType ?? ""}|{f.Purl ?? ""}|{f.Cpe23Uri ?? ""}|{f.Ecosystem ?? ""}")
             .Select(g => g.First())
             .ToList();
 
@@ -64,9 +64,9 @@ public abstract class NormalizerBase(
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_affected_facts
                   (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
-                   package_name, normalized_package_name, purl, purl_without_version, version_range_raw,
-                   range_type, vulnerable, source_specific)
-                values ($1,$2,$3,$4,$5,$6,$7,lower($7),$8,$9,$10,$11,true,$12::jsonb)
+                   package_name, normalized_package_name, purl, purl_without_version, cpe23_uri,
+                   version_range_raw, range_type, vulnerable, source_specific)
+                values ($1,$2,$3,$4,$5,$6,$7,lower($7),$8,$9,$10,$11,$12,true,$13::jsonb)
                 """, connection);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
@@ -77,6 +77,7 @@ public abstract class NormalizerBase(
             cmd.Parameters.AddWithValue((object?)fact.PackageName ?? DBNull.Value);
             cmd.Parameters.AddWithValue((object?)fact.Purl ?? DBNull.Value);
             cmd.Parameters.AddWithValue((object?)PurlWithoutVersion(fact.Purl) ?? DBNull.Value);
+            cmd.Parameters.AddWithValue((object?)fact.Cpe23Uri ?? DBNull.Value);
             cmd.Parameters.AddWithValue((object?)fact.VersionRange ?? DBNull.Value);
             cmd.Parameters.AddWithValue((object?)fact.RangeType ?? DBNull.Value);
             cmd.Parameters.AddWithValue(fact.SourceSpecificJson);
@@ -91,7 +92,7 @@ public abstract class NormalizerBase(
                 var cmdParams = new List<object>();
                 foreach (var fact in batch)
                 {
-                    values.Add($"(${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},lower(${paramIdx - 1}),${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},true,${paramIdx++}::jsonb)");
+                    values.Add($"(${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},lower(${paramIdx - 1}),${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},${paramIdx++},true,${paramIdx++}::jsonb)");
                     cmdParams.Add(vulnerabilityId);
                     cmdParams.Add(recordId);
                     cmdParams.Add(sourceId);
@@ -101,13 +102,14 @@ public abstract class NormalizerBase(
                     cmdParams.Add((object?)fact.PackageName ?? DBNull.Value);
                     cmdParams.Add((object?)fact.Purl ?? DBNull.Value);
                     cmdParams.Add((object?)PurlWithoutVersion(fact.Purl) ?? DBNull.Value);
+                    cmdParams.Add((object?)fact.Cpe23Uri ?? DBNull.Value);
                     cmdParams.Add((object?)fact.VersionRange ?? DBNull.Value);
                     cmdParams.Add((object?)fact.RangeType ?? DBNull.Value);
                     cmdParams.Add(fact.SourceSpecificJson);
                 }
 
                 await using var batchCmd = new NpgsqlCommand(
-                    $"insert into vulnerability_affected_facts (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem, package_name, normalized_package_name, purl, purl_without_version, version_range_raw, range_type, vulnerable, source_specific) values {string.Join(",", values)}",
+                    $"insert into vulnerability_affected_facts (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem, package_name, normalized_package_name, purl, purl_without_version, cpe23_uri, version_range_raw, range_type, vulnerable, source_specific) values {string.Join(",", values)}",
                     connection);
                 for (var i = 0; i < cmdParams.Count; i++) batchCmd.Parameters.AddWithValue(cmdParams[i]);
                 await batchCmd.ExecuteNonQueryAsync(ct);
