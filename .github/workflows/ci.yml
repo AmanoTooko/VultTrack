@@ -76,6 +76,9 @@ jobs:
     runs-on: ubuntu-24.04
     needs: docker
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    concurrency:
+      group: vultrack-production-deploy
+      cancel-in-progress: false
     steps:
       - name: Check deploy secrets
         id: deploy_secrets
