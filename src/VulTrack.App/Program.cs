@@ -1138,14 +1138,95 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
         "create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier)",
         "create index if not exists ix_raw_source_status_cover on source_raw_index(source_id) include(parse_status, normalize_status, updated_at)",
-        "alter table if exists sbom_components alter column purl drop not null",
-        "alter table if exists sbom_components add column if not exists vendor text",
-        "alter table if exists sbom_components add column if not exists product text",
-        "alter table if exists sbom_components add column if not exists cpe23_uri text",
-        "alter table if exists sbom_components add column if not exists source_package_name text",
-        "alter table if exists sbom_components add column if not exists source_package_version text",
-        "alter table if exists sbom_vulnerabilities add column if not exists match_basis text",
-        "alter table if exists sbom_vulnerabilities add column if not exists matched_version text",
+        """
+        do $$
+        begin
+          if to_regclass('public.sbom_components') is not null then
+            if exists (
+              select 1
+              from pg_attribute
+              where attrelid = to_regclass('public.sbom_components')
+                and attname = 'purl'
+                and attnotnull
+                and not attisdropped
+            ) then
+              alter table sbom_components alter column purl drop not null;
+            end if;
+
+            if not exists (
+              select 1
+              from pg_attribute
+              where attrelid = to_regclass('public.sbom_components')
+                and attname = 'vendor'
+                and not attisdropped
+            ) then
+              alter table sbom_components add column vendor text;
+            end if;
+
+            if not exists (
+              select 1
+              from pg_attribute
+              where attrelid = to_regclass('public.sbom_components')
+                and attname = 'product'
+                and not attisdropped
+            ) then
+              alter table sbom_components add column product text;
+            end if;
+
+            if not exists (
+              select 1
+              from pg_attribute
+              where attrelid = to_regclass('public.sbom_components')
+                and attname = 'cpe23_uri'
+                and not attisdropped
+            ) then
+              alter table sbom_components add column cpe23_uri text;
+            end if;
+
+            if not exists (
+              select 1
+              from pg_attribute
+              where attrelid = to_regclass('public.sbom_components')
+                and attname = 'source_package_name'
+                and not attisdropped
+            ) then
+              alter table sbom_components add column source_package_name text;
+            end if;
+
+            if not exists (
+              select 1
+              from pg_attribute
+              where attrelid = to_regclass('public.sbom_components')
+                and attname = 'source_package_version'
+                and not attisdropped
+            ) then
+              alter table sbom_components add column source_package_version text;
+            end if;
+          end if;
+
+          if to_regclass('public.sbom_vulnerabilities') is not null then
+            if not exists (
+              select 1
+              from pg_attribute
+              where attrelid = to_regclass('public.sbom_vulnerabilities')
+                and attname = 'match_basis'
+                and not attisdropped
+            ) then
+              alter table sbom_vulnerabilities add column match_basis text;
+            end if;
+
+            if not exists (
+              select 1
+              from pg_attribute
+              where attrelid = to_regclass('public.sbom_vulnerabilities')
+                and attname = 'matched_version'
+                and not attisdropped
+            ) then
+              alter table sbom_vulnerabilities add column matched_version text;
+            end if;
+          end if;
+        end $$;
+        """,
         "create index if not exists ix_sbom_components_purl on sbom_components(purl) where purl is not null",
         "create index if not exists ix_sbom_components_cpe on sbom_components(cpe23_uri) where cpe23_uri is not null",
         "create index if not exists ix_affected_components_cpe_prefix on vulnerability_affected_components(primary_cpe23_uri text_pattern_ops, vulnerability_id) where primary_cpe23_uri is not null",
