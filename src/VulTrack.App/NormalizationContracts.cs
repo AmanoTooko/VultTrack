@@ -53,7 +53,8 @@ public sealed record AffectedFactDraft(
     string? Purl,
     string? VersionRange,
     string? RangeType,
-    string SourceSpecificJson);
+    string SourceSpecificJson,
+    string? Cpe23Uri = null);
 
 public sealed record DescriptionDraft(
     string? Lang,

@@ -50,6 +50,7 @@ public sealed class NvdRawProcessor(
         }
 
         var succeededRawIndexIds = new List<Guid>();
+        var affectedVulnerabilityIds = new HashSet<Guid>();
         await using var connection = await db.OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
         foreach (var record in records)
@@ -66,7 +67,7 @@ public sealed class NvdRawProcessor(
                 await UpsertWeaknessesAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
                 await UpsertReferencesAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
                 var affectedFacts = await UpsertAffectedFactsAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
-                var hookVulnIds = affectedFacts.Count > 0 ? new List<Guid> { vulnerabilityId } : new List<Guid>();
+                if (affectedFacts.Count > 0) affectedVulnerabilityIds.Add(vulnerabilityId);
                 foreach (var hook in affectedHooks)
                 {
                     await hook.OnAffectedFactsAsync(connection, vulnerabilityId, vulnerabilityRecordId, affectedFacts, ct);
@@ -83,6 +84,10 @@ public sealed class NvdRawProcessor(
             }
         }
 
+        foreach (var hook in affectedHooks)
+        {
+            await hook.FlushProjectionsAsync(connection, affectedVulnerabilityIds.ToList(), ct);
+        }
         await MarkNormalizedAsync(connection, succeededRawIndexIds, ct);
         await transaction.CommitAsync(ct);
         return new ProcessPendingResult(processed, failed);
@@ -271,7 +276,7 @@ public sealed class NvdRawProcessor(
             cmd.Parameters.AddWithValue(cpeMatch?["vulnerable"]?.GetValue<bool>() ?? true);
             cmd.Parameters.AddWithValue(cpeMatch?.ToJsonString() ?? "{}");
             await cmd.ExecuteNonQueryAsync(ct);
-            facts.Add(new AffectedFactDraft("cpe", "cpe", product, null, criteria, rangeType, cpeMatch?.ToJsonString() ?? "{}"));
+            facts.Add(new AffectedFactDraft("cpe", "cpe", product, null, versionRange, rangeType, cpeMatch?.ToJsonString() ?? "{}", criteria));
         }
 
         return facts;
