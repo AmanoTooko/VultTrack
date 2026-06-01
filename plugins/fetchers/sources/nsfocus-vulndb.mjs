@@ -3,6 +3,7 @@ import { fetchText } from '../lib/http.mjs';
 import { checkpointReached, chinaIdentifiers, htmlText, htmlUrls, latestDate, limitedUrls, persistExternalAdvisory, splitProducts } from '../lib/china-advisory.mjs';
 
 export const sourceCode = 'nsfocus-vulndb';
+export const runMode = 'manual';
 
 const BASE = 'https://www.nsfocus.net';
 

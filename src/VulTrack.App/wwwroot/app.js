@@ -5,7 +5,9 @@ const state = {
   page: 1,
   pageSize: Number(localStorage.getItem('vultrack.pageSize') || 25),
   sort: localStorage.getItem('vultrack.sort') || 'modifiedDesc',
-  hasMore: false
+  hasMore: false,
+  authenticated: false,
+  username: null
 };
 
 const el = {
@@ -39,7 +41,14 @@ const el = {
   pager: document.querySelector('#pager'),
   pageLabel: document.querySelector('#pageLabel'),
   prevPageButton: document.querySelector('#prevPageButton'),
-  nextPageButton: document.querySelector('#nextPageButton')
+  nextPageButton: document.querySelector('#nextPageButton'),
+  authButton: document.querySelector('#authButton'),
+  loginDialog: document.querySelector('#loginDialog'),
+  loginForm: document.querySelector('#loginForm'),
+  loginUsername: document.querySelector('#loginUsername'),
+  loginPassword: document.querySelector('#loginPassword'),
+  loginError: document.querySelector('#loginError'),
+  loginCancelButton: document.querySelector('#loginCancelButton')
 };
 
 if (el.limitSelect) el.limitSelect.value = String(state.pageSize);
@@ -67,6 +76,42 @@ el.refreshButton.addEventListener('click', () => {
 el.statusButton?.addEventListener('click', () => {
   const tab = el.tabs.find((item) => item.dataset.mode === 'status');
   if (tab) activateMode(tab);
+});
+
+el.authButton?.addEventListener('click', async () => {
+  if (state.authenticated) {
+    await api('/api/v1/auth.logout', { method: 'POST' });
+    state.authenticated = false;
+    state.username = null;
+    updateAuthUi();
+    activateMode(el.tabs.find((item) => item.dataset.mode === 'vulnerability'));
+    return;
+  }
+  openLogin();
+});
+
+el.loginCancelButton?.addEventListener('click', () => el.loginDialog?.close());
+
+el.loginForm?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  try {
+    const data = await api('/api/v1/auth.login', {
+      method: 'POST',
+      body: JSON.stringify({ username: el.loginUsername.value, password: el.loginPassword.value })
+    });
+    state.authenticated = Boolean(data.authenticated);
+    state.username = data.username;
+    el.loginError.hidden = true;
+    el.loginPassword.value = '';
+    el.loginDialog.close();
+    updateAuthUi();
+    if (state.mode === 'status') loadStatusPage();
+    if (state.mode === 'admin') loadAdminPage();
+    else loadStatus();
+  } catch (error) {
+    el.loginError.textContent = error.message;
+    el.loginError.hidden = false;
+  }
 });
 
 el.tabs.forEach((tab) => {
@@ -167,9 +212,53 @@ async function api(path, options = {}) {
   });
   const body = await res.json();
   if (!res.ok || body.ok === false) {
+    if (res.status === 401) {
+      state.authenticated = false;
+      state.username = null;
+      updateAuthUi();
+    }
     throw new Error(body.error?.message ?? `Request failed: ${res.status}`);
   }
   return body.data;
+}
+
+async function loadAuthSession() {
+  try {
+    const data = await api('/api/v1/auth.session');
+    state.authenticated = Boolean(data.authenticated);
+    state.username = data.username;
+  } catch {
+    state.authenticated = false;
+    state.username = null;
+  }
+  updateAuthUi();
+}
+
+function updateAuthUi() {
+  if (!el.authButton) return;
+  el.authButton.textContent = state.authenticated ? `Logout ${state.username || ''}`.trim() : 'Login';
+  el.authButton.classList.toggle('is-active', state.authenticated);
+}
+
+function openLogin() {
+  if (!el.loginDialog) return;
+  el.loginError.hidden = true;
+  el.loginDialog.showModal();
+  setTimeout(() => el.loginUsername?.focus(), 0);
+}
+
+function renderAuthRequired(title = 'Login required') {
+  return `
+    <div class="empty-state auth-required">
+      <h2>${escapeHtml(title)}</h2>
+      <p>Administrator login is required for pipeline status and fetcher controls.</p>
+      <button class="primary-button" type="button" data-open-login>Login</button>
+    </div>
+  `;
+}
+
+function bindLoginPrompt() {
+  el.detailPane.querySelector('[data-open-login]')?.addEventListener('click', openLogin);
 }
 
 async function loadStatus() {
@@ -192,23 +281,25 @@ async function loadStatus() {
 }
 
 function activateMode(tab) {
+  if (!tab) return;
   state.mode = tab.dataset.mode;
   document.body.dataset.mode = state.mode;
   state.page = 1;
   state.hasMore = false;
   el.tabs.forEach((item) => item.classList.toggle('is-active', item === tab));
   el.componentFields.hidden = state.mode !== 'component';
-  el.searchForm.hidden = state.mode === 'sbom' || state.mode === 'status';
+  el.searchForm.hidden = state.mode === 'sbom' || state.mode === 'status' || state.mode === 'admin';
   el.queryLabel.textContent = state.mode === 'component' ? 'Component name, vendor, or purl' : 'Identifier or keyword';
   el.queryInput.placeholder = state.mode === 'component' ? 'pkg:maven/org.apache.logging.log4j/log4j-core' : 'CVE-2021-44228';
   if (el.sortSelect) el.sortSelect.disabled = state.mode !== 'vulnerability';
-  if (el.pager) el.pager.hidden = state.mode === 'sbom' || state.mode === 'status';
+  if (el.pager) el.pager.hidden = state.mode === 'sbom' || state.mode === 'status' || state.mode === 'admin';
   if (el.syntaxHint) el.syntaxHint.innerHTML = syntaxHintHtml(state.mode);
   if (el.resultsTitle) el.resultsTitle.textContent = modeTitle(state.mode);
   if (el.resultsMeta) el.resultsMeta.textContent = modeDescription(state.mode);
   updatePager();
   if (state.mode === 'sbom') loadSbomList();
   else if (state.mode === 'status') loadStatusPage();
+  else if (state.mode === 'admin') loadAdminPage();
   else runSearch();
 }
 
@@ -237,6 +328,12 @@ function syntaxHintHtml(mode) {
       ['Exact', 'Exact refresh'],
       ['Queues', 'Normalizer and fetch status'],
       ['Sources', 'Schedule and latest run']
+    ],
+    admin: [
+      ['Sources', 'Enable or disable'],
+      ['Fetch', 'Run one source'],
+      ['Normalize', 'Process pending rows'],
+      ['Reprocess', 'Queue stored raw rows']
     ]
   }[mode] || [];
   return items.map(([label, value]) => `<span>${escapeHtml(label)} <code>${escapeHtml(value)}</code></span>`).join('');
@@ -247,7 +344,8 @@ function modeTitle(mode) {
     vulnerability: 'Vulnerabilities',
     component: 'Components',
     sbom: 'SBOM uploads',
-    status: 'Pipeline status'
+    status: 'Pipeline status',
+    admin: 'Fetcher administration'
   }[mode] || 'Vulnerabilities';
 }
 
@@ -256,7 +354,8 @@ function modeDescription(mode) {
     vulnerability: 'Search CVE identifiers, affected packages, titles, and source aliases.',
     component: 'Search package names, purl coordinates, vendor hints, ecosystems, and versions.',
     sbom: 'Upload, match, inspect, and export CycloneDX SBOM findings with PURL and CPE evidence.',
-    status: 'Fast source snapshot with optional exact counts for raw-row queues.'
+    status: 'Fast source snapshot with optional exact counts for raw-row queues.',
+    admin: 'Control fetcher schedules, run manual scans, normalize staged records, and queue stored raw rows again.'
   }[mode] || '';
 }
 
@@ -292,6 +391,11 @@ async function loadStatusPage() {
   if (el.resultsMeta) el.resultsMeta.textContent = 'Fast source snapshot. Use exact refresh when you need full raw-row counts.';
   el.resultList.innerHTML = '<div class="muted result-item">Pipeline sources</div>';
   showDetailPane();
+  if (!state.authenticated) {
+    el.detailPane.innerHTML = renderAuthRequired('Pipeline status is private');
+    bindLoginPrompt();
+    return;
+  }
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading status</h2></div>';
   try {
     const data = await api('/api/v1/system.status?fast=true');
@@ -300,6 +404,135 @@ async function loadStatusPage() {
     renderStatusSourceList(data);
   } catch (error) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Status unavailable</h2><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+async function loadAdminPage() {
+  if (el.resultsMeta) el.resultsMeta.textContent = modeDescription('admin');
+  el.resultList.innerHTML = '<div class="muted result-item">Fetcher controls</div>';
+  showDetailPane();
+  if (!state.authenticated) {
+    el.detailPane.innerHTML = renderAuthRequired('Fetcher administration is private');
+    bindLoginPrompt();
+    return;
+  }
+  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading fetchers</h2></div>';
+  try {
+    const sources = await api('/api/v1/admin.source.list');
+    renderAdminPage(sources);
+  } catch (error) {
+    el.detailPane.innerHTML = `<div class="empty-state"><h2>Admin unavailable</h2><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+function renderAdminPage(sources) {
+  const domestic = new Set(['cnnvd', 'cnvd', 'seebug', 'aliyun-avd', 'nsfocus-vulndb', 'chaitin-vuldb', 'cert-360']);
+  const sorted = [...sources].sort((a, b) => Number(domestic.has(b.code)) - Number(domestic.has(a.code)) || String(a.code).localeCompare(String(b.code)));
+  el.detailPane.innerHTML = `
+    <article class="status-page">
+      <header class="status-hero admin-hero">
+        <div>
+          <span class="eyebrow">Administration</span>
+          <h2>Fetcher controls</h2>
+          <p class="summary">CNNVD runs on schedule. Other domestic intelligence sources stay manual until explicitly enabled.</p>
+        </div>
+        <div class="admin-global-actions">
+          <button class="tab" type="button" data-admin-run-due>Run due scan</button>
+          <button class="tab" type="button" data-admin-normalize-all>Normalize pending</button>
+        </div>
+      </header>
+      <section class="detail-section">
+        <div class="section-title-row">
+          <h3 class="section-h">Sources</h3>
+          <span class="badge">${fmt(sorted.length)}</span>
+        </div>
+        <div class="admin-source-list">
+          ${sorted.map((source) => renderAdminSource(source, domestic.has(source.code))).join('')}
+        </div>
+      </section>
+    </article>
+  `;
+  bindAdminActions();
+}
+
+function renderAdminSource(source, domestic) {
+  const run = source.latestRun;
+  return `
+    <div class="admin-source-row" data-admin-source="${escapeAttr(source.code)}">
+      <div class="admin-source-main">
+        <div>
+          <strong>${escapeHtml(source.code)}</strong>
+          <small>${escapeHtml(source.name || '')}</small>
+        </div>
+        <div class="chips">
+          ${domestic ? '<span class="badge">CN intel</span>' : ''}
+          <span class="badge ${source.enabled ? 'low' : 'none'}">${source.enabled ? 'enabled' : 'disabled'}</span>
+          <span class="badge">${escapeHtml(source.kind)}</span>
+          <span class="badge">${fmt(source.rawTotal)} raw</span>
+          <span class="badge">${escapeHtml(run?.status || 'idle')}</span>
+        </div>
+      </div>
+      <div class="admin-config-grid">
+        <label><span>Enabled</span><input type="checkbox" data-source-enabled ${source.enabled ? 'checked' : ''}></label>
+        <label><span>Run mode</span>
+          <select data-source-run-mode>
+            <option value="" ${!source.runMode ? 'selected' : ''}>scheduled</option>
+            <option value="manual" ${source.runMode === 'manual' ? 'selected' : ''}>manual</option>
+            <option value="init" ${source.runMode === 'init' ? 'selected' : ''}>init</option>
+          </select>
+        </label>
+        <label><span>Schedule</span><input data-source-schedule value="${escapeAttr(source.scheduleCron || '')}" placeholder="0 */6 * * *"></label>
+        <button class="tab" type="button" data-admin-save>Save</button>
+        <button class="tab" type="button" data-admin-fetch>Fetch</button>
+        <button class="tab" type="button" data-admin-normalize>Normalize</button>
+        <button class="tab risk-text" type="button" data-admin-reprocess>Reprocess</button>
+      </div>
+      <small class="admin-source-feedback">${run ? `Latest ${escapeHtml(run.status)} · ${fmt(run.fetchedCount)} fetched · ${dateTime(run.finishedAt || run.startedAt)}` : 'No completed fetch run'}</small>
+    </div>
+  `;
+}
+
+function bindAdminActions() {
+  el.detailPane.querySelector('[data-admin-run-due]')?.addEventListener('click', (event) =>
+    runAdminAction(event.currentTarget, '/api/v1/admin.scheduler.runDue', {}, 'Due scan completed'));
+  el.detailPane.querySelector('[data-admin-normalize-all]')?.addEventListener('click', (event) =>
+    runAdminAction(event.currentTarget, '/api/v1/raw.normalizePending', { limitPerSource: 100 }, 'Pending rows normalized'));
+  el.detailPane.querySelectorAll('[data-admin-source]').forEach((row) => {
+    const sourceCode = row.dataset.adminSource;
+    row.querySelector('[data-admin-save]')?.addEventListener('click', (event) => runAdminAction(event.currentTarget, '/api/v1/admin.source.update', {
+      sourceCode,
+      enabled: row.querySelector('[data-source-enabled]').checked,
+      runMode: row.querySelector('[data-source-run-mode]').value || null,
+      scheduleCron: row.querySelector('[data-source-schedule]').value || null
+    }, 'Source settings saved', row));
+    row.querySelector('[data-admin-fetch]')?.addEventListener('click', (event) =>
+      runAdminAction(event.currentTarget, '/api/v1/admin.source.fetch', { sourceCode }, 'Fetch completed', row));
+    row.querySelector('[data-admin-normalize]')?.addEventListener('click', (event) =>
+      runAdminAction(event.currentTarget, '/api/v1/admin.source.normalize', { sourceCode, limit: 100 }, 'Normalize completed', row));
+    row.querySelector('[data-admin-reprocess]')?.addEventListener('click', (event) => {
+      if (confirm(`Queue all stored raw rows for ${sourceCode} again?`))
+        runAdminAction(event.currentTarget, '/api/v1/admin.source.reprocess', { sourceCode }, 'Stored rows queued', row);
+    });
+  });
+}
+
+async function runAdminAction(button, path, body, successMessage, row = null) {
+  const original = button.textContent;
+  const feedback = row?.querySelector('.admin-source-feedback');
+  button.disabled = true;
+  button.textContent = 'Running';
+  try {
+    const data = await api(path, { method: 'POST', body: JSON.stringify(body) });
+    if (feedback) feedback.textContent = successMessage;
+    else alert(successMessage);
+    if (path !== '/api/v1/admin.source.reprocess') setTimeout(loadAdminPage, 250);
+    return data;
+  } catch (error) {
+    if (feedback) feedback.textContent = error.message;
+    else alert(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
   }
 }
 
@@ -1338,10 +1571,14 @@ function escapeAttr(value) {
   return escapeHtml(value).replaceAll('`', '&#96;');
 }
 
-loadStatus();
-// Initial load: show latest 10
-el.queryInput.value = '';
-setTimeout(() => runSearch(), 100);
+async function bootstrap() {
+  await loadAuthSession();
+  loadStatus();
+  el.queryInput.value = '';
+  setTimeout(() => runSearch(), 100);
+}
+
+bootstrap();
 
 // ===== SBOM Management =====
 

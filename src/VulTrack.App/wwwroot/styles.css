@@ -278,6 +278,53 @@ h1 {
   background: var(--accent-soft);
 }
 
+.risk-text {
+  color: var(--risk);
+}
+
+.auth-dialog {
+  width: min(92vw, 420px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 0;
+  box-shadow: var(--shadow);
+}
+
+.auth-dialog::backdrop {
+  background: rgba(24, 33, 50, 0.34);
+}
+
+.auth-form {
+  display: grid;
+  gap: 16px;
+  padding: 22px;
+  background: var(--panel);
+}
+
+.auth-form h2 {
+  margin-top: 6px;
+  font-size: 22px;
+}
+
+.dialog-actions,
+.admin-global-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.form-error {
+  color: var(--risk);
+  font-size: 13px;
+}
+
+.auth-required {
+  display: grid;
+  justify-items: start;
+  gap: 10px;
+}
+
 .source-tabs {
   display: flex;
   flex-wrap: wrap;
@@ -1420,6 +1467,56 @@ a.result-item {
   width: fit-content;
 }
 
+.admin-hero {
+  align-items: center;
+}
+
+.admin-source-list {
+  display: grid;
+  gap: 10px;
+}
+
+.admin-source-row {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.admin-source-main {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.admin-source-main > div:first-child,
+.admin-source-feedback {
+  display: grid;
+  gap: 4px;
+}
+
+.admin-source-main small,
+.admin-source-feedback {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.admin-config-grid {
+  display: grid;
+  grid-template-columns: 72px minmax(110px, 0.5fr) minmax(160px, 1fr) repeat(4, auto);
+  align-items: end;
+  gap: 8px;
+}
+
+.admin-config-grid input[type="checkbox"] {
+  width: 20px;
+  min-height: 20px;
+  accent-color: var(--accent);
+}
+
 .detail-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(300px, 0.42fr);
@@ -1622,6 +1719,10 @@ a {
   .source-status-row {
     min-width: 960px;
   }
+
+  .admin-config-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 900px) {
@@ -1706,6 +1807,10 @@ a {
   .affected-row,
   .exploit-item {
     grid-template-columns: 1fr;
+  }
+
+  .admin-config-grid {
+    grid-template-columns: 1fr 1fr;
   }
 
   .detail-nav a {

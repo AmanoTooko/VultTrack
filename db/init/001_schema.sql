@@ -838,10 +838,10 @@ values
   ('trickest-cve', 'Trickest CVE PoC Index', 'exploit', 'https://github.com/trickest/cve', 'exploit-intel', '0 */12 * * *'),
   ('cnnvd', 'CNNVD 国家信息安全漏洞库', 'vulnerability', 'https://www.cnnvd.org.cn/home/loophole', 'china-advisory', '0 */6 * * *'),
   ('cnvd', 'CNVD 国家信息安全漏洞共享平台', 'vulnerability', 'https://www.cnvd.org.cn/flaw/list', 'china-advisory', null),
-  ('seebug', 'Seebug 漏洞平台', 'vulnerability', 'https://www.seebug.org/vuldb/vulnerabilities', 'china-advisory', '0 */12 * * *'),
-  ('aliyun-avd', '阿里云漏洞库 AVD', 'vulnerability', 'https://avd.aliyun.com/', 'china-advisory', '0 */12 * * *'),
-  ('nsfocus-vulndb', '绿盟科技 NSFOCUS 漏洞库', 'vulnerability', 'https://www.nsfocus.net/index.php?act=sec_bug', 'china-advisory', '0 */12 * * *'),
-  ('chaitin-vuldb', '长亭漏洞库', 'vulnerability', 'https://stack.chaitin.com/vuldb/index', 'china-advisory', '0 */12 * * *'),
+  ('seebug', 'Seebug 漏洞平台', 'vulnerability', 'https://www.seebug.org/vuldb/vulnerabilities', 'china-advisory', null),
+  ('aliyun-avd', '阿里云漏洞库 AVD', 'vulnerability', 'https://avd.aliyun.com/', 'china-advisory', null),
+  ('nsfocus-vulndb', '绿盟科技 NSFOCUS 漏洞库', 'vulnerability', 'https://www.nsfocus.net/index.php?act=sec_bug', 'china-advisory', null),
+  ('chaitin-vuldb', '长亭漏洞库', 'vulnerability', 'https://stack.chaitin.com/vuldb/index', 'china-advisory', null),
   ('cert-360', '360CERT 安全通告', 'threat_intel', 'https://cert.360.cn/warning', 'china-advisory', null),
   ('alpine-secdb', 'Alpine SecDB', 'vulnerability', 'https://secdb.alpinelinux.org/', 'alpine', '0 4 * * *'),
   ('debian-security-tracker', 'Debian Security Tracker', 'vulnerability', 'https://security-tracker.debian.org/', 'debian', '0 4 * * *'),
@@ -893,5 +893,7 @@ where code in ('osv', 'maven-osv');
 
 update sources
 set enabled = false,
+    schedule_cron = null,
+    config_json = jsonb_set(config_json, '{runMode}', '"manual"', true),
     updated_at = now()
-where code in ('cnvd', 'cert-360');
+where code in ('cnvd', 'seebug', 'aliyun-avd', 'nsfocus-vulndb', 'chaitin-vuldb', 'cert-360');

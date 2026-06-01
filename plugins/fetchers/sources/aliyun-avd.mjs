@@ -3,6 +3,7 @@ import { fetchText } from '../lib/http.mjs';
 import { checkpointReached, chinaIdentifiers, htmlText, htmlUrls, latestDate, limitedUrls, persistExternalAdvisory } from '../lib/china-advisory.mjs';
 
 export const sourceCode = 'aliyun-avd';
+export const runMode = 'manual';
 
 const BASE = 'https://avd.aliyun.com';
 

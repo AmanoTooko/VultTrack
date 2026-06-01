@@ -1,10 +1,12 @@
 import pg from 'pg';
+import { getAdminCookie } from './lib/admin-auth.mjs';
 
 const { Client } = pg;
 const apiBaseUrl = process.env.API_BASE_URL ?? 'http://localhost:5099';
 const databaseUrl = process.env.DATABASE_URL ?? 'postgres://vultrack:vultrack@localhost:5432/vultrack';
 const limit = Number.parseInt(process.env.SOURCE_SMOKE_LIMIT ?? '500', 10) || 500;
 const requestedSources = process.argv.slice(2).filter(Boolean);
+const adminCookie = await getAdminCookie(apiBaseUrl);
 
 const supportedSources = new Set([
   'nvd-cve',
@@ -74,7 +76,7 @@ try {
       const before = Number(counts.get(sourceCode) ?? 0);
       const response = await fetch(`${apiBaseUrl}/api/v1/raw.normalizeSource`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', cookie: adminCookie },
         body: JSON.stringify({ sourceCode, limit })
       });
       const body = await response.json();

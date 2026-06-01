@@ -69,6 +69,8 @@ Local secrets and machine-specific settings belong in `.env`. Do not commit `.en
 Common environment variables:
 
 - `DATABASE_URL`
+- `VULTRACK_ADMIN_USERNAME`
+- `VULTRACK_ADMIN_PASSWORD`
 - `NVD_API_KEY`
 - `GITHUB_TOKEN`
 - `FETCHER_MAX_RECORDS`
@@ -80,6 +82,8 @@ Common environment variables:
 - `SCHEDULER_NORMALIZE_LIMIT`
 - `SCHEDULER_SOURCE_CODES`
 - `SCHEDULER_INCLUDE_INIT_SOURCES`
+
+`Status` and fetcher administration require an admin login. Set a non-default `VULTRACK_ADMIN_PASSWORD` before exposing the UI beyond local development.
 
 ## License
 

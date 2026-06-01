@@ -130,6 +130,9 @@ public sealed class SourceScheduler(
         }
     }
 
+    public Task RunSourceNowAsync(string sourceCode, bool force, CancellationToken ct) =>
+        RunSourceAsync(sourceCode, ct, force);
+
     private async Task<IReadOnlyList<ScheduledSource>> LoadAllSourcesAsync(CancellationToken ct)
     {
         var rows = new List<ScheduledSource>();
@@ -207,7 +210,7 @@ public sealed class SourceScheduler(
             .Contains(code, StringComparer.OrdinalIgnoreCase);
     }
 
-    private async Task RunSourceAsync(string source, CancellationToken ct)
+    private async Task RunSourceAsync(string source, CancellationToken ct, bool force = false)
     {
         var repoRoot = ResolveRepoRoot();
         var node = Environment.GetEnvironmentVariable("PLUGIN_NODE_BIN") ?? Options.PluginNodeBin;
@@ -228,6 +231,10 @@ public sealed class SourceScheduler(
         if (!string.IsNullOrWhiteSpace(fetchLimit))
         {
             psi.Environment["FETCHER_MAX_RECORDS"] = fetchLimit;
+        }
+        if (force)
+        {
+            psi.Environment["FETCHER_FORCE"] = "1";
         }
 
         logger.LogInformation("Starting fetcher {Source}", source);

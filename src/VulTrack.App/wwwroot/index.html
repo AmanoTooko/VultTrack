@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>VulTrack</title>
-  <link rel="stylesheet" href="/styles.css?v=20260528-cms-ui">
+  <link rel="stylesheet" href="/styles.css?v=20260601-admin">
 </head>
 <body>
   <main class="shell">
@@ -19,6 +19,7 @@
           <button class="tab" type="button" data-mode="component">Components</button>
           <button class="tab" type="button" data-mode="sbom">SBOM</button>
           <button class="tab" type="button" data-mode="status">Status</button>
+          <button class="tab" type="button" data-mode="admin">Admin</button>
         </div>
       </nav>
       <div class="topbar-actions">
@@ -34,6 +35,7 @@
         <button id="refreshButton" class="icon-button" type="button" title="Refresh data" aria-label="Refresh data">
           <span aria-hidden="true">&#8635;</span>
         </button>
+        <button id="authButton" class="tab" type="button">Login</button>
       </div>
     </header>
 
@@ -115,6 +117,28 @@
     </footer>
   </main>
 
-  <script src="/app.js?v=20260528-cms-ui" defer></script>
+  <dialog id="loginDialog" class="auth-dialog">
+    <form id="loginForm" method="dialog" class="auth-form">
+      <div>
+        <span class="eyebrow">Administrator</span>
+        <h2>VulTrack login</h2>
+      </div>
+      <label>
+        <span>Username</span>
+        <input id="loginUsername" name="username" autocomplete="username" required>
+      </label>
+      <label>
+        <span>Password</span>
+        <input id="loginPassword" name="password" type="password" autocomplete="current-password" required>
+      </label>
+      <p id="loginError" class="form-error" hidden></p>
+      <div class="dialog-actions">
+        <button id="loginCancelButton" class="tab" type="button">Cancel</button>
+        <button class="primary-button" type="submit">Login</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script src="/app.js?v=20260601-admin" defer></script>
 </body>
 </html>
