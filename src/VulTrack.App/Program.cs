@@ -1128,6 +1128,10 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "alter table if exists sbom_components add column if not exists vendor text",
         "alter table if exists sbom_components add column if not exists product text",
         "alter table if exists sbom_components add column if not exists cpe23_uri text",
+        "alter table if exists sbom_components add column if not exists source_package_name text",
+        "alter table if exists sbom_components add column if not exists source_package_version text",
+        "alter table if exists sbom_vulnerabilities add column if not exists match_basis text",
+        "alter table if exists sbom_vulnerabilities add column if not exists matched_version text",
         "create index if not exists ix_sbom_components_purl on sbom_components(purl) where purl is not null",
         "create index if not exists ix_sbom_components_cpe on sbom_components(cpe23_uri) where cpe23_uri is not null",
         "create index if not exists ix_affected_components_cpe_prefix on vulnerability_affected_components(primary_cpe23_uri text_pattern_ops, vulnerability_id) where primary_cpe23_uri is not null",
@@ -1272,9 +1276,27 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
             return cache.Value;
 
         var sourceStatus = new List<object>();
+        var sourcePendingRows = new List<(string SourceCode, long Pending)>();
+        var pendingBySource = new Dictionary<Guid, (long Pending, long Failed)>();
+        await using (var pendingCmd = db.CreateCommand("""
+            select source_id,
+                   count(*) filter (where normalize_status = 'pending') as normalize_pending,
+                   count(*) filter (where normalize_status = 'failed') as normalize_failed
+            from source_raw_index
+            where normalize_status <> 'succeeded'
+            group by source_id
+            """))
+        await using (var pendingReader = await pendingCmd.ExecuteReaderAsync(ct))
+        {
+            while (await pendingReader.ReadAsync(ct))
+                pendingBySource[pendingReader.GetGuid(0)] = (pendingReader.GetInt64(1), pendingReader.GetInt64(2));
+        }
+
         long parsedTotal = 0;
         long normalizedTotal = 0;
         long errorTotal = 0;
+        long normalizePendingTotal = 0;
+        long normalizeFailedTotal = 0;
         await using (var cmd = db.CreateCommand("""
             with latest_runs as (
               select distinct on (source_id)
@@ -1291,7 +1313,7 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
               group by source_id
             )
             select s.code, s.name, s.kind, s.enabled, s.plugin_name, s.schedule_cron,
-                   s.config_json->>'runMode' as run_mode,
+                   s.config_json->>'runMode' as run_mode, s.id,
                    lr.status, lr.trigger, lr.started_at, lr.finished_at,
                    coalesce(lr.fetched_count, 0), coalesce(lr.changed_count, 0),
                    coalesce(lr.parsed_count, 0), coalesce(lr.normalized_count, 0),
@@ -1306,13 +1328,18 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
         {
             while (await reader.ReadAsync(ct))
             {
-                var fetched = reader.GetInt32(11);
-                var parsed = reader.GetInt32(13);
-                var normalized = reader.GetInt32(14);
-                var errors = reader.GetInt32(15);
+                var fetched = reader.GetInt32(12);
+                var parsed = reader.GetInt32(14);
+                var normalized = reader.GetInt32(15);
+                var errors = reader.GetInt32(16);
+                var pending = pendingBySource.GetValueOrDefault(reader.GetGuid(7));
                 parsedTotal += parsed;
                 normalizedTotal += normalized;
                 errorTotal += errors;
+                normalizePendingTotal += pending.Pending;
+                normalizeFailedTotal += pending.Failed;
+                if (pending.Pending + pending.Failed > 0)
+                    sourcePendingRows.Add((reader.GetString(0), pending.Pending + pending.Failed));
                 sourceStatus.Add(new
                 {
                     code = reader.GetString(0),
@@ -1326,25 +1353,25 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
                     parsePending = 0L,
                     parseSucceeded = parsed,
                     parseFailed = errors,
-                    normalizePending = 0L,
+                    normalizePending = pending.Pending,
                     normalizeSucceeded = normalized,
-                    normalizeFailed = errors,
+                    normalizeFailed = pending.Failed,
                     normalizeProgress = fetched <= 0 ? 0 : Math.Round((double)normalized / fetched * 100, 2),
-                    rawUpdatedAt = reader.IsDBNull(10) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(10),
-                    latestRun = reader.IsDBNull(7) ? null : new
+                    rawUpdatedAt = reader.IsDBNull(11) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(11),
+                    latestRun = reader.IsDBNull(8) ? null : new
                     {
-                        status = reader.GetString(7),
-                        trigger = reader.IsDBNull(8) ? null : reader.GetString(8),
-                        startedAt = reader.GetFieldValue<DateTimeOffset>(9),
-                        finishedAt = reader.IsDBNull(10) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(10),
+                        status = reader.GetString(8),
+                        trigger = reader.IsDBNull(9) ? null : reader.GetString(9),
+                        startedAt = reader.GetFieldValue<DateTimeOffset>(10),
+                        finishedAt = reader.IsDBNull(11) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(11),
                         fetchedCount = fetched,
-                        changedCount = reader.GetInt32(12),
+                        changedCount = reader.GetInt32(13),
                         parsedCount = parsed,
                         normalizedCount = normalized,
                         errorCount = errors,
-                        logSummary = reader.IsDBNull(16) ? null : reader.GetString(16)
+                        logSummary = reader.IsDBNull(17) ? null : reader.GetString(17)
                     },
-                    lastSuccessAt = reader.IsDBNull(17) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(17)
+                    lastSuccessAt = reader.IsDBNull(18) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(18)
                 });
             }
         }
@@ -1380,11 +1407,16 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
             },
             normalizeStatus = new List<object>
             {
-                new { status = "pending", count = 0L, estimated = true },
-                new { status = "failed", count = errorTotal, estimated = true },
+                new { status = "pending", count = normalizePendingTotal, estimated = false },
+                new { status = "failed", count = normalizeFailedTotal, estimated = false },
                 new { status = "succeeded", count = normalizedTotal, estimated = true }
             },
-            pendingBySource = Array.Empty<object>(),
+            pendingBySource = sourcePendingRows
+                .OrderByDescending(x => x.Pending)
+                .ThenBy(x => x.SourceCode, StringComparer.Ordinal)
+                .Take(25)
+                .Select(x => new { sourceCode = x.SourceCode, pending = x.Pending })
+                .ToList<object>(),
             sourceStatus,
             generatedAt = DateTimeOffset.UtcNow
         };
