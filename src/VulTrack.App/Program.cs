@@ -655,7 +655,7 @@ app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, Can
 app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
 {
     await using var cmd = db.CreateCommand("""
-        select v.id, v.primary_identifier, v.title, coalesce(nvd_description.value, v.description),
+        select v.id, v.primary_identifier, coalesce(preferred_title.value, v.title), coalesce(nvd_description.value, v.description),
                v.status, v.severity_label, v.max_cvss_score, v.max_cvss_version, v.max_cvss_vector,
                v.epss_score, v.epss_percentile, v.kev_date_added, v.known_ransomware,
                coalesce(actual_sources.source_count, 0), v.affected_component_count,
@@ -664,6 +664,22 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
                coalesce(nvd_dates.modified_at, v.modified_at),
                v.updated_at, v.published_at, v.modified_at
         from vulnerabilities v
+        left join lateral (
+          select nullif(trim(vr.title), '') as value
+          from vulnerability_records vr
+          join sources s on s.id = vr.source_id
+          where vr.vulnerability_id = v.id
+            and nullif(trim(vr.title), '') is not null
+            and length(vr.title) <= 220
+          order by case
+                     when s.code in ('ghsa', 'maven-advisory', 'maven-osv', 'maven-osv-init', 'osv', 'osv-init') then 0
+                     when s.code in ('nvd-cve', 'nvd-cve-init') then 2
+                     else 1
+                   end,
+                   length(vr.title),
+                   vr.updated_at desc
+          limit 1
+        ) preferred_title on true
         left join lateral (
           select r.source_published_at as published_at, r.source_modified_at as modified_at
           from source_raw_index r
