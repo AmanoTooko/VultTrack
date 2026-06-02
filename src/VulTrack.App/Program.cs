@@ -418,7 +418,10 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     var pattern = $"%{rawQuery}%";
     var exact = string.IsNullOrWhiteSpace(rawQuery) ? "" : rawQuery;
     var normalizedExact = string.IsNullOrWhiteSpace(exact) ? "" : Identifier.Normalize(exact);
-    var exactIsCve = Identifier.TypeOf(normalizedExact) == "CVE";
+    var exactIsCompleteCve = System.Text.RegularExpressions.Regex.IsMatch(
+        normalizedExact,
+        @"^CVE-\d{4}-\d{4,}$",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase);
     var page = Math.Max(1, request.Page);
     var pageSize = ClampPageSize(request.PageSize);
     var fetchLimit = pageSize + 1;
@@ -483,7 +486,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 limit $3
                 """);
             fastCmd.Parameters.AddWithValue(normalizedExact);
-            fastCmd.Parameters.AddWithValue(exactIsCve);
+            fastCmd.Parameters.AddWithValue(exactIsCompleteCve);
             fastCmd.Parameters.AddWithValue(fetchLimit);
             await using var fastReader = await fastCmd.ExecuteReaderAsync(ct);
             var found = 0;
@@ -492,7 +495,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 rows.Add(MakeResult(fastReader));
                 found++;
             }
-            if (found > 0 || exactIsCve)
+            if (found > 0 || exactIsCompleteCve)
             {
                 var exactHasMore = rows.Count > pageSize;
                 if (exactHasMore) rows.RemoveAt(rows.Count - 1);
@@ -1137,7 +1140,6 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last)",
         "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
         "create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier)",
-        "create index if not exists ix_raw_source_status_cover on source_raw_index(source_id) include(parse_status, normalize_status, updated_at)",
         """
         do $$
         begin
@@ -1374,12 +1376,29 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
         var sourcePendingRows = new List<(string SourceCode, long Pending)>();
         var pendingBySource = new Dictionary<Guid, (long Pending, long Failed)>();
         await using (var pendingCmd = db.CreateCommand("""
+            with pending_estimate as (
+              select greatest(reltuples::bigint, 0) as total
+              from pg_class
+              where oid = to_regclass('ix_raw_pending_by_source')
+            ),
+            sample_counts as (
+              select source_id,
+                     count(*) filter (where normalize_status = 'pending') as normalize_pending,
+                     count(*) filter (where normalize_status = 'failed') as normalize_failed
+              from source_raw_index tablesample system (0.5)
+              where normalize_status <> 'succeeded'
+              group by source_id
+            ),
+            sample_total as (
+              select greatest(sum(normalize_pending + normalize_failed), 1) as total
+              from sample_counts
+            )
             select source_id,
-                   count(*) filter (where normalize_status = 'pending') as normalize_pending,
-                   count(*) filter (where normalize_status = 'failed') as normalize_failed
-            from source_raw_index
-            where normalize_status <> 'succeeded'
-            group by source_id
+                   round(normalize_pending * pending_estimate.total::numeric / sample_total.total)::bigint as normalize_pending,
+                   round(normalize_failed * pending_estimate.total::numeric / sample_total.total)::bigint as normalize_failed
+            from sample_counts
+            cross join pending_estimate
+            cross join sample_total
             """))
         await using (var pendingReader = await pendingCmd.ExecuteReaderAsync(ct))
         {

@@ -95,7 +95,10 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             order by s.cve_id
             limit $1
             """, connection);
-        select.Parameters.AddWithValue(Math.Max(1, limit));
+        // Debian records near the end of the tracker can contain very large
+        // package maps. Keep each materialized batch bounded even when the
+        // scheduler uses a larger global normalization limit.
+        select.Parameters.AddWithValue(Math.Clamp(limit, 1, 1000));
 
         var rows = new List<DebianRow>();
         await using (var reader = await select.ExecuteReaderAsync(ct))

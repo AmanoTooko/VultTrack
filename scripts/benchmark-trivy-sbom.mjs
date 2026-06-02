@@ -24,7 +24,7 @@ await api('/api/v1/sbom.match', {
   headers: { 'content-type': 'application/json' },
   body: JSON.stringify({ sbomId })
 });
-const scanned = await api(`/api/v1/sbom.get?id=${encodeURIComponent(sbomId)}`);
+const scanned = await api(`/api/v1/sbom.get?id=${encodeURIComponent(sbomId)}&vulnerabilityLimit=10000`);
 
 const trivyRows = (trivy.Results ?? []).flatMap((result) =>
   (result.Vulnerabilities ?? []).map((finding) => ({
