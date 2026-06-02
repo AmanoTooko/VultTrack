@@ -95,8 +95,6 @@ create unique index if not exists ux_raw_source_external_hash
   on source_raw_index(source_id, external_key, record_hash);
 create index if not exists ix_raw_source_modified
   on source_raw_index(source_id, source_modified_at desc);
-create index if not exists ix_raw_source_status_cover
-  on source_raw_index(source_id) include(parse_status, normalize_status, updated_at);
 create index if not exists ix_raw_pending_by_source
   on source_raw_index(source_id, updated_at, id)
   where normalize_status <> 'succeeded';
@@ -768,7 +766,7 @@ create index if not exists ix_affected_components_package_lower on vulnerability
 create index if not exists ix_affected_components_display_lower on vulnerability_affected_components(lower(display_name), lower(ecosystem), vulnerability_id);
 create index if not exists ix_affected_components_purl_prefix on vulnerability_affected_components(primary_purl text_pattern_ops, lower(ecosystem), vulnerability_id) where primary_purl is not null;
 create index if not exists ix_affected_components_cpe_prefix on vulnerability_affected_components(primary_cpe23_uri text_pattern_ops, vulnerability_id) where primary_cpe23_uri is not null;
-create index if not exists ix_affected_components_identity_match_v2 on vulnerability_affected_components(
+create unique index if not exists ux_affected_components_identity_match_v3 on vulnerability_affected_components(
   vulnerability_id,
   coalesce(ecosystem, ''),
   coalesce(display_name, ''),

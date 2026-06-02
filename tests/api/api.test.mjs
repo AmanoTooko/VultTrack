@@ -35,17 +35,17 @@ test('frontend shell is served by the app', async () => {
   assert.match(html, /\/app\.js/);
 });
 
-test('vulnerability.search returns processed NVD records', async () => {
+test('vulnerability.search returns CVE identifiers for a CVE prefix', async () => {
   const res = await fetch(`${baseUrl}/api/v1/vulnerability.search`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ query: 'CVE', pageSize: 5 })
+    body: JSON.stringify({ query: 'CVE-2021', pageSize: 5 })
   });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);
   assert.ok(body.data.items.length > 0);
-  assert.match(body.data.items[0].primaryIdentifier, /^CVE-/);
+  assert.ok(body.data.items.every((item) => item.primaryIdentifier.startsWith('CVE-2021')));
 });
 
 test('system.status requires an admin login', async () => {
@@ -55,7 +55,7 @@ test('system.status requires an admin login', async () => {
 
 test('admin login unlocks system.status and fetcher controls', async () => {
   const cookie = await login();
-  const res = await fetch(`${baseUrl}/api/v1/system.status`, { headers: { cookie } });
+  const res = await fetch(`${baseUrl}/api/v1/system.status?fast=true`, { headers: { cookie } });
   assert.equal(res.status, 200);
   const body = await res.json();
   assert.equal(body.ok, true);

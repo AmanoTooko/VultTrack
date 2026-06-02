@@ -102,7 +102,7 @@ public static class SbomEndpoints
         return ApiResult.Ok(new { items });
     }
 
-    private static async Task<IResult> Get(NpgsqlDataSource db, Guid id, CancellationToken ct)
+    private static async Task<IResult> Get(NpgsqlDataSource db, Guid id, int? vulnerabilityLimit, int? vulnerabilityOffset, CancellationToken ct)
     {
         object? sbom = null;
         await using (var c = db.CreateCommand(
@@ -145,9 +145,12 @@ public static class SbomEndpoints
 
         var vulns = new List<object>();
         await using (var vc = db.CreateCommand(
-            "SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched,sv.match_basis,sv.matched_version FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT 2000"))
+            "SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched,sv.match_basis,sv.matched_version FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT $2 OFFSET $3"))
         {
-            vc.Parameters.AddWithValue(id); await using var r = await vc.ExecuteReaderAsync(ct);
+            vc.Parameters.AddWithValue(id);
+            vc.Parameters.AddWithValue(Math.Clamp(vulnerabilityLimit ?? 2000, 1, 10000));
+            vc.Parameters.AddWithValue(Math.Max(vulnerabilityOffset ?? 0, 0));
+            await using var r = await vc.ExecuteReaderAsync(ct);
             while (await r.ReadAsync(ct)) vulns.Add(new
             {
                 id = r.GetGuid(0),
@@ -219,20 +222,20 @@ public static class SbomEndpoints
                   union all
                   select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 2 as match_priority, 'purl' as match_basis
                   from vulnerability_affected_components c
-                  where $1::text is not null and (c.primary_purl = $2 or c.primary_purl like $1 || '%')
-                    and ($4::text is null or lower(coalesce(c.ecosystem,'')) like lower($4) || '%')
+                  where $1::text is not null and (c.primary_purl = $1 or c.primary_purl = $2)
+                    and ($4::text is null or lower(coalesce(c.ecosystem,'')) = lower($4) or (position(':' in $4) = 0 and lower(coalesce(c.ecosystem,'')) like lower($4) || ':%'))
                   union all
                   select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 3 as match_priority, 'source-package' as match_basis
                   from vulnerability_affected_components c
-                  where $8::text is not null and lower(c.package_name)=lower($8) and ($4::text is null or lower(coalesce(c.ecosystem,'')) like lower($4) || '%')
+                  where $8::text is not null and lower(c.package_name)=lower($8) and ($4::text is null or lower(coalesce(c.ecosystem,'')) = lower($4) or (position(':' in $4) = 0 and lower(coalesce(c.ecosystem,'')) like lower($4) || ':%'))
                   union all
                   select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 4 as match_priority, 'name' as match_basis
                   from vulnerability_affected_components c
-                  where $3::text is not null and lower(c.display_name)=lower($3) and ($4::text is null or lower(coalesce(c.ecosystem,'')) like lower($4) || '%')
+                  where $3::text is not null and lower(c.display_name)=lower($3) and ($4::text is null or lower(coalesce(c.ecosystem,'')) = lower($4) or (position(':' in $4) = 0 and lower(coalesce(c.ecosystem,'')) like lower($4) || ':%'))
                   union all
                   select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 5 as match_priority, 'package' as match_basis
                   from vulnerability_affected_components c
-                  where $3::text is not null and lower(c.package_name)=lower($3) and ($4::text is null or lower(coalesce(c.ecosystem,'')) like lower($4) || '%')
+                  where $3::text is not null and lower(c.package_name)=lower($3) and ($4::text is null or lower(coalesce(c.ecosystem,'')) = lower($4) or (position(':' in $4) = 0 and lower(coalesce(c.ecosystem,'')) like lower($4) || ':%'))
                   union all
                   select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 6 as match_priority, 'cpe-product' as match_basis
                   from vulnerability_affected_components c
@@ -249,7 +252,7 @@ public static class SbomEndpoints
                 ORDER BY v.id, c.match_priority,
                   CASE WHEN c.normalized_range IS NOT NULL AND c.normalized_range <> '' AND c.normalized_range ~ '^[<>]=?' THEN 0 ELSE 1 END,
                   coalesce(v.max_cvss_score,0) DESC
-                LIMIT 200", conn);
+                ", conn);
             sq.Parameters.AddWithValue((object?)pwv ?? DBNull.Value);
             sq.Parameters.AddWithValue((object?)purlDec ?? DBNull.Value);
             sq.Parameters.AddWithValue((object?)name ?? DBNull.Value);
@@ -526,7 +529,7 @@ public static class SbomEndpoints
 
     private static string? PurlToEcosystem(string? purl)
     {
-        if (purl is null || !purl.StartsWith("pkg:")) return null;
+        if (purl is null || !purl.StartsWith("pkg:", StringComparison.OrdinalIgnoreCase)) return null;
         var slash = purl.IndexOf('/');
         if (slash < 0) return null;
         return purl["pkg:".Length..slash].ToLowerInvariant() switch
@@ -555,7 +558,10 @@ public static class SbomEndpoints
     private static string DistroEcosystem(string ecosystem, string? distro)
     {
         if (string.IsNullOrWhiteSpace(distro)) return ecosystem;
-        var match = System.Text.RegularExpressions.Regex.Match(distro, @"(?:^|[-_])(\d+)(?:[._-]|$)");
+        var pattern = string.Equals(ecosystem, "alpine", StringComparison.OrdinalIgnoreCase)
+            ? @"(?:^|[-_])(\d+\.\d+)(?:[._-]|$)"
+            : @"(?:^|[-_])(\d+)(?:[._-]|$)";
+        var match = System.Text.RegularExpressions.Regex.Match(distro, pattern);
         return match.Success ? $"{ecosystem}:{match.Groups[1].Value}" : ecosystem;
     }
 }
