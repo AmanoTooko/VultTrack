@@ -319,9 +319,10 @@ public abstract class NormalizerBase(
     protected async Task FlushAffectedProjectionsAsync(NpgsqlConnection connection, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)
     {
         if (vulnerabilityIds.Count == 0) return;
+        var distinctVulnerabilityIds = vulnerabilityIds.Distinct().ToList();
         foreach (var hook in affectedHooks)
         {
-            await hook.FlushProjectionsAsync(connection, vulnerabilityIds.ToList(), ct);
+            await hook.FlushProjectionsAsync(connection, distinctVulnerabilityIds, ct);
         }
     }
 
