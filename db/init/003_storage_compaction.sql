@@ -5,6 +5,10 @@ drop table if exists vulnerability_affected_components_new;
 -- array membership lookup, so retaining a large GIN index only adds write cost.
 drop index if exists ix_raw_identifier_summary;
 
+-- Identity normalization uses the exact btree lookup. Component search reads
+-- the components table directly, so this trigram index only adds write cost.
+drop index if exists ix_component_identity_trgm;
+
 -- Superseded by ux_vulnerability_descriptions_identity, which also handles
 -- nullable language values consistently.
 drop index if exists ux_descriptions_dedup;
