@@ -4,6 +4,7 @@ import pg from 'pg';
 const { Client } = pg;
 const apply = process.argv.includes('--apply');
 const confirmed = process.argv.includes('--confirm=REBUILD_CANONICAL_DATA');
+const exactCounts = !apply || process.argv.includes('--exact-counts');
 const databaseUrl = process.env.DATABASE_URL ?? 'postgres://vultrack:vultrack@127.0.0.1:5432/vultrack';
 const tables = [
   'vulnerability_affected_evidence',
@@ -27,12 +28,28 @@ const tables = [
 const client = new Client({ connectionString: databaseUrl });
 await client.connect();
 try {
-  const counts = {};
-  for (const table of tables) {
-    const result = await client.query(`select count(*)::bigint count from ${table}`);
-    counts[table] = Number(result.rows[0].count);
+  let counts;
+  if (exactCounts) {
+    counts = {};
+    for (const table of tables) {
+      const result = await client.query(`select count(*)::bigint count from ${table}`);
+      counts[table] = Number(result.rows[0].count);
+    }
+  } else {
+    const result = await client.query(`
+      select relname, greatest(reltuples::bigint, 0) count
+      from pg_class
+      where relnamespace = 'public'::regnamespace
+        and relname = any($1)
+    `, [tables]);
+    const estimates = new Map(result.rows.map(row => [row.relname, Number(row.count)]));
+    counts = Object.fromEntries(tables.map(table => [table, estimates.get(table) ?? 0]));
   }
-  console.log(JSON.stringify({ mode: apply ? 'apply' : 'dry-run', counts }, null, 2));
+  console.log(JSON.stringify({
+    mode: apply ? 'apply' : 'dry-run',
+    countMode: exactCounts ? 'exact' : 'estimated',
+    counts
+  }, null, 2));
   if (!apply) {
     console.log('Dry run only. Use --apply --confirm=REBUILD_CANONICAL_DATA after creating a backup.');
     process.exit(0);
