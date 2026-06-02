@@ -30,7 +30,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
             from stg_ecosystem_advisories s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
-            where r.normalize_status <> 'succeeded'
+            where r.normalize_status in ('pending', 'failed')
               and ($1::text is null or src.code = $1)
             order by r.updated_at
             limit $2

@@ -152,16 +152,6 @@ el.nextPageButton?.addEventListener('click', () => {
   runSearch();
 });
 
-el.detailPane.addEventListener('click', (event) => {
-  const toggle = event.target.closest('.cvss-toggle');
-  if (!toggle) return;
-  const target = document.getElementById(toggle.dataset.target);
-  if (!target) return;
-  const expanded = toggle.getAttribute('aria-expanded') === 'true';
-  toggle.setAttribute('aria-expanded', !expanded);
-  target.hidden = expanded;
-});
-
 function showDetailPane() {
   el.detailPane.hidden = false;
 }
@@ -280,7 +270,7 @@ async function loadStatus() {
   }
 }
 
-function activateMode(tab) {
+function activateMode(tab, options = {}) {
   if (!tab) return;
   state.mode = tab.dataset.mode;
   document.body.dataset.mode = state.mode;
@@ -297,10 +287,63 @@ function activateMode(tab) {
   if (el.resultsTitle) el.resultsTitle.textContent = modeTitle(state.mode);
   if (el.resultsMeta) el.resultsMeta.textContent = modeDescription(state.mode);
   updatePager();
+  if (options.updateRoute !== false) updateRoute(modeRoute(state.mode));
+  if (options.load === false) return;
   if (state.mode === 'sbom') loadSbomList();
   else if (state.mode === 'status') loadStatusPage();
   else if (state.mode === 'admin') loadAdminPage();
   else runSearch();
+}
+
+function modeRoute(mode) {
+  return {
+    vulnerability: '/',
+    component: '/component',
+    sbom: '/sbom',
+    status: '/status',
+    admin: '/admin'
+  }[mode] || '/';
+}
+
+function cveRoute(identifier) {
+  return `/cve/${encodeURIComponent(identifier)}`;
+}
+
+function sbomRoute(id) {
+  return `/sbom/${encodeURIComponent(id)}`;
+}
+
+function updateRoute(path, options = {}) {
+  const current = `${window.location.pathname}${window.location.search}`;
+  if (current === path) return;
+  window.history[options.replace ? 'replaceState' : 'pushState']({}, '', path);
+}
+
+function parseRoute() {
+  const parts = window.location.pathname.split('/').filter(Boolean).map(part => decodeURIComponent(part));
+  if (parts[0] === 'cve' && parts[1]) return { mode: 'vulnerability', identifier: parts[1] };
+  if ((parts[0] === 'component' || parts[0] === 'components') && parts.length === 1) return { mode: 'component' };
+  if (parts[0] === 'sbom') return { mode: 'sbom', sbomId: parts[1] || null };
+  if (parts[0] === 'status' && parts.length === 1) return { mode: 'status' };
+  if (parts[0] === 'admin' && parts.length === 1) return { mode: 'admin' };
+  return { mode: 'vulnerability' };
+}
+
+async function applyRoute() {
+  const route = parseRoute();
+  const tab = el.tabs.find(item => item.dataset.mode === route.mode);
+  activateMode(tab, { updateRoute: false, load: false });
+  if (route.identifier) {
+    await loadVulnerabilityByIdentifier(route.identifier);
+  } else if (route.mode === 'sbom') {
+    await loadSbomList({ detailId: route.sbomId });
+  } else if (route.mode === 'status') {
+    await loadStatusPage();
+  } else if (route.mode === 'admin') {
+    await loadAdminPage();
+  } else {
+    await runSearch();
+  }
 }
 
 function syntaxHintHtml(mode) {
@@ -427,7 +470,7 @@ async function loadAdminPage() {
 
 function renderAdminPage(sources) {
   const domestic = new Set(['cnnvd', 'cnvd', 'seebug', 'aliyun-avd', 'nsfocus-vulndb', 'chaitin-vuldb', 'cert-360']);
-  const sorted = [...sources].sort((a, b) => Number(domestic.has(b.code)) - Number(domestic.has(a.code)) || String(a.code).localeCompare(String(b.code)));
+  const groups = adminSourceGroups(sources, domestic);
   el.detailPane.innerHTML = `
     <article class="status-page">
       <header class="status-hero admin-hero">
@@ -444,15 +487,54 @@ function renderAdminPage(sources) {
       <section class="detail-section">
         <div class="section-title-row">
           <h3 class="section-h">Sources</h3>
-          <span class="badge">${fmt(sorted.length)}</span>
+          <span class="badge">${fmt(sources.length)}</span>
         </div>
         <div class="admin-source-list">
-          ${sorted.map((source) => renderAdminSource(source, domestic.has(source.code))).join('')}
+          ${groups.map(([label, items]) => `
+            <section class="admin-source-group">
+              <header class="admin-source-group-head">
+                <strong>${escapeHtml(label)}</strong>
+                <span class="badge">${fmt(items.length)}</span>
+              </header>
+              <div class="admin-source-group-list">
+                ${items.map(source => renderAdminSource(source, domestic.has(source.code))).join('')}
+              </div>
+            </section>
+          `).join('')}
         </div>
       </section>
     </article>
   `;
   bindAdminActions();
+}
+
+function adminSourceGroups(sources, domestic) {
+  const groups = new Map();
+  for (const source of sources) {
+    const [order, label] = adminSourceCategory(source, domestic);
+    if (!groups.has(label)) groups.set(label, { label, order, items: [] });
+    groups.get(label).items.push(source);
+  }
+  return [...groups.values()]
+    .sort((a, b) => a.order - b.order)
+    .map(group => [
+      group.label,
+      group.items.sort((a, b) => String(a.name || a.code).localeCompare(String(b.name || b.code)))
+    ]);
+}
+
+function adminSourceCategory(source, domestic) {
+  const code = String(source.code || '').toLowerCase();
+  const kind = String(source.kind || '').toLowerCase();
+  if (domestic.has(code)) return [4, 'Domestic intelligence'];
+  if (kind.includes('component') || code.includes('registry') || code === 'nvd-cpe') return [3, 'Component catalogs'];
+  if (kind.includes('exploit') || ['metasploit', 'exploitdb', 'trickest-cve', 'poc-in-github', 'nuclei-templates'].includes(code)) {
+    return [2, 'Exploit intelligence'];
+  }
+  if (code.includes('advisory') || code.includes('osv') || code.includes('csaf') || code.includes('secdb') || code.includes('tracker')) {
+    return [1, 'Ecosystem advisories'];
+  }
+  return [0, 'Core vulnerability feeds'];
 }
 
 function renderAdminSource(source, domestic) {
@@ -461,8 +543,8 @@ function renderAdminSource(source, domestic) {
     <div class="admin-source-row" data-admin-source="${escapeAttr(source.code)}">
       <div class="admin-source-main">
         <div>
-          <strong>${escapeHtml(source.code)}</strong>
-          <small>${escapeHtml(source.name || '')}</small>
+          <strong>${escapeHtml(source.name || source.code)}</strong>
+          <small>${escapeHtml(source.code)}</small>
         </div>
         <div class="chips">
           ${domestic ? '<span class="badge">CN intel</span>' : ''}
@@ -595,9 +677,7 @@ async function runVulnerabilitySearch(query) {
     el.resultList.innerHTML = '';
   }
   el.resultList.innerHTML += data.items.map((item) => vulnerabilityResult(item)).join('');
-  el.resultList.querySelectorAll('[data-vulnerability-id]').forEach((button) => {
-    button.addEventListener('click', () => loadVulnerabilityDetail(button.dataset.vulnerabilityId));
-  });
+  bindVulnerabilityLinks(el.resultList);
 }
 
 async function runComponentSearch(query) {
@@ -650,12 +730,36 @@ async function runComponentSearch(query) {
     blocks.push(...catalog.registryPackages.map((item) => registryResult(item)));
   }
   el.resultList.innerHTML = blocks.join('') || '<div class="muted result-item">No components found</div>';
-  el.resultList.querySelectorAll('[data-vulnerability-id]').forEach((button) => {
-    button.addEventListener('click', () => loadVulnerabilityDetail(button.dataset.vulnerabilityId));
+  bindVulnerabilityLinks(el.resultList);
+}
+
+function bindVulnerabilityLinks(container) {
+  container.querySelectorAll('[data-vulnerability-id]').forEach((link) => {
+    link.addEventListener('click', (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      loadVulnerabilityDetail(link.dataset.vulnerabilityId, { identifier: link.dataset.vulnerabilityIdentifier });
+    });
   });
 }
 
-async function loadVulnerabilityDetail(id) {
+async function loadVulnerabilityByIdentifier(identifier) {
+  showDetailPane();
+  el.resultList.innerHTML = '<div class="muted result-item">Loading direct CVE route</div>';
+  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading</h2></div>';
+  try {
+    const item = await api(`/api/v1/vulnerability.getByIdentifier?identifier=${encodeURIComponent(identifier)}`);
+    el.queryInput.value = item.primaryIdentifier;
+    el.resultList.innerHTML = vulnerabilityResult(item);
+    bindVulnerabilityLinks(el.resultList);
+    await loadVulnerabilityDetail(item.id, { identifier: item.primaryIdentifier, updateRoute: false });
+    updateRoute(cveRoute(item.primaryIdentifier), { replace: true });
+  } catch (error) {
+    el.detailPane.innerHTML = `<div class="empty-state"><h2>Request failed</h2><p>${escapeHtml(error.message)}</p></div>`;
+  }
+}
+
+async function loadVulnerabilityDetail(id, options = {}) {
   state.selectedId = id;
   el.resultList.querySelectorAll('.result-item').forEach((item) => {
     item.classList.toggle('is-active', item.dataset.vulnerabilityId === id);
@@ -665,6 +769,9 @@ async function loadVulnerabilityDetail(id) {
   try {
     const data = await api(`/api/v1/vulnerability.detail?id=${encodeURIComponent(id)}`);
     renderDetail(data);
+    if (options.updateRoute !== false) {
+      updateRoute(cveRoute(data.vulnerability.primaryIdentifier || options.identifier || id));
+    }
     el.detailPane.scrollIntoView({ block: 'start', behavior: 'smooth' });
   } catch (error) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Request failed</h2><p>${escapeHtml(error.message)}</p></div>`;
@@ -849,10 +956,14 @@ function renderDetail(data) {
   const exploits = data.exploits || [];
   const descriptions = aggregateDescriptions(data.descriptions || []);
   const affected = data.affectedComponents || [];
+  const affectedExpressions = data.affectedExpressions || [];
+  const history = data.history || [];
   const sourceUrls = data.sourceUrls || {};
   const sourceTags = [...new Set(records.map(r => r.code).filter(Boolean))];
   const affectedByEco = groupByEco(affected);
-  const primaryDescription = descriptions[0]?.value || v.description || v.title || '';
+  const primaryDescription = descriptions[0] || { value: v.description || v.title || '', sources: [] };
+  const descriptionIsLong = String(primaryDescription.value || '').length > 900;
+  const title = selectDetailHeadline(v, data.descriptions || [], records);
 
   el.detailPane.innerHTML = `
     <article class="cve-page">
@@ -868,12 +979,20 @@ function renderDetail(data) {
             ${v.epssScore ? `<span class="badge warn">EPSS ${pct(v.epssScore)}</span>` : ''}
             ${v.kevDateAdded ? '<span class="badge risk">KEV</span>' : ''}
           </div>
-          <p class="summary cve-summary">${escapeHtml(primaryDescription)}</p>
-          ${v.maxCvssVector ? cvssVectorBlock(v.maxCvssVersion, v.maxCvssVector) : ''}
+          <h3 class="cve-headline">${escapeHtml(title)}</h3>
+          <section class="hero-description" aria-label="Description">
+            <div class="hero-description-head">
+              <span>Description</span>
+              ${(primaryDescription.sources || [primaryDescription.code]).filter(Boolean).map(sourceTag).join('')}
+            </div>
+            <div class="markdown-body cve-summary hero-description-body ${descriptionIsLong ? 'is-collapsed' : ''}" data-primary-description>${renderSafeMarkdown(primaryDescription.value)}</div>
+            ${descriptionIsLong ? '<button class="description-toggle" type="button" data-description-toggle aria-expanded="false">Show full description</button>' : ''}
+          </section>
         </div>
-          ${renderHeroFacts(v, affectedByEco, records, refs, exploits)}
+        ${renderHeroMetadata(v, affectedByEco, records, refs, exploits)}
       </header>
 
+      ${renderCvssPanel(v, severities)}
       ${renderDetailNav()}
 
       <section class="detail-section ai-analysis-card" id="ai-analysis">
@@ -882,18 +1001,19 @@ function renderDetail(data) {
 
       <div class="detail-two-column">
         <div class="detail-main-column">
-          ${descriptions.length ? renderDescriptionCards(descriptions) : ''}
+          ${descriptions.length > 1 ? renderDescriptionCards(descriptions.slice(1)) : ''}
           ${renderMitreData(v, records, sourceUrls)}
           ${renderExploitSignals(exploits)}
-          ${renderCpeConfigurations(affected)}
+          ${renderCpeConfigurations(affected, affectedExpressions)}
           ${renderAffectedGrouped(affected)}
           ${renderAdvisories(refs)}
           ${refs.length ? renderReferenceCards(refs) : '<section class="detail-section" id="references"><h3 class="section-h">References</h3><p class="muted">No references</p></section>'}
+          ${renderSourceChanges(history)}
           ${renderRecordsBySource(records)}
         </div>
         <aside class="detail-rail">
-          ${renderEnrichmentPanel(v, severities)}
-          ${renderTrackingPanel(v, records, refs)}
+          ${renderEnrichmentPanel(v)}
+          ${renderTrackingPanel(v, records, refs, history)}
         </aside>
       </div>
     </article>
@@ -906,37 +1026,48 @@ function renderDetail(data) {
       group.style.display = !value || (group.textContent || '').toLowerCase().includes(value) ? '' : 'none';
     });
   });
+  const descriptionToggle = el.detailPane.querySelector('[data-description-toggle]');
+  descriptionToggle?.addEventListener('click', () => {
+    const body = el.detailPane.querySelector('[data-primary-description]');
+    if (!body) return;
+    const expanded = descriptionToggle.getAttribute('aria-expanded') === 'true';
+    descriptionToggle.setAttribute('aria-expanded', String(!expanded));
+    descriptionToggle.textContent = expanded ? 'Show full description' : 'Show less';
+    body.classList.toggle('is-collapsed', expanded);
+  });
 }
 
-function renderHeroFacts(v, affectedByEco, records, refs, exploits = []) {
-  const sourceCount = new Set(records.map(r => r.code).filter(Boolean)).size;
+function renderHeroMetadata(v, affectedByEco, records, refs, exploits = []) {
+  const sourceCount = v.sourceCount ?? new Set(records.map(r => r.code).filter(Boolean)).size;
   return `
-    <div class="hero-facts" aria-label="Vulnerability facts">
-      ${factCard('Published', date(v.publishedAt))}
-      ${factCard('Score', v.maxCvssScore != null ? `${Number(v.maxCvssScore).toFixed(1)} ${v.severityLabel || ''}` : 'N/A', 'strong')}
-      ${factCard('EPSS', v.epssScore ? `${pct(v.epssScore)}${v.epssPercentile ? ` / P${Math.round(Number(v.epssPercentile) * 100)}` : ''}` : 'No data')}
-      ${factCard('KEV', v.kevDateAdded ? `Yes, ${date(v.kevDateAdded)}` : 'No')}
-      ${factCard('Impact', deriveImpact(v))}
-      ${factCard('Action', deriveAction(v), 'action')}
-      ${factCard('Sources', fmt(sourceCount))}
-      ${factCard('Affected', `${fmt(v.affectedComponentCount)} / ${fmt(Object.keys(affectedByEco).length)} ecosystems`)}
-      ${factCard('PoC', exploits.length ? fmt(exploits.length) : 'No data', exploits.length ? 'warn' : '')}
-      ${factCard('References', fmt(refs.length))}
-    </div>
-  `;
-}
-
-function factCard(label, value, tone = '') {
-  return `
-    <div class="fact-card ${tone}">
-      <span>${escapeHtml(label)}</span>
-      <strong>${escapeHtml(value || '-')}</strong>
-    </div>
+    <aside class="hero-metadata" aria-label="Vulnerability metadata">
+      <div class="hero-date-block">
+        <span>Published</span>
+        <strong>${date(v.publishedAt)}</strong>
+      </div>
+      <div class="hero-date-block">
+        <span>Modified</span>
+        <strong>${date(v.modifiedAt)}</strong>
+      </div>
+      <div class="hero-signal-grid">
+        <div><span>CVSS</span><strong>${v.maxCvssScore != null ? Number(v.maxCvssScore).toFixed(1) : 'N/A'}</strong></div>
+        <div><span>EPSS</span><strong>${v.epssScore ? pct(v.epssScore) : 'N/A'}</strong></div>
+        <div><span>KEV</span><strong>${v.kevDateAdded ? 'Yes' : 'No'}</strong></div>
+      </div>
+      <dl class="hero-meta-list">
+        <div><dt>Status</dt><dd>${escapeHtml(v.status || 'unknown')}</dd></div>
+        <div><dt>Affected</dt><dd>${fmt(v.affectedComponentCount)} / ${fmt(Object.keys(affectedByEco).length)} ecosystems</dd></div>
+        <div><dt>Sources</dt><dd>${fmt(sourceCount)}</dd></div>
+        <div><dt>References</dt><dd>${fmt(refs.length)}</dd></div>
+        <div><dt>PoC signals</dt><dd>${exploits.length ? fmt(exploits.length) : 'No data'}</dd></div>
+      </dl>
+    </aside>
   `;
 }
 
 function renderDetailNav() {
   const items = [
+    ['CVSS', 'cvss-scores'],
     ['AI Analysis', 'ai-analysis'],
     ['Mitre Data', 'mitre-data'],
     ['PoC / Exploit', 'exploit-signals'],
@@ -944,6 +1075,7 @@ function renderDetailNav() {
     ['Affected Packages', 'affected-packages'],
     ['Enrichment', 'enrichment'],
     ['Tracking', 'tracking'],
+    ['Source Changes', 'source-changes'],
     ['References', 'references'],
     ['Raw Data', 'raw-data']
   ];
@@ -1031,7 +1163,7 @@ function renderExploitItem(item) {
   return `
     <div class="exploit-item">
       <div>
-        <strong>${url ? `<a href="${escapeAttr(url)}" target="_blank" rel="noreferrer">${escapeHtml(title)}</a>` : escapeHtml(title)}</strong>
+        <strong>${url ? renderExternalLink(url, title) : escapeHtml(title)}</strong>
         <small>${escapeHtml(item.source_key || item.sourceKey || '')}</small>
       </div>
       <div class="chips">
@@ -1066,7 +1198,7 @@ function renderMitreData(v, records, sourceUrls) {
       ${Object.keys(sourceUrls).length ? `
         <div class="link-grid">
           ${Object.entries(sourceUrls).map(([k, u]) => `
-            <a href="${escapeAttr(u)}" target="_blank" rel="noreferrer" class="source-link-pill">${escapeHtml(k)}</a>
+            ${renderExternalLink(u, k, 'source-link-pill')}
           `).join('')}
         </div>
       ` : renderDataGap('CVE List / NVD source URLs are not attached to this normalized record yet.')}
@@ -1074,8 +1206,21 @@ function renderMitreData(v, records, sourceUrls) {
   `;
 }
 
-function renderCpeConfigurations(affected) {
-  const cpeItems = affected.filter(a => a.primary_cpe23_uri);
+function renderCpeConfigurations(affected, expressions = []) {
+  const expressionCpes = expressions
+    .filter(a => a.cpe23_uri && a.vulnerable !== false)
+    .map(a => ({
+      cpe: a.cpe23_uri,
+      range: a.version_range_raw,
+      source: a.code
+    }));
+  const cpeItems = expressionCpes.length
+    ? expressionCpes
+    : affected.filter(a => a.primary_cpe23_uri).map(a => ({
+      cpe: a.primary_cpe23_uri,
+      range: a.normalized_range,
+      source: a.ecosystem
+    }));
   const purlOnly = affected.filter(a => !a.primary_cpe23_uri && a.primary_purl);
   if (!cpeItems.length) {
     return `
@@ -1090,7 +1235,7 @@ function renderCpeConfigurations(affected) {
   }
   const grouped = {};
   cpeItems.forEach((item) => {
-    const cpe = item.primary_cpe23_uri;
+    const cpe = item.cpe;
     if (!grouped[cpe]) grouped[cpe] = [];
     grouped[cpe].push(item);
   });
@@ -1103,12 +1248,13 @@ function renderCpeConfigurations(affected) {
       <div class="config-list">
         ${Object.entries(grouped).slice(0, 24).map(([cpe, items], index) => `
           <div class="config-row">
-            <div class="config-op">OR</div>
+            <div class="config-op">CPE</div>
             <div>
-              <strong>Configuration ${index + 1}</strong>
+              <strong>Match expression ${index + 1}</strong>
               <code>${escapeHtml(cpe)}</code>
               <div class="chips">
-                ${items.slice(0, 6).map(a => `<span class="badge">${escapeHtml(a.ecosystem || 'unknown')}</span>`).join('')}
+                ${items.slice(0, 6).map(a => `<span class="badge">${escapeHtml(a.range || 'no range')}</span>`).join('')}
+                ${items.slice(0, 3).map(a => a.source ? sourceTag(a.source) : '').join('')}
               </div>
             </div>
           </div>
@@ -1136,7 +1282,7 @@ function renderAdvisories(refs) {
           ${display.map(r => `
             <div class="mini-table-row">
               <span>${escapeHtml(r.code || 'source')}</span>
-              <a href="${escapeAttr(r.url)}" target="_blank" rel="noreferrer">${escapeHtml(shortUrl(r.url))}</a>
+              ${renderExternalLink(r.url, shortUrl(r.url))}
               <span>${escapeHtml(r.ref_type || (Array.isArray(r.tags) ? r.tags.slice(0, 2).join(', ') : '') || '-')}</span>
             </div>
           `).join('')}
@@ -1146,7 +1292,7 @@ function renderAdvisories(refs) {
   `;
 }
 
-function renderEnrichmentPanel(v, severities) {
+function renderEnrichmentPanel(v) {
   return `
     <section class="detail-section rail-section" id="enrichment">
       <h3 class="section-h">Enrichment</h3>
@@ -1156,12 +1302,11 @@ function renderEnrichmentPanel(v, severities) {
         <div class="rail-metric"><span>KEV</span><strong>${v.kevDateAdded ? 'Yes' : 'No'}</strong><small>${v.knownRansomware ? 'Known ransomware use' : 'Ransomware unknown'}</small></div>
         <div class="rail-metric"><span>SSVC</span><strong>N/A</strong><small>Source not integrated</small></div>
       </div>
-      ${severities.length ? renderSeverityCards(severities) : ''}
     </section>
   `;
 }
 
-function renderTrackingPanel(v, records, refs) {
+function renderTrackingPanel(v, records, refs, history = []) {
   const dates = [
     ['Source published', v.publishedAt],
     ['Source modified', v.modifiedAt],
@@ -1175,7 +1320,29 @@ function renderTrackingPanel(v, records, refs) {
       <div class="timeline-list">
         ${dates.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${date(value)}</strong></div>`).join('')}
         <div><span>Source records</span><strong>${fmt(records.length)}</strong></div>
+        <div><span>Source changes</span><strong>${fmt(history.length)}</strong></div>
         <div><span>References</span><strong>${fmt(refs.length)}</strong></div>
+      </div>
+    </section>
+  `;
+}
+
+function renderSourceChanges(history) {
+  if (!history.length) return '';
+  return `
+    <section class="detail-section" id="source-changes">
+      <div class="section-title-row">
+        <h3 class="section-h">Source Changes</h3>
+        <span class="badge">${fmt(history.length)}</span>
+      </div>
+      <div class="timeline-list source-change-list">
+        ${history.slice(0, 30).map(item => `
+          <div>
+            <span>${escapeHtml(item.code || 'source')} · ${escapeHtml(item.change_type || 'updated')}</span>
+            <strong>${dateTime(item.source_modified_at || item.ingested_at)}</strong>
+            <small>${escapeHtml(item.source_record_id || '')}${item.record_hash ? ` · ${escapeHtml(item.record_hash)}` : ''}</small>
+          </div>
+        `).join('')}
       </div>
     </section>
   `;
@@ -1183,29 +1350,6 @@ function renderTrackingPanel(v, records, refs) {
 
 function renderDataGap(message) {
   return `<div class="data-gap"><p>${escapeHtml(message)}</p></div>`;
-}
-
-function deriveAction(v) {
-  const score = Number(v.maxCvssScore || 0);
-  const severity = String(v.severityLabel || '').toLowerCase();
-  if (v.kevDateAdded) return 'Patch or mitigate now';
-  if (score >= 9 || severity === 'critical') return 'Emergency review';
-  if (score >= 7 || severity === 'high') return 'High priority fix';
-  if (v.epssScore && Number(v.epssScore) >= 0.1) return 'Raise priority';
-  return 'Track exposure';
-}
-
-function deriveImpact(v) {
-  if (!v.maxCvssVector) return 'N/A';
-  const metrics = parseCvssVector(v.maxCvssVector);
-  const wanted = new Set(['C', 'I', 'A']);
-  const parts = metrics
-    .map(m => {
-      const key = m.metric.split(' - ')[0];
-      return wanted.has(key) ? `${key}:${m.value}` : null;
-    })
-    .filter(Boolean);
-  return parts.length ? parts.join(' ') : 'N/A';
 }
 
 function sourceTag(code) {
@@ -1225,8 +1369,76 @@ function aggregateDescriptions(descriptions) {
     map.set(key, existing);
   }
   return [...map.values()]
-    .sort((a, b) => Number(Boolean(b.is_selected)) - Number(Boolean(a.is_selected)) || b.sources.length - a.sources.length)
+    .sort((a, b) => descriptionContentPriority(b) - descriptionContentPriority(a) ||
+      descriptionSourcePriority(b) - descriptionSourcePriority(a) ||
+      Number(Boolean(b.is_selected)) - Number(Boolean(a.is_selected)) ||
+      b.value.length - a.value.length ||
+      b.sources.length - a.sources.length)
     .map(item => ({ ...item, langs: [...item.langs] }));
+}
+
+function descriptionSourcePriority(item) {
+  const sources = item.sources || [item.code];
+  if (sources.includes('ghsa')) return 6;
+  if (sources.includes('maven-osv') || sources.includes('maven-advisory')) return 5;
+  if (sources.includes('nvd-cve')) return 4;
+  if (sources.includes('nvd-cve-init')) return 3;
+  if (sources.some(source => String(source || '').includes('osv'))) return 2;
+  if (sources.includes('cve-list-v5')) return 1;
+  return 0;
+}
+
+function descriptionContentPriority(item) {
+  const value = String(item.value || '');
+  const length = value.length;
+  const langs = item.langs instanceof Set ? [...item.langs] : (item.langs || (item.lang ? [item.lang] : []));
+  const isEnglish = langs.some(lang => String(lang || '').toLowerCase().startsWith('en'));
+  const hasMarkdown = /(^|\n)\s{0,3}#{1,6}\s+\S|\[[^\]]+\]\([^)]+\)|(^|\n)\s*[-*]\s+\S/.test(value);
+  return (isEnglish ? 100 : 0) + (hasMarkdown ? 40 : 0) + (length >= 1200 ? 20 : length >= 180 ? 10 : length >= 80 ? 5 : 0);
+}
+
+function selectDetailHeadline(v, descriptions, records) {
+  const candidates = [];
+  for (const item of descriptions || []) {
+    const value = String(item.value || '').trim();
+    if (!value || value.length > 140) continue;
+    candidates.push({
+      value,
+      code: item.code,
+      lang: item.lang,
+      kind: item.description_type,
+      score: headlineScore(item.code, item.lang, item.description_type, value)
+    });
+  }
+  for (const record of records || []) {
+    const value = String(record.title || '').trim();
+    if (!value || value.length > 140) continue;
+    candidates.push({
+      value,
+      code: record.code,
+      lang: 'en',
+      kind: 'record-title',
+      score: headlineScore(record.code, 'en', 'record-title', value)
+    });
+  }
+  candidates.sort((a, b) => b.score - a.score || a.value.length - b.value.length);
+  const selected = candidates.find(c => c.value && !/^security update for /i.test(c.value)) || candidates[0];
+  if (selected) return selected.value;
+  const fallback = String(v.title || '').trim();
+  return fallback.length > 140 ? v.primaryIdentifier : (fallback || v.primaryIdentifier);
+}
+
+function headlineScore(code, lang, kind, value) {
+  const source = String(code || '');
+  const sourceScore =
+    source === 'ghsa' ? 40 :
+      source === 'maven-osv' || source === 'maven-advisory' ? 35 :
+        source === 'nvd-cve' || source === 'nvd-cve-init' ? 25 :
+          source.includes('osv') ? 15 : 0;
+  const langScore = String(lang || '').toLowerCase().startsWith('en') ? 30 : 0;
+  const kindScore = String(kind || '').includes('summary') ? 20 : 0;
+  const qualityPenalty = /^log4shell http scanner$/i.test(value) || /^security update for /i.test(value) ? 50 : 0;
+  return sourceScore + langScore + kindScore - qualityPenalty;
 }
 
 function renderDescriptionCards(descriptions) {
@@ -1234,9 +1446,9 @@ function renderDescriptionCards(descriptions) {
   const [primary, ...rest] = descriptions;
   return `
     <section class="detail-section" id="description">
-      <h3 class="section-h">Description</h3>
+      <h3 class="section-h">Additional Descriptions</h3>
       <div class="info-card description-primary">
-        <p class="info-card-body">${escapeHtml(primary.value || '')}</p>
+        <div class="info-card-body markdown-body">${renderSafeMarkdown(primary.value)}</div>
         <div class="chips">
           ${(primary.sources || [primary.code]).filter(Boolean).map(sourceTag).join('')}
           ${(primary.langs || (primary.lang ? [primary.lang] : [])).map(lang => `<span class="badge">${escapeHtml(lang)}</span>`).join('')}
@@ -1248,7 +1460,7 @@ function renderDescriptionCards(descriptions) {
           <div class="card-stack">
             ${rest.map(d => `
               <div class="info-card">
-                <p class="info-card-body">${escapeHtml(d.value || '')}</p>
+                <div class="info-card-body markdown-body">${renderSafeMarkdown(d.value)}</div>
                 <div class="chips">
                   ${(d.sources || [d.code]).filter(Boolean).map(sourceTag).join('')}
                   ${(d.langs || (d.lang ? [d.lang] : [])).map(lang => `<span class="badge">${escapeHtml(lang)}</span>`).join('')}
@@ -1262,22 +1474,56 @@ function renderDescriptionCards(descriptions) {
   `;
 }
 
-function renderSeverityCards(severities) {
-  if (!severities.length) return '';
+function renderCvssPanel(v, severities) {
+  const fallback = v.maxCvssScore == null ? [] : [{
+    scoring_system: 'CVSS',
+    scoring_version: v.maxCvssVersion,
+    score: v.maxCvssScore,
+    severity_label: v.severityLabel,
+    vector_string: v.maxCvssVector,
+    is_selected: true
+  }];
+  const scores = compactSeverities(severities.length ? severities : fallback).slice(0, 8);
+  if (!scores.length) return '';
+  const vector = v.maxCvssVector || scores.find(score => score.is_selected)?.vector_string || scores.find(score => score.vector_string)?.vector_string;
   return `
-    <div class="severity-list">
-      ${severities.map(s => `
-        <div class="severity-item">
-          <div class="info-card-row">
-            <strong>${escapeHtml(s.scoring_system || 'severity')} ${escapeHtml(s.scoring_version || '')}</strong>
-            ${s.score != null ? severityBadge(s.severity_label, s.score) : `<span class="badge">${escapeHtml(s.severity_label || 'N/A')}</span>`}
+    <section class="cvss-panel detail-section" id="cvss-scores">
+      <div class="section-title-row">
+        <h3 class="section-h">CVSS Scores</h3>
+        <span class="badge">${fmt(scores.length)} source score${scores.length > 1 ? 's' : ''}</span>
+      </div>
+      <div class="cvss-score-groups">
+        ${scores.map(score => `
+          <div class="cvss-source-score ${score.is_selected ? 'is-selected' : ''}">
+            <div>
+              <strong>${score.score != null ? Number(score.score).toFixed(1) : 'N/A'}</strong>
+              <span>${escapeHtml(score.severity_label || 'unrated')}</span>
+            </div>
+            <small>${escapeHtml(score.scoring_system || 'CVSS')} ${escapeHtml(score.scoring_version || '')}</small>
+            ${score.code ? sourceTag(score.code) : ''}
           </div>
-          ${s.vector_string ? `<code class="cvss-vector-string">${escapeHtml(s.vector_string)}</code>` : ''}
-          <div class="chips">${sourceTag(s.code)}</div>
-        </div>
-      `).join('')}
-    </div>
+        `).join('')}
+      </div>
+      ${vector ? cvssVectorBlock(v.maxCvssVersion, vector) : ''}
+    </section>
   `;
+}
+
+function compactSeverities(severities) {
+  const seen = new Set();
+  return severities.filter(score => {
+    const key = [
+      score.code,
+      score.scoring_system,
+      score.scoring_version,
+      score.score,
+      score.severity_label,
+      score.vector_string
+    ].map(value => String(value ?? '')).join('|');
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 function renderAffectedGrouped(affected) {
@@ -1373,7 +1619,7 @@ function renderReferenceCards(refs) {
       <div class="card-stack">
         ${display.map(r => `
           <div class="info-card">
-            <a href="${escapeAttr(r.url)}" target="_blank" rel="noreferrer" class="ref-link">${escapeHtml(shortUrl(r.url))}</a>
+            ${renderExternalLink(r.url, shortUrl(r.url), 'ref-link')}
             <div class="chips">
               ${sourceTag(r.code)}
               ${r.ref_type ? `<span class="badge">${escapeHtml(r.ref_type)}</span>` : ''}
@@ -1389,7 +1635,7 @@ function renderReferenceCards(refs) {
 function vulnerabilityResult(item) {
   const names = (item.affectedComponentNames || []).slice(0, 3);
   return `
-    <button class="result-item" type="button" data-vulnerability-id="${escapeAttr(item.id)}">
+    <a class="result-item" href="${cveRoute(item.primaryIdentifier)}" data-vulnerability-id="${escapeAttr(item.id)}" data-vulnerability-identifier="${escapeAttr(item.primaryIdentifier)}">
       <div class="result-main">
         <span class="result-title">${escapeHtml(item.primaryIdentifier)}</span>
         ${severityBadge(item.severityLabel, item.maxCvssScore)}
@@ -1398,10 +1644,10 @@ function vulnerabilityResult(item) {
       <div class="result-meta">
         ${item.publishedAt ? `<span class="badge">published ${date(item.publishedAt)}</span>` : ''}
         ${item.modifiedAt ? `<span class="badge">updated ${date(item.modifiedAt)}</span>` : ''}
-        ${names.length ? `<span class="badge" title="${escapeHtml(names.join(', '))}">${escapeHtml(names.join(', '))}</span>` : ''}
+        ${names.length ? `<span class="badge" title="${escapeAttr(names.join(', '))}">${escapeHtml(names.join(', '))}</span>` : ''}
         ${item.affectedComponentCount ? `<span class="badge muted">${fmt(item.affectedComponentCount)} affected</span>` : ''}
       </div>
-    </button>
+    </a>
   `;
 }
 
@@ -1409,14 +1655,14 @@ function componentVulnerabilityResult(item) {
   const match = item.versionMatched === true ? 'version match' : item.versionMatched === false ? 'range miss' : 'range unknown';
   const matchKlass = item.versionMatched === true ? 'low' : item.versionMatched === false ? 'none' : '';
   return `
-    <button class="result-item" type="button" data-vulnerability-id="${escapeAttr(item.vulnerabilityId)}">
+    <a class="result-item" href="${cveRoute(item.primaryIdentifier)}" data-vulnerability-id="${escapeAttr(item.vulnerabilityId)}" data-vulnerability-identifier="${escapeAttr(item.primaryIdentifier)}">
       <div class="result-main">
         <span class="result-title">${escapeHtml(item.primaryIdentifier)}</span>
         ${severityBadge(item.severityLabel, item.cvssScore)}
       </div>
       <div class="muted">${escapeHtml(item.packageName || item.purl || '')}</div>
       <div class="chips"><span class="badge ${matchKlass}">${escapeHtml(match)}</span><span class="badge">${escapeHtml(item.versionRange || 'no range')}</span></div>
-    </button>
+    </a>
   `;
 }
 
@@ -1505,18 +1751,25 @@ function slug(value) {
 
 function cvssVectorBlock(version, vectorString) {
   const metrics = parseCvssVector(vectorString);
-  const id = `cvss-breakdown-${Math.random().toString(36).slice(2, 8)}`;
+  const groups = [
+    ['Base', metrics.filter(metric => ['AV', 'AC', 'PR', 'UI', 'S', 'C', 'I', 'A'].includes(metric.key))],
+    ['Temporal', metrics.filter(metric => ['E', 'RL', 'RC'].includes(metric.key))],
+    ['Environmental', metrics.filter(metric => !['AV', 'AC', 'PR', 'UI', 'S', 'C', 'I', 'A', 'E', 'RL', 'RC'].includes(metric.key))]
+  ].filter(([, items]) => items.length);
   return `
     <div class="cvss-vector">
-      <code class="cvss-vector-string">${escapeHtml(vectorString)}</code>
-      <button class="cvss-toggle" type="button" data-target="${id}" aria-expanded="false">Metrics &raquo;</button>
-      <div class="cvss-breakdown" id="${id}" hidden>
-        <table class="cvss-metrics">
-          <tbody>
-            ${metrics.map((m) => `<tr><th>${escapeHtml(m.metric)}</th><td>${escapeHtml(m.value)}</td><td class="muted">${escapeHtml(m.label)}</td></tr>`).join('')}
-          </tbody>
-        </table>
+      <div class="cvss-vector-head">
+        <span>${escapeHtml(version || 'CVSS vector')}</span>
+        <code class="cvss-vector-string">${escapeHtml(vectorString)}</code>
       </div>
+      ${groups.map(([label, items]) => `
+        <div class="cvss-metric-group">
+          <span>${escapeHtml(label)}</span>
+          <div class="cvss-metric-chips">
+            ${items.map(metric => `<span class="cvss-metric-chip" title="${escapeAttr(metric.metric)}"><b>${escapeHtml(metric.key)}</b>${escapeHtml(metric.label)}</span>`).join('')}
+          </div>
+        </div>
+      `).join('')}
     </div>
   `;
 }
@@ -1554,6 +1807,7 @@ function parseCvssVector(vectorString) {
     const [key, value] = m.split(':');
     const def = CVSS_LABELS[key] || {};
     return {
+      key,
       metric: `${key} - ${def.label || key}`,
       value: value,
       label: def[value] || value
@@ -1574,18 +1828,131 @@ function escapeAttr(value) {
   return escapeHtml(value).replaceAll('`', '&#96;');
 }
 
+function renderSafeMarkdown(value) {
+  const lines = String(value || '').replace(/\r\n?/g, '\n').split('\n');
+  const html = [];
+  let paragraph = [];
+  let list = null;
+  let code = null;
+
+  const flushParagraph = () => {
+    if (!paragraph.length) return;
+    html.push(`<p>${paragraph.map(renderSafeMarkdownInline).join('<br>')}</p>`);
+    paragraph = [];
+  };
+  const flushList = () => {
+    if (!list) return;
+    html.push(`<${list.type}>${list.items.map(item => `<li>${renderSafeMarkdownInline(item)}</li>`).join('')}</${list.type}>`);
+    list = null;
+  };
+  const flushCode = () => {
+    if (!code) return;
+    html.push(`<pre><code>${escapeHtml(code.lines.join('\n'))}</code></pre>`);
+    code = null;
+  };
+
+  for (const line of lines) {
+    const fence = line.match(/^\s*```(?:\w+)?\s*$/);
+    if (fence) {
+      flushParagraph();
+      flushList();
+      if (code) flushCode();
+      else code = { lines: [] };
+      continue;
+    }
+    if (code) {
+      code.lines.push(line);
+      continue;
+    }
+    if (!line.trim()) {
+      flushParagraph();
+      flushList();
+      continue;
+    }
+    const heading = line.match(/^\s*(#{1,3})\s+(.+)$/);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = heading[1].length + 3;
+      html.push(`<h${level}>${renderSafeMarkdownInline(heading[2])}</h${level}>`);
+      continue;
+    }
+    const bullet = line.match(/^\s*[-*+]\s+(.+)$/);
+    const ordered = line.match(/^\s*\d+\.\s+(.+)$/);
+    if (bullet || ordered) {
+      flushParagraph();
+      const type = bullet ? 'ul' : 'ol';
+      if (list?.type !== type) {
+        flushList();
+        list = { type, items: [] };
+      }
+      list.items.push((bullet || ordered)[1]);
+      continue;
+    }
+    if (line.startsWith('> ')) {
+      flushParagraph();
+      flushList();
+      html.push(`<blockquote>${renderSafeMarkdownInline(line.slice(2))}</blockquote>`);
+      continue;
+    }
+    paragraph.push(line);
+  }
+  flushParagraph();
+  flushList();
+  flushCode();
+  return html.join('');
+}
+
+function renderSafeMarkdownInline(value) {
+  const codeTokens = [];
+  let text = escapeHtml(value);
+  text = text.replace(/`([^`]+)`/g, (_, content) => {
+    const token = `VTMDTOKEN${codeTokens.length}END`;
+    codeTokens.push(`<code>${content}</code>`);
+    return token;
+  });
+  text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, label, href) => {
+    const safeHref = safeExternalHref(href.replaceAll('&amp;', '&'));
+    return safeHref ? `<a href="${escapeAttr(safeHref)}" target="_blank" rel="noreferrer">${label}</a>` : `${label} (${href})`;
+  });
+  text = text
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/__([^_]+)__/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')
+    .replace(/(^|[^_])_([^_]+)_/g, '$1<em>$2</em>');
+  return text.replace(/VTMDTOKEN(\d+)END/g, (_, index) => codeTokens[Number(index)] || '');
+}
+
+function safeExternalHref(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return ['http:', 'https:'].includes(url.protocol) ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
+function renderExternalLink(url, label, className = '') {
+  const href = safeExternalHref(url);
+  const text = escapeHtml(label);
+  return href
+    ? `<a href="${escapeAttr(href)}" target="_blank" rel="noreferrer"${className ? ` class="${escapeAttr(className)}"` : ''}>${text}</a>`
+    : `<span${className ? ` class="${escapeAttr(className)}"` : ''}>${text}</span>`;
+}
+
 async function bootstrap() {
   await loadAuthSession();
   loadStatus();
   el.queryInput.value = '';
-  setTimeout(() => runSearch(), 100);
+  await applyRoute();
 }
 
 bootstrap();
+window.addEventListener('popstate', applyRoute);
 
 // ===== SBOM Management =====
 
-async function loadSbomList() {
+async function loadSbomList(options = {}) {
   el.searchForm.hidden = true;
   if (el.resultsMeta) el.resultsMeta.textContent = modeDescription('sbom');
   hideDetailPane();
@@ -1593,6 +1960,7 @@ async function loadSbomList() {
   try {
     const data = await api('/api/v1/sbom.list');
     renderSbomItems(data.items);
+    if (options.detailId) await loadSbomDetail(options.detailId, { updateRoute: false });
   } catch (e) {
     document.getElementById('sbomUploadStatus').textContent = `Error loading list: ${escapeHtml(e.message)}`;
   }
@@ -1621,18 +1989,22 @@ function renderSbomItems(items) {
   list.innerHTML = items.length
     ? `<div class="muted result-item" style="font-weight:600">Uploaded SBOMs (${items.length})</div>
        ${items.map(i => `
-         <button class="result-item" type="button" data-sbom-id="${escapeAttr(i.id)}" style="display:grid;gap:4px">
+	         <a class="result-item" href="${sbomRoute(i.id)}" data-sbom-id="${escapeAttr(i.id)}" style="display:grid;gap:4px">
            <div class="result-main"><span class="result-title">${escapeHtml(i.name)}</span></div>
            <div class="result-meta">
              <span class="badge">${i.componentCount} components</span>
              <span class="badge ${i.matchedCount > 0 ? 'high' : ''}">${i.matchedCount} vulns</span>
              <span class="badge">${date(i.uploadedAt)}</span>
            </div>
-         </button>
+	         </a>
        `).join('')}`
     : '<div class="muted result-item">No SBOMs uploaded yet</div>';
-  list.querySelectorAll('[data-sbom-id]').forEach(btn => {
-    btn.addEventListener('click', () => loadSbomDetail(btn.dataset.sbomId));
+  list.querySelectorAll('[data-sbom-id]').forEach(link => {
+    link.addEventListener('click', (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      loadSbomDetail(link.dataset.sbomId);
+    });
   });
 }
 
@@ -1657,12 +2029,13 @@ function setupSbomUpload() {
   });
 }
 
-async function loadSbomDetail(sbomId) {
+async function loadSbomDetail(sbomId, options = {}) {
   showDetailPane();
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading...</h2></div>';
   try {
     const data = await api(`/api/v1/sbom.get?id=${encodeURIComponent(sbomId)}`);
     renderSbomDetail(data, sbomId);
+    if (options.updateRoute !== false) updateRoute(sbomRoute(sbomId));
     el.detailPane.scrollIntoView({ block: 'start', behavior: 'smooth' });
   } catch (e) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Error</h2><p>${escapeHtml(e.message)}</p></div>`;
@@ -1735,8 +2108,8 @@ function renderSbomDetail(data, sbomId) {
                     const rangeDisplay = hasRange
                       ? `<code style="font-size:11px">${escapeHtml(v.versionRange)}</code>`
                       : `<span class="muted" style="font-size:11px" title="Alpine secfixes: no version data">no version data</span>`;
-                    return `<tr data-vuln-id="${escapeAttr(v.vulnerabilityId)}" class="finding-row" style="cursor:pointer">
-                      <td><span class="finding-cve">${escapeHtml(v.primaryIdentifier)}</span></td>
+	                    return `<tr class="finding-row">
+	                      <td><a class="finding-cve" href="${cveRoute(v.primaryIdentifier)}" data-vulnerability-id="${escapeAttr(v.vulnerabilityId)}" data-vulnerability-identifier="${escapeAttr(v.primaryIdentifier)}">${escapeHtml(v.primaryIdentifier)}</a></td>
                       <td>${severityBadge(v.severityLabel, v.cvssScore)}</td>
                       <td>${rangeDisplay}</td>
                       <td><span class="badge ${kl}">${status}</span></td></tr>`;
@@ -1768,6 +2141,7 @@ function renderSbomDetail(data, sbomId) {
     try {
       await api('/api/v1/sbom.delete', { method: 'POST', body: JSON.stringify({ sbomId }) });
       el.detailPane.innerHTML = '<div class="empty-state"><h2>Deleted</h2></div>';
+      updateRoute(modeRoute('sbom'), { replace: true });
       loadSbomList();
     } catch(e) { alert('Delete failed: ' + e.message); }
   });
@@ -1779,7 +2153,5 @@ function renderSbomDetail(data, sbomId) {
     });
   });
 
-  el.detailPane.querySelectorAll('[data-vuln-id]').forEach(el => {
-    el.addEventListener('click', () => loadVulnerabilityDetail(el.dataset.vulnId));
-  });
+  bindVulnerabilityLinks(el.detailPane);
 }

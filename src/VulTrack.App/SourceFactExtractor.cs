@@ -49,15 +49,21 @@ public static class SourceFactExtractor
         {
             var type = item?["type"]?.GetValue<string>() ?? "vendor";
             var scoreText = item?["score"]?.GetValue<string>();
-            var vector = scoreText?.StartsWith("CVSS:", StringComparison.OrdinalIgnoreCase) == true ? scoreText : null;
+            var versionFromType = VersionFromType(type);
+            var calculatedScore = CvssScoreCalculator.CalculateBaseScore(scoreText, versionFromType);
+            var vector = scoreText?.StartsWith("CVSS:", StringComparison.OrdinalIgnoreCase) == true || calculatedScore is not null
+                ? scoreText
+                : null;
             var numeric = DecimalValue(item?["score"]);
+            var score = numeric ?? calculatedScore;
+            var version = CvssVersion(vector) ?? versionFromType;
             rows.Add(new SeverityScoreDraft(
                 type.StartsWith("CVSS", StringComparison.OrdinalIgnoreCase) ? "cvss" : type.ToLowerInvariant(),
-                CvssVersion(vector) ?? VersionFromType(type),
+                version,
                 "base",
                 vector,
-                numeric,
-                numeric is null ? null : SeverityFromScore(numeric.Value),
+                score,
+                score is null ? null : SeverityFromScore(score.Value, version),
                 item?.ToJsonString() ?? "{}"));
         }
 
@@ -70,14 +76,20 @@ public static class SourceFactExtractor
         foreach (var item in WalkObjects(cvss))
         {
             var vector = StringValue(item["vectorString"]) ?? StringValue(item["vector_string"]);
-            var score = DecimalValue(item["score"]) ?? DecimalValue(item["baseScore"]) ?? DecimalValue(item["base_score"]);
-            var label = StringValue(item["severity"]) ?? StringValue(item["baseSeverity"]) ?? (score is null ? null : SeverityFromScore(score.Value));
+            var version = CvssVersion(vector) ?? StringValue(item["version"]);
+            var score = DecimalValue(item["score"]) ??
+                DecimalValue(item["baseScore"]) ??
+                DecimalValue(item["base_score"]) ??
+                CvssScoreCalculator.CalculateBaseScore(vector, version);
+            var label = StringValue(item["severity"]) ??
+                StringValue(item["baseSeverity"]) ??
+                (score is null ? null : SeverityFromScore(score.Value, version));
 
             if (vector is null && score is null && label is null) continue;
 
             rows.Add(new SeverityScoreDraft(
                 "cvss",
-                CvssVersion(vector) ?? StringValue(item["version"]),
+                version,
                 "base",
                 vector,
                 score,
@@ -173,13 +185,20 @@ public static class SourceFactExtractor
             _ => null
         };
 
-    private static string SeverityFromScore(decimal score) =>
-        score switch
-        {
-            >= 9.0m => "CRITICAL",
-            >= 7.0m => "HIGH",
-            >= 4.0m => "MEDIUM",
-            > 0m => "LOW",
-            _ => "NONE"
-        };
+    private static string SeverityFromScore(decimal score, string? version = null) =>
+        version?.StartsWith("2", StringComparison.Ordinal) == true
+            ? score switch
+            {
+                >= 7.0m => "HIGH",
+                >= 4.0m => "MEDIUM",
+                _ => "LOW"
+            }
+            : score switch
+            {
+                >= 9.0m => "CRITICAL",
+                >= 7.0m => "HIGH",
+                >= 4.0m => "MEDIUM",
+                > 0m => "LOW",
+                _ => "NONE"
+            };
 }

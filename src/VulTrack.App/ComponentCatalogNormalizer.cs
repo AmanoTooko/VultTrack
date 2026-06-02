@@ -51,7 +51,7 @@ public sealed class ComponentCatalogNormalizer : ISourceScopedRawNormalizer
                    s.titles::text, s.refs::text, s.deprecated, s.last_modified_at, r.source_id
             from stg_nvd_cpe_dictionary s
             join source_raw_index r on r.id = s.raw_index_id
-            where r.normalize_status <> 'succeeded'
+            where r.normalize_status in ('pending', 'failed')
             order by s.cpe23_uri
             limit $1
             """, connection);
@@ -113,7 +113,7 @@ public sealed class ComponentCatalogNormalizer : ISourceScopedRawNormalizer
                    s.repository_url, s.homepage_url, s.metadata::text, r.source_id
             from stg_registry_packages s
             join source_raw_index r on r.id = s.raw_index_id
-            where r.normalize_status <> 'succeeded'
+            where r.normalize_status in ('pending', 'failed')
             order by s.ecosystem, s.namespace, s.name
             limit $1
             """, connection);
@@ -176,7 +176,7 @@ public sealed class ComponentCatalogNormalizer : ISourceScopedRawNormalizer
             from stg_registry_packages s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
-            where r.normalize_status <> 'succeeded' and src.code = $1
+            where r.normalize_status in ('pending', 'failed') and src.code = $1
             order by s.ecosystem, s.namespace, s.name
             limit $2
             """, connection);

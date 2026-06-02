@@ -179,6 +179,30 @@ export async function saveCheckpoint(client, sourceId, checkpoint) {
   );
 }
 
+export function resumeInitOffset(checkpoint, identity = {}) {
+  if (checkpoint?.initComplete !== false) return 0;
+  for (const [key, value] of Object.entries(identity)) {
+    if (checkpoint[key] !== value) return 0;
+  }
+  const offset = Number(checkpoint.offset);
+  return Number.isSafeInteger(offset) && offset >= 0 ? offset : 0;
+}
+
+export async function saveInitProgress(client, ctx, checkpoint) {
+  const next = { ...checkpoint, initComplete: false };
+  await saveCheckpoint(client, ctx.source.id, next);
+  ctx.source.checkpoint_json = next;
+  return next;
+}
+
+export async function sourceHasRawRecords(client, sourceId) {
+  const result = await client.query(
+    'select exists(select 1 from source_raw_index where source_id = $1) as has_records',
+    [sourceId]
+  );
+  return Boolean(result.rows[0]?.has_records);
+}
+
 /**
  * Bulk init fetcher: download archive from URL, extract, and run processFile for each entry.
  * Supports .zip, .tar.xz, .json.gz formats via system tools.

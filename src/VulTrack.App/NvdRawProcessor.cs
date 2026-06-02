@@ -16,37 +16,10 @@ public sealed class NvdRawProcessor(
         var processed = 0;
         var failed = 0;
 
-        await using var select = db.CreateCommand("""
-            select s.raw_index_id, s.cve_id, s.vuln_status, s.descriptions, s.metrics,
-                   s.weaknesses, s.configurations, s.references_json, s.published_at, s.modified_at,
-                   s.payload, r.source_id
-            from stg_nvd_cves s
-            join source_raw_index r on r.id = s.raw_index_id
-            where r.normalize_status <> 'succeeded'
-            order by s.modified_at nulls last, s.cve_id
-            limit $1
-            """);
-        select.Parameters.AddWithValue(limit);
-
-        var records = new List<NvdStagingRecord>();
-        await using (var reader = await select.ExecuteReaderAsync(ct))
+        var records = await SelectPendingRecordsAsync(limit, priorityOnly: true, ct);
+        if (records.Count == 0)
         {
-            while (await reader.ReadAsync(ct))
-            {
-                records.Add(new NvdStagingRecord(
-                    reader.GetGuid(0),
-                    reader.GetString(1),
-                    reader.IsDBNull(2) ? null : reader.GetString(2),
-                    reader.GetString(3),
-                    reader.GetString(4),
-                    reader.GetString(5),
-                    reader.GetString(6),
-                    reader.GetString(7),
-                    reader.IsDBNull(8) ? null : reader.GetFieldValue<DateTimeOffset>(8),
-                    reader.IsDBNull(9) ? null : reader.GetFieldValue<DateTimeOffset>(9),
-                    reader.GetString(10),
-                    reader.GetGuid(11)));
-            }
+            records = await SelectPendingRecordsAsync(limit, priorityOnly: false, ct);
         }
 
         var succeededRawIndexIds = new List<Guid>();
@@ -91,6 +64,54 @@ public sealed class NvdRawProcessor(
         await MarkNormalizedAsync(connection, succeededRawIndexIds, ct);
         await transaction.CommitAsync(ct);
         return new ProcessPendingResult(processed, failed);
+    }
+
+    private async Task<List<NvdStagingRecord>> SelectPendingRecordsAsync(int limit, bool priorityOnly, CancellationToken ct)
+    {
+        await using var select = db.CreateCommand(priorityOnly ? """
+            select s.raw_index_id, s.cve_id, s.vuln_status, s.descriptions, s.metrics,
+                   s.weaknesses, s.configurations, s.references_json, s.published_at, s.modified_at,
+                   s.payload, r.source_id
+            from stg_nvd_cves s
+            join source_raw_index r on r.id = s.raw_index_id
+            where r.normalize_status in ('pending', 'failed')
+              and r.status = 'priority'
+            order by s.modified_at nulls last, s.cve_id
+            limit $1
+            """ : """
+            select s.raw_index_id, s.cve_id, s.vuln_status, s.descriptions, s.metrics,
+                   s.weaknesses, s.configurations, s.references_json, s.published_at, s.modified_at,
+                   s.payload, r.source_id
+            from stg_nvd_cves s
+            join source_raw_index r on r.id = s.raw_index_id
+            where r.normalize_status in ('pending', 'failed')
+            order by s.modified_at nulls last, s.cve_id
+            limit $1
+            """);
+        select.Parameters.AddWithValue(limit);
+
+        var records = new List<NvdStagingRecord>();
+        await using (var reader = await select.ExecuteReaderAsync(ct))
+        {
+            while (await reader.ReadAsync(ct))
+            {
+                records.Add(new NvdStagingRecord(
+                    reader.GetGuid(0),
+                    reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.GetString(3),
+                    reader.GetString(4),
+                    reader.GetString(5),
+                    reader.GetString(6),
+                    reader.GetString(7),
+                    reader.IsDBNull(8) ? null : reader.GetFieldValue<DateTimeOffset>(8),
+                    reader.IsDBNull(9) ? null : reader.GetFieldValue<DateTimeOffset>(9),
+                    reader.GetString(10),
+                    reader.GetGuid(11)));
+            }
+        }
+
+        return records;
     }
 
     private async Task<Guid> UpsertVulnerabilityAsync(NpgsqlConnection conn, NvdStagingRecord record, CancellationToken ct)
@@ -249,6 +270,7 @@ public sealed class NvdRawProcessor(
     private static async Task<IReadOnlyList<AffectedFactDraft>> UpsertAffectedFactsAsync(NpgsqlConnection conn, Guid vulnerabilityId, Guid recordId, NvdStagingRecord record, CancellationToken ct)
     {
         var facts = new List<AffectedFactDraft>();
+        var extracted = new List<NvdCpeFact>();
         foreach (var cpeMatch in WalkCpeMatches(JsonNode.Parse(record.Configurations)))
         {
             var criteria = cpeMatch?["criteria"]?.GetValue<string>();
@@ -256,24 +278,44 @@ public sealed class NvdRawProcessor(
             var product = ParseProduct(criteria);
             var versionRange = ExtractCpeVersionRange(cpeMatch);
             var rangeType = versionRange is not null ? "cpe_match" : "cpe_match_no_range";
-            await using var cmd = new NpgsqlCommand("""
+            var vulnerable = cpeMatch?["vulnerable"]?.GetValue<bool>() ?? true;
+            var sourceSpecificJson = cpeMatch?.ToJsonString() ?? "{}";
+            extracted.Add(new NvdCpeFact(criteria, product, versionRange, rangeType, vulnerable, sourceSpecificJson));
+            if (vulnerable)
+            {
+                facts.Add(new AffectedFactDraft("cpe", "cpe", product, null, versionRange, rangeType, sourceSpecificJson, criteria));
+            }
+        }
+
+        foreach (var batch in extracted.Chunk(1000))
+        {
+            var values = new List<string>();
+            var parameters = new List<object>();
+            var parameterIndex = 1;
+            foreach (var fact in batch)
+            {
+                values.Add($"(${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++},'cpe','cpe',${parameterIndex++},${parameterIndex++},lower(${parameterIndex - 1}),${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++}::jsonb)");
+                parameters.Add(vulnerabilityId);
+                parameters.Add(recordId);
+                parameters.Add(record.SourceId);
+                parameters.Add(record.RawIndexId);
+                parameters.Add(fact.Criteria);
+                parameters.Add(fact.Product);
+                parameters.Add((object?)fact.VersionRange ?? DBNull.Value);
+                parameters.Add(fact.RangeType);
+                parameters.Add(fact.Vulnerable);
+                parameters.Add(fact.SourceSpecificJson);
+            }
+
+            await using var cmd = new NpgsqlCommand($"""
                 insert into vulnerability_affected_facts
                   (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
                    cpe23_uri, package_name, normalized_package_name, version_range_raw, range_type, vulnerable,
                    source_specific)
-                values ($1,$2,$3,$4,'cpe','cpe',$5,$6,lower($6),$7,$8,$9,'{}'::jsonb)
+                values {string.Join(",", values)}
                 """, conn);
-            cmd.Parameters.AddWithValue(vulnerabilityId);
-            cmd.Parameters.AddWithValue(recordId);
-            cmd.Parameters.AddWithValue(record.SourceId);
-            cmd.Parameters.AddWithValue(record.RawIndexId);
-            cmd.Parameters.AddWithValue(criteria);
-            cmd.Parameters.AddWithValue(product);
-            cmd.Parameters.AddWithValue((object?)versionRange ?? DBNull.Value);
-            cmd.Parameters.AddWithValue(rangeType);
-            cmd.Parameters.AddWithValue(cpeMatch?["vulnerable"]?.GetValue<bool>() ?? true);
+            foreach (var parameter in parameters) cmd.Parameters.AddWithValue(parameter);
             await cmd.ExecuteNonQueryAsync(ct);
-            facts.Add(new AffectedFactDraft("cpe", "cpe", product, null, versionRange, rangeType, cpeMatch?.ToJsonString() ?? "{}", criteria));
         }
 
         return facts;
@@ -299,7 +341,13 @@ public sealed class NvdRawProcessor(
     private static async Task MarkNormalizedAsync(NpgsqlConnection conn, IReadOnlyList<Guid> rawIndexIds, CancellationToken ct)
     {
         if (rawIndexIds.Count == 0) return;
-        await using var cmd = new NpgsqlCommand("update source_raw_index set normalize_status = 'succeeded', updated_at = now() where id = any($1)", conn);
+        await using var cmd = new NpgsqlCommand("""
+            update source_raw_index
+            set normalize_status = 'succeeded',
+                status = case when status = 'priority' then 'normalized' else status end,
+                updated_at = now()
+            where id = any($1)
+            """, conn);
         cmd.Parameters.AddWithValue(rawIndexIds.ToArray());
         await cmd.ExecuteNonQueryAsync(ct);
     }
@@ -371,3 +419,11 @@ public sealed record NvdStagingRecord(
     Guid SourceId);
 
 public sealed record CvssScore(string Version, string? Vector, decimal? Score, string? Severity, string RawJson);
+
+public sealed record NvdCpeFact(
+    string Criteria,
+    string Product,
+    string? VersionRange,
+    string RangeType,
+    bool Vulnerable,
+    string SourceSpecificJson);

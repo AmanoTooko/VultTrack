@@ -1,7 +1,7 @@
 import { fetchJson, authHeaders } from '../lib/http.mjs';
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
-import { writeRecord } from '../lib/db.mjs';
+import { resumeInitOffset, saveInitProgress, writeRecord } from '../lib/db.mjs';
 import { upsertNvdCpe } from '../lib/staging.mjs';
 
 export const sourceCode = 'nvd-cpe';
@@ -19,7 +19,8 @@ export async function run(client, ctx) {
   const { nvdKey } = authHeaders();
 
   const checkpoint = ctx.source.checkpoint_json ?? {};
-  let lastModStartDate = checkpoint.lastModStartDate ?? null;
+  const resumeFullInit = checkpoint.initComplete === false;
+  let lastModStartDate = resumeFullInit ? null : (checkpoint.lastModStartDate ?? null);
 
   // NVD API rejects date ranges > 120 days; cap if checkpoint is too old
   const now = new Date();
@@ -32,13 +33,23 @@ export async function run(client, ctx) {
     }
   }
 
-  const isIncremental = !!lastModStartDate;
-  console.error(`[nvd-cpe] ${isIncremental ? 'incremental' : 'full init'} starting...`);
+  const isFullInit = resumeFullInit || !lastModStartDate;
+  console.error(`[nvd-cpe] ${isFullInit ? 'full init' : 'incremental'} starting...`);
 
-  let startIndex = 0;
+  let startIndex = isFullInit
+    ? resumeInitOffset(checkpoint, { initMode: 'full' })
+    : 0;
   let total = Number.MAX_SAFE_INTEGER;
   let count = 0;
-  let latestMod = lastModStartDate;
+  let latestMod = isFullInit ? (checkpoint.latestModStartDate ?? null) : lastModStartDate;
+  let reachedEnd = false;
+
+  if (isFullInit) {
+    await saveInitProgress(client, ctx, fullInitCheckpoint(startIndex, latestMod));
+    if (startIndex > 0) {
+      console.error(`[nvd-cpe] resuming full init at offset ${startIndex}`);
+    }
+  }
 
   while (startIndex < total && count < max) {
     const url = new URL('https://services.nvd.nist.gov/rest/json/cpes/2.0');
@@ -50,7 +61,8 @@ export async function run(client, ctx) {
     }
     const data = await fetchJson(url, { headers: nvdKey ? { apiKey: nvdKey } : {} });
     total = data.totalResults ?? 0;
-    for (const item of data.products ?? []) {
+    const products = data.products ?? [];
+    for (const item of products) {
       if (count >= max) break;
       const cpe = item.cpe;
       const uri = cpe?.cpeName ?? cpe?.cpeNameId;
@@ -70,7 +82,12 @@ export async function run(client, ctx) {
       count++;
     }
     startIndex += data.resultsPerPage ?? pageSize;
-    if ((data.products ?? []).length === 0) break;
+    reachedEnd = startIndex >= total || products.length === 0;
+
+    if (isFullInit) {
+      await saveInitProgress(client, ctx, fullInitCheckpoint(startIndex, latestMod));
+    }
+    if (reachedEnd) break;
 
     if (count % 50000 === 0 && total > 0) {
       console.error(`[nvd-cpe] ${count}/${total} (${Math.round(count/total*100)}%)`);
@@ -81,5 +98,29 @@ export async function run(client, ctx) {
     }
   }
   console.error(`[nvd-cpe] done, fetched ${count} records`);
-  return { fetchedCount: count, parsedCount: count, checkpoint: { lastModStartDate: latestMod ? nvdDate(latestMod) : null, lastFetched: now.toISOString() } };
+  if (isFullInit && !reachedEnd) {
+    return {
+      fetchedCount: count,
+      parsedCount: count,
+      checkpoint: await saveInitProgress(client, ctx, fullInitCheckpoint(startIndex, latestMod))
+    };
+  }
+  return {
+    fetchedCount: count,
+    parsedCount: count,
+    checkpoint: {
+      initComplete: true,
+      lastModStartDate: latestMod ? nvdDate(latestMod) : null,
+      lastFetched: now.toISOString()
+    }
+  };
+}
+
+function fullInitCheckpoint(offset, latestMod) {
+  return {
+    initMode: 'full',
+    offset,
+    latestModStartDate: latestMod ? nvdDate(latestMod) : null,
+    lastFetched: new Date().toISOString()
+  };
 }

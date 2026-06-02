@@ -17,6 +17,7 @@
     "audit:storage": "node scripts/audit-database-storage.mjs",
     "smoke:canonical": "node scripts/smoke-canonical-integrity.mjs",
     "rebuild:canonical": "node scripts/rebuild-canonical-data.mjs",
+    "reset:exploit-intelligence": "node scripts/reset-exploit-intelligence.mjs",
     "lint": "eslint plugins scripts tests src/VulTrack.App/wwwroot",
     "test": "node --test tests/node/*.test.mjs",
     "test:integration": "node --test tests/integration/*.test.mjs",

@@ -109,7 +109,7 @@ async function loadPendingCounts(client) {
     select s.code, count(*)::bigint as pending
     from source_raw_index r
     join sources s on s.id = r.source_id
-    where r.normalize_status <> 'succeeded'
+    where r.normalize_status in ('pending', 'failed')
     group by s.code
   `);
   return new Map(result.rows.map((row) => [row.code, Number(row.pending)]));

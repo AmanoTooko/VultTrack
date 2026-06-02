@@ -858,7 +858,7 @@ a.result-item {
 .cve-hero {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(280px, 420px);
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 330px);
   gap: 18px;
   align-items: start;
   padding: clamp(16px, 2vw, 24px);
@@ -890,6 +890,132 @@ a.result-item {
 
 .cve-summary {
   font-size: 15px;
+}
+
+.cve-headline {
+  max-width: 900px;
+  font-size: clamp(18px, 2vw, 25px);
+  line-height: 1.3;
+  font-weight: 720;
+  overflow-wrap: anywhere;
+}
+
+.hero-description {
+  display: grid;
+  gap: 7px;
+  max-width: 920px;
+}
+
+.hero-description-body.is-collapsed {
+  max-height: 236px;
+  overflow: hidden;
+}
+
+.description-toggle {
+  width: fit-content;
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 2px 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.description-toggle:hover {
+  text-decoration: underline;
+}
+
+.hero-description-head,
+.cvss-vector-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.hero-metadata {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.hero-date-block {
+  display: grid;
+  gap: 4px;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #fbfcfd;
+}
+
+.hero-date-block span,
+.hero-signal-grid span,
+.hero-meta-list dt,
+.cvss-source-score small,
+.cvss-metric-group > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 740;
+  text-transform: uppercase;
+}
+
+.hero-date-block strong {
+  font-size: 17px;
+}
+
+.hero-signal-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.hero-signal-grid div {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: var(--accent-wash);
+}
+
+.hero-signal-grid strong {
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.hero-meta-list {
+  display: grid;
+  gap: 0;
+  margin: 0;
+}
+
+.hero-meta-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.hero-meta-list div:last-child {
+  border-bottom: 0;
+}
+
+.hero-meta-list dd {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 650;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .eyebrow-row {
@@ -1473,7 +1599,28 @@ a.result-item {
 
 .admin-source-list {
   display: grid;
-  gap: 10px;
+  gap: 14px;
+}
+
+.admin-source-group {
+  display: grid;
+  gap: 8px;
+}
+
+.admin-source-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 2px;
+  color: var(--muted);
+  font-size: 13px;
+  text-transform: uppercase;
+}
+
+.admin-source-group-list {
+  display: grid;
+  gap: 8px;
 }
 
 .admin-source-row {
@@ -1693,7 +1840,6 @@ a {
     order: 3;
   }
 
-  .cve-hero,
   .detail-two-column,
   .status-hero {
     grid-template-columns: 1fr;
@@ -1733,6 +1879,10 @@ a {
 
   body {
     overflow: auto;
+  }
+
+  .cve-hero {
+    grid-template-columns: 1fr;
   }
 
   .workspace,
@@ -1864,9 +2014,11 @@ a {
 }
 
 .cvss-vector {
-  margin-top: 8px;
+  margin-top: 10px;
   display: grid;
-  gap: 6px;
+  gap: 9px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
 }
 
 .cvss-vector-string {
@@ -1880,46 +2032,118 @@ a {
   overflow-wrap: anywhere;
 }
 
-.cvss-toggle {
-  width: fit-content;
-  border: 0;
-  background: none;
-  color: var(--accent);
-  cursor: pointer;
-  font-size: 13px;
-  padding: 2px 0;
+.cvss-panel {
+  display: grid;
+  gap: 10px;
 }
 
-.cvss-toggle:hover {
-  text-decoration: underline;
+.cvss-score-groups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
 }
 
-.cvss-breakdown {
+.cvss-source-score {
+  min-width: 132px;
+  display: grid;
+  gap: 5px;
+  padding: 8px 10px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: #fbfcfa;
-  overflow: hidden;
+  border-radius: 7px;
+  background: #fbfcfd;
 }
 
-.cvss-metrics {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
+.cvss-source-score.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--line));
+  background: var(--accent-wash);
 }
 
-.cvss-metrics td,
-.cvss-metrics th {
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--line);
+.cvss-source-score div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
 }
 
-.cvss-metrics th {
-  text-align: left;
-  font-weight: 620;
-  background: #f4f6f1;
+.cvss-source-score strong {
+  color: var(--ink);
+  font-size: 20px;
 }
 
-.cvss-metrics tr:last-child td,
-.cvss-metrics tr:last-child th {
-  border-bottom: 0;
+.cvss-source-score div span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.cvss-metric-group {
+  display: grid;
+  gap: 6px;
+}
+
+.cvss-metric-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.cvss-metric-chip {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #fbfcfd;
+  color: #3d4654;
+  font-size: 12px;
+}
+
+.cvss-metric-chip b {
+  color: var(--accent);
+}
+
+.markdown-body {
+  color: #3d4654;
+  line-height: 1.58;
+  overflow-wrap: anywhere;
+}
+
+.markdown-body p,
+.markdown-body ul,
+.markdown-body ol,
+.markdown-body blockquote,
+.markdown-body pre,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin: 0 0 8px;
+}
+
+.markdown-body > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 20px;
+}
+
+.markdown-body blockquote {
+  padding-left: 10px;
+  border-left: 3px solid var(--line);
+  color: var(--muted);
+}
+
+.markdown-body code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--panel-soft);
+  font-size: 0.92em;
+}
+
+.markdown-body pre code {
+  padding: 0;
+  background: transparent;
 }

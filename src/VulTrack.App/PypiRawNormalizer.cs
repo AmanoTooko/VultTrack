@@ -20,7 +20,7 @@ public sealed class PypiRawNormalizer(IEnumerable<IAffectedComponentHook> affect
             from stg_pypi_advisories s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
-            where r.normalize_status <> 'succeeded' and src.code = $1
+            where r.normalize_status in ('pending', 'failed') and src.code = $1
             order by r.updated_at
             limit $2
             """, connection);

@@ -4,7 +4,7 @@ import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeArtifact, writeRecord } from '../lib/db.mjs';
 import { upsertExploitPoc } from '../lib/staging.mjs';
-import { classifyExploitType, ensureGitMirror, githubHeaders, identifiersFromText, maturityFor, walkFiles } from '../lib/exploit-utils.mjs';
+import { classifyExploitType, ensureGitMirror, githubHeaders, maturityFor, walkFiles } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'poc-in-github';
 
@@ -27,11 +27,12 @@ export async function run(client, ctx) {
     } catch {
       continue;
     }
-    const cve = path.basename(file, '.json').toUpperCase();
+    const cve = pocGithubCveFromPath(file);
+    if (!cve) continue;
     for (const repo of Array.isArray(repos) ? repos : []) {
       if (count >= max) break;
-      const identifiers = identifiersFromText(cve, repo.name, repo.full_name, repo.description);
-      if (!identifiers.length || !repo.full_name) continue;
+      const identifiers = [cve];
+      if (!repo.full_name) continue;
       const artifact = await archiveGithubRepoMetadata(client, ctx, cve, repo);
       const item = {
         provider: 'poc-in-github',
@@ -70,6 +71,10 @@ export async function run(client, ctx) {
   }
 
   return { fetchedCount: count, parsedCount: count, checkpoint: { gitRevision: mirror.revision, lastFetched: new Date().toISOString() } };
+}
+
+export function pocGithubCveFromPath(file) {
+  return path.basename(String(file), '.json').match(/^CVE-\d{4}-\d+$/i)?.[0]?.toUpperCase() ?? null;
 }
 
 async function archiveGithubRepoMetadata(client, ctx, cve, repo) {

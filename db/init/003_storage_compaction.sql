@@ -32,9 +32,45 @@ create index if not exists ix_identifier_edges_raw_index on vulnerability_identi
 create index if not exists ix_identifier_index_raw_index on vulnerability_identifier_index(raw_index_id);
 create index if not exists ix_records_raw_index on vulnerability_records(raw_index_id);
 create index if not exists ix_severity_scores_raw_index on vulnerability_severity_scores(raw_index_id);
+create index if not exists ix_records_source_fk on vulnerability_records(source_id);
+create index if not exists ix_descriptions_record_fk on vulnerability_descriptions(vulnerability_record_id);
+create index if not exists ix_severity_record_fk on vulnerability_severity_scores(vulnerability_record_id);
+create index if not exists ix_severity_source_fk on vulnerability_severity_scores(source_id);
+create index if not exists ix_weaknesses_record_fk on vulnerability_weaknesses(vulnerability_record_id);
+create index if not exists ix_weaknesses_source_fk on vulnerability_weaknesses(source_id);
+create index if not exists ix_refs_record_fk on vulnerability_references(vulnerability_record_id);
+create index if not exists ix_refs_source_fk on vulnerability_references(source_id);
+create index if not exists ix_source_properties_record_fk on vulnerability_source_properties(vulnerability_record_id);
+create index if not exists ix_detail_blocks_record_fk on vulnerability_detail_blocks(vulnerability_record_id);
+create index if not exists ix_detail_blocks_source_fk on vulnerability_detail_blocks(source_id);
+create index if not exists ix_descriptions_source_fk on vulnerability_descriptions(source_id);
+create index if not exists ix_affected_facts_record_fk on vulnerability_affected_facts(vulnerability_record_id);
+create index if not exists ix_affected_facts_source_fk on vulnerability_affected_facts(source_id);
+create index if not exists ix_identifier_edges_source_fk on vulnerability_identifier_edges(source_id);
+create index if not exists ix_identifier_index_source_fk on vulnerability_identifier_index(source_id);
 create index if not exists ix_raw_object_fk on source_raw_index(object_id);
 create index if not exists ix_raw_sync_run_fk on source_raw_index(sync_run_id);
 create index if not exists ix_source_objects_sync_run_fk on source_objects(sync_run_id);
+drop index if exists ix_raw_pending_by_source;
+create index if not exists ix_raw_pending_by_source
+  on source_raw_index(source_id, updated_at, id)
+  where normalize_status in ('pending', 'failed');
+create index if not exists ix_raw_normalize_latest
+  on source_raw_index(
+    source_id,
+    external_key,
+    source_modified_at desc nulls last,
+    updated_at desc,
+    created_at desc,
+    id desc
+  )
+  where normalize_status in ('pending', 'failed');
+create index if not exists ix_stg_cve_list_normalize_order on stg_cve_list_records(updated_at nulls last, cve_id, raw_index_id);
+create index if not exists ix_stg_nvd_cpe_normalize_order on stg_nvd_cpe_dictionary(cpe23_uri, raw_index_id);
+create index if not exists ix_stg_nvd_cves_normalize_order on stg_nvd_cves(modified_at nulls last, cve_id, raw_index_id);
+create index if not exists ix_stg_threat_intel_normalize_order on stg_threat_intel_records(observed_at nulls last, identifier, raw_index_id);
+create index if not exists ix_stg_registry_normalize_order on stg_registry_packages(ecosystem, namespace, name, raw_index_id);
+create index if not exists ix_stg_exploit_normalize_order on stg_exploit_pocs(modified_at desc nulls last, raw_index_id);
 
 -- The projection hook uses this identity for conflict resolution. Existing
 -- installs may contain duplicates created before the constraint existed.
