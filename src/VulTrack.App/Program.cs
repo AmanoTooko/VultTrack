@@ -1608,12 +1608,29 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
         var sourcePendingRows = new List<(string SourceCode, long Pending)>();
         var pendingBySource = new Dictionary<Guid, (long Pending, long Failed)>();
         await using (var pendingCmd = db.CreateCommand("""
+            with pending_estimate as (
+              select greatest(reltuples::bigint, 0) as total
+              from pg_class
+              where oid = to_regclass('ix_raw_pending_status_by_source')
+            ),
+            sample_counts as (
+              select source_id,
+                     count(*) filter (where normalize_status = 'pending') as normalize_pending,
+                     count(*) filter (where normalize_status = 'failed') as normalize_failed
+              from source_raw_index tablesample system (0.05)
+              where normalize_status in ('pending', 'failed')
+              group by source_id
+            ),
+            sample_total as (
+              select greatest(sum(normalize_pending + normalize_failed), 1) as total
+              from sample_counts
+            )
             select source_id,
-                   count(*) filter (where normalize_status = 'pending') as normalize_pending,
-                   count(*) filter (where normalize_status = 'failed') as normalize_failed
-            from source_raw_index
-            where normalize_status in ('pending', 'failed')
-            group by source_id
+                   round(normalize_pending * pending_estimate.total::numeric / sample_total.total)::bigint as normalize_pending,
+                   round(normalize_failed * pending_estimate.total::numeric / sample_total.total)::bigint as normalize_failed
+            from sample_counts
+            cross join pending_estimate
+            cross join sample_total
             """))
         await using (var pendingReader = await pendingCmd.ExecuteReaderAsync(ct))
         {
