@@ -74,11 +74,12 @@ OSS_INDEX_USERNAME=...
 OSS_INDEX_TOKEN=...
 FETCHER_ARCHIVE_GITHUB_REPOS=0
 FETCHER_GITHUB_ARCHIVE_MAX_BYTES=10485760
+EXPLOITDB_ARCHIVE_ARTIFACTS=0
 ```
 
 Exploit/PoC sources:
 
-- `exploitdb`：同步 Exploit-DB CSV，并把每条 exploit 文件 gzip 归档到 `source_objects`。
+- `exploitdb`：默认同步 Exploit-DB CSV 元数据。设置 `EXPLOITDB_ARCHIVE_ARTIFACTS=1` 后才会逐条下载 exploit 文件并 gzip 归档到 `source_objects`。
 - `metasploit`：浅克隆 Metasploit Framework，解析带 CVE 引用的 module，并归档 Ruby module。
 - `nuclei-templates`：浅克隆 ProjectDiscovery nuclei-templates，解析 CVE 模板，并归档 YAML template。
 - `poc-in-github`：浅克隆 PoC-in-GitHub 的 CVE-to-repository 索引。默认归档仓库 metadata；如果设置 `FETCHER_ARCHIVE_GITHUB_REPOS=1`，会尝试下载 GitHub repo zipball，受 `FETCHER_GITHUB_ARCHIVE_MAX_BYTES` 限制。

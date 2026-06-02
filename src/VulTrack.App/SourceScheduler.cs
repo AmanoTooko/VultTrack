@@ -83,7 +83,6 @@ public sealed class SourceScheduler(
                     if (ct.IsCancellationRequested) break;
                     try
                     {
-                        logger.LogInformation("Starting fetcher {Source}", source.Code);
                         await RunSourceAsync(source.Code, ct);
                     }
                     catch (Exception ex)
