@@ -10,7 +10,6 @@ mkdirSync(LOGDIR, { recursive: true });
 
 const SOURCES = process.argv.slice(2).length > 0 ? process.argv.slice(2) : [
   'osv',
-  'cve-list-v5',
   'nvd-cve',
   'nvd-cpe'
 ];

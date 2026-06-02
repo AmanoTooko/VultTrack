@@ -6,7 +6,7 @@ const phases = [
   {
     name: 'authoritative-cve-base',
     parallelism: '1',
-    sources: ['nvd-cve', 'cve-list-v5']
+    sources: ['nvd-cve']
   },
   {
     name: 'package-and-distribution-advisories',
@@ -30,7 +30,7 @@ const phases = [
   {
     name: 'exploit-intelligence',
     parallelism: '2',
-    sources: ['exploitdb', 'metasploit', 'nuclei-templates', 'poc-in-github', 'trickest-cve']
+    sources: ['exploitdb', 'metasploit', 'nuclei-templates', 'poc-in-github']
   },
   {
     name: 'component-catalogs',

@@ -5,6 +5,7 @@ import { upsertExploitPoc } from '../lib/staging.mjs';
 import { classifyExploitType, githubHeaders, maturityFor } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'trickest-cve';
+export const runMode = 'manual';
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);

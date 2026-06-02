@@ -11,7 +11,6 @@ const requestTimeoutMs = Number.parseInt(process.env.REQUEST_TIMEOUT_MS ?? '0', 
 const adminCookie = await getAdminCookie(apiBaseUrl);
 const sources = (process.env.NORMALIZE_SOURCES ?? [
   'nvd-cve',
-  'cve-list-v5',
   'osv',
   'google-osv',
   'android-osv',

@@ -11,19 +11,23 @@ public sealed class RawNormalizationService(
     {
         var results = new List<NormalizeBatchResult>();
         await using var connection = await db.OpenConnectionAsync(ct);
-        await SupersedeOlderPendingRawAsync(connection, null, ct);
+        var enabledSources = await LoadEnabledAutomaticSourceCodesAsync(connection, ct);
 
         foreach (var normalizer in normalizers)
         {
-            try
+            if (normalizer is ISourceScopedRawNormalizer scoped)
             {
-                var result = await normalizer.ProcessPendingAsync(connection, limitPerSource, ct);
-                results.Add(result);
+                foreach (var sourceCode in scoped.SupportedSourceCodes.Where(enabledSources.Contains).Order(StringComparer.OrdinalIgnoreCase))
+                {
+                    results.Add(await ProcessOneSourceAsync(connection, scoped, sourceCode, limitPerSource, ct));
+                }
+
+                continue;
             }
-            catch (Exception ex)
+
+            if (enabledSources.Contains(normalizer.SourceCode))
             {
-                logger.LogError(ex, "Normalizer {SourceCode} failed", normalizer.SourceCode);
-                results.Add(new NormalizeBatchResult(normalizer.SourceCode, 0, 1));
+                results.Add(await ProcessOneSourceAsync(connection, normalizer, normalizer.SourceCode, limitPerSource, ct));
             }
         }
 
@@ -86,6 +90,61 @@ public sealed class RawNormalizationService(
         await using var cmd = new NpgsqlCommand("select pg_advisory_unlock(hashtext($1), 0)", connection);
         cmd.Parameters.AddWithValue($"normalize:{sourceCode.ToLowerInvariant()}");
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private async Task<NormalizeBatchResult> ProcessOneSourceAsync(NpgsqlConnection connection, IRawNormalizer normalizer, string sourceCode, int limit, CancellationToken ct)
+    {
+        if (!await TryAcquireSourceNormalizeLockAsync(connection, sourceCode, ct))
+        {
+            logger.LogInformation("Normalizer {SourceCode} is already running; skipping overlapping batch request.", sourceCode);
+            return new NormalizeBatchResult(sourceCode, 0, 0);
+        }
+
+        try
+        {
+            await SupersedeOlderPendingRawAsync(connection, sourceCode, ct);
+
+            try
+            {
+                if (normalizer is ISourceScopedRawNormalizer scoped)
+                {
+                    return await scoped.ProcessSourcePendingAsync(connection, sourceCode, limit, ct);
+                }
+
+                var result = await normalizer.ProcessPendingAsync(connection, limit, ct);
+                return result.SourceCode.Equals(sourceCode, StringComparison.OrdinalIgnoreCase)
+                    ? result
+                    : new NormalizeBatchResult(sourceCode, result.Processed, result.Failed);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Normalizer {SourceCode} failed", sourceCode);
+                return new NormalizeBatchResult(sourceCode, 0, 1);
+            }
+        }
+        finally
+        {
+            await ReleaseSourceNormalizeLockAsync(connection, sourceCode, CancellationToken.None);
+        }
+    }
+
+    private static async Task<HashSet<string>> LoadEnabledAutomaticSourceCodesAsync(NpgsqlConnection connection, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("""
+            select code
+            from sources
+            where enabled
+              and coalesce(config_json->>'runMode', '') <> 'manual'
+            """, connection);
+
+        var codes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            codes.Add(reader.GetString(0));
+        }
+
+        return codes;
     }
 
     private async Task SupersedeOlderPendingRawAsync(NpgsqlConnection connection, string? sourceCode, CancellationToken ct)

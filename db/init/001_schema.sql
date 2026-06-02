@@ -926,7 +926,7 @@ on conflict (code) do update set
   plugin_name = excluded.plugin_name,
   schedule_cron = excluded.schedule_cron,
   config_json = case
-    when sources.code in ('cve-list-v5', 'nvd-cve-init', 'osv-init', 'android-osv-init', 'maven-osv-init', 'google-osv-init') then jsonb_set(sources.config_json, '{runMode}', '"init"', true)
+    when sources.code in ('nvd-cve-init', 'osv-init', 'android-osv-init', 'maven-osv-init', 'google-osv-init') then jsonb_set(sources.config_json, '{runMode}', '"init"', true)
     else sources.config_json
   end,
   updated_at = now();
@@ -935,7 +935,14 @@ update sources
 set config_json = jsonb_set(config_json, '{runMode}', '"init"', true),
     schedule_cron = null,
     updated_at = now()
-where code in ('cve-list-v5', 'nvd-cve-init', 'osv-init', 'android-osv-init', 'maven-osv-init', 'google-osv-init');
+where code in ('nvd-cve-init', 'osv-init', 'android-osv-init', 'maven-osv-init', 'google-osv-init');
+
+update sources
+set enabled = false,
+    schedule_cron = null,
+    config_json = jsonb_set(config_json, '{runMode}', '"manual"', true),
+    updated_at = now()
+where code in ('cve-list-v5', 'trickest-cve');
 
 update sources
 set config_json = config_json - 'runMode',

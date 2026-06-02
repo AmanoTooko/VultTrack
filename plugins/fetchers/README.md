@@ -83,9 +83,9 @@ Exploit/PoC sources:
 - `metasploit`：浅克隆 Metasploit Framework，解析带 CVE 引用的 module，并归档 Ruby module。
 - `nuclei-templates`：浅克隆 ProjectDiscovery nuclei-templates，解析 CVE 模板，并归档 YAML template。
 - `poc-in-github`：浅克隆 PoC-in-GitHub 的 CVE-to-repository 索引。默认归档仓库 metadata；如果设置 `FETCHER_ARCHIVE_GITHUB_REPOS=1`，会尝试下载 GitHub repo zipball，受 `FETCHER_GITHUB_ARCHIVE_MAX_BYTES` 限制。
-- `trickest-cve`：通过 GitHub Contents API 拉取 CVE markdown 索引，归档 markdown。
+- `trickest-cve`：手动源。通过 GitHub Contents API 拉取 CVE markdown 索引，单年目录响应很大且需要逐条下载 markdown，默认禁用以避免拖慢初始化和定时任务。已有归档数据会继续参与查询；需要复核时显式运行 `npm run fetch -- --source trickest-cve`。
 
-GitHub 公开 API 不强制要求 token，但全量跑 `poc-in-github`、`trickest-cve` 或开启 GitHub repo zipball 归档时，建议申请并配置 `GITHUB_TOKEN`，否则容易遇到 GitHub rate limit。当前 fetcher 不会自动执行任何 PoC，只保存元数据、来源 URL、hash 和压缩归档对象。
+GitHub 公开 API 不强制要求 token，但全量跑 `poc-in-github`、手动复核 `trickest-cve` 或开启 GitHub repo zipball 归档时，建议申请并配置 `GITHUB_TOKEN`，否则容易遇到 GitHub rate limit。当前 fetcher 不会自动执行任何 PoC，只保存元数据、来源 URL、hash 和压缩归档对象。
 
 中国境内漏洞情报源：
 
@@ -128,15 +128,17 @@ maven-osv-init     # OSV Maven all.zip baseline
 maven-osv          # OSV Maven modified_id.csv incremental
 google-osv-init    # Google-maintained OSV baseline subset
 google-osv         # Google-maintained OSV modified_id.csv incremental
-cve-list-v5        # CVE List v5 baseline/init-only
+cve-list-v5        # Optional/manual CVE List v5 mirror; not part of default init
 ```
+
+默认 CVE 主链路使用 `nvd-cve-init` 建立官方 NVD 基线，再用 `nvd-cve` 做 NVD API 2.0 增量。`cve-list-v5` 与 NVD 在 CVE 描述和元数据上高度重叠，且缺少 NVD 的 CVSS、CPE configurations 和 NVD modified 时间语义，因此只保留为手动审计/补充源，不参与默认 init、canonical rebuild 或定时抓取。
 
 `maven-advisory` 是组件定向查询 fetcher，依赖 `MAVEN_COMPONENTS`，没有独立的 Maven 全量漏洞流。Maven 生态全量/增量来源使用 `maven-osv-init` 和 `maven-osv`。
 
 需要显式跑初始化时：
 
 ```bash
-FETCHER_INCLUDE_INIT=1 CVE_LIST_INIT=1 npm run fetch -- --source cve-list-v5
+npm run fetch -- --source cve-list-v5
 FETCHER_INCLUDE_INIT=1 npm run fetch -- --source android-osv-init
 ```
 

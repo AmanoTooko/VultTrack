@@ -9,7 +9,7 @@ mkdir -p "$LOGDIR"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 SUMMARY="$LOGDIR/fetch-summary-${TIMESTAMP}.json"
 
-SOURCES=(osv cve-list-v5 nvd-cve nvd-cpe)
+SOURCES=(osv nvd-cve nvd-cpe)
 
 echo "[" > "$SUMMARY"
 FIRST=true

@@ -17,7 +17,6 @@ const SOURCES = [
   'debian-security-tracker',
   'ubuntu-osv',
   'ghsa',
-  'cve-list-v5',
   'osv',
   'nvd-cve',
   'nvd-cpe',

@@ -127,17 +127,18 @@ app.MapGet("/api/v1/system.status", async (HttpContext context, AdminAuthService
         var normalizeFailedTotal = 0L;
         await using (var cmd = db.CreateCommand("""
         with raw_counts as (
-          select source_id,
+          select raw.source_id,
                  count(*) as raw_total,
-                 count(*) filter (where parse_status = 'pending') as parse_pending,
+                 count(*) filter (where src.enabled and coalesce(src.config_json->>'runMode', '') <> 'manual' and parse_status = 'pending') as parse_pending,
                  count(*) filter (where parse_status = 'succeeded') as parse_succeeded,
-                 count(*) filter (where parse_status = 'failed') as parse_failed,
-                 count(*) filter (where normalize_status = 'pending') as normalize_pending,
+                 count(*) filter (where src.enabled and coalesce(src.config_json->>'runMode', '') <> 'manual' and parse_status = 'failed') as parse_failed,
+                 count(*) filter (where src.enabled and coalesce(src.config_json->>'runMode', '') <> 'manual' and normalize_status = 'pending') as normalize_pending,
                  count(*) filter (where normalize_status = 'succeeded') as normalize_succeeded,
-                 count(*) filter (where normalize_status = 'failed') as normalize_failed,
-                 max(updated_at) as raw_updated_at
-          from source_raw_index
-          group by source_id
+                 count(*) filter (where src.enabled and coalesce(src.config_json->>'runMode', '') <> 'manual' and normalize_status = 'failed') as normalize_failed,
+                 max(raw.updated_at) as raw_updated_at
+          from source_raw_index raw
+          join sources src on src.id = raw.source_id
+          group by raw.source_id
         ),
         latest_runs as (
           select distinct on (source_id)
@@ -1370,8 +1371,7 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
           ('exploitdb', 'Exploit-DB Public Exploits', 'exploit', 'https://www.exploit-db.com/', 'exploit-intel', '0 */12 * * *'),
           ('metasploit', 'Metasploit Framework Modules', 'exploit', 'https://github.com/rapid7/metasploit-framework', 'exploit-intel', '0 */12 * * *'),
           ('nuclei-templates', 'ProjectDiscovery Nuclei Templates', 'exploit', 'https://github.com/projectdiscovery/nuclei-templates', 'exploit-intel', '0 */12 * * *'),
-          ('poc-in-github', 'PoC-in-GitHub CVE Repository Index', 'exploit', 'https://github.com/nomi-sec/PoC-in-GitHub', 'exploit-intel', '0 */12 * * *'),
-          ('trickest-cve', 'Trickest CVE PoC Index', 'exploit', 'https://github.com/trickest/cve', 'exploit-intel', '0 */12 * * *')
+          ('poc-in-github', 'PoC-in-GitHub CVE Repository Index', 'exploit', 'https://github.com/nomi-sec/PoC-in-GitHub', 'exploit-intel', '0 */12 * * *')
         on conflict (code) do update set
           name = excluded.name,
           kind = excluded.kind,
@@ -1379,6 +1379,14 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
           plugin_name = excluded.plugin_name,
           schedule_cron = excluded.schedule_cron,
           updated_at = now()
+        """,
+        """
+        update sources
+        set enabled = false,
+            schedule_cron = null,
+            config_json = jsonb_set(config_json, '{runMode}', '"manual"', true),
+            updated_at = now()
+        where code = 'trickest-cve'
         """
     })
     {
@@ -1608,29 +1616,21 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
         var sourcePendingRows = new List<(string SourceCode, long Pending)>();
         var pendingBySource = new Dictionary<Guid, (long Pending, long Failed)>();
         await using (var pendingCmd = db.CreateCommand("""
-            with pending_estimate as (
-              select greatest(reltuples::bigint, 0) as total
-              from pg_class
-              where oid = to_regclass('ix_raw_pending_status_by_source')
-            ),
-            sample_counts as (
-              select source_id,
-                     count(*) filter (where normalize_status = 'pending') as normalize_pending,
-                     count(*) filter (where normalize_status = 'failed') as normalize_failed
-              from source_raw_index tablesample system (0.05)
-              where normalize_status in ('pending', 'failed')
-              group by source_id
-            ),
-            sample_total as (
-              select greatest(sum(normalize_pending + normalize_failed), 1) as total
-              from sample_counts
+            with sample_counts as (
+              select raw.source_id,
+                     count(*) filter (where raw.normalize_status = 'pending') as normalize_pending,
+                     count(*) filter (where raw.normalize_status = 'failed') as normalize_failed
+              from source_raw_index as raw tablesample system (0.05)
+              join sources src on src.id = raw.source_id
+              where raw.normalize_status in ('pending', 'failed')
+                and src.enabled
+                and coalesce(src.config_json->>'runMode', '') <> 'manual'
+              group by raw.source_id
             )
             select source_id,
-                   round(normalize_pending * pending_estimate.total::numeric / sample_total.total)::bigint as normalize_pending,
-                   round(normalize_failed * pending_estimate.total::numeric / sample_total.total)::bigint as normalize_failed
+                   round(normalize_pending * 2000)::bigint as normalize_pending,
+                   round(normalize_failed * 2000)::bigint as normalize_failed
             from sample_counts
-            cross join pending_estimate
-            cross join sample_total
             """))
         await using (var pendingReader = await pendingCmd.ExecuteReaderAsync(ct))
         {
