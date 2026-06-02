@@ -93,11 +93,10 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
     {
         await using var cmd = new NpgsqlCommand("""
             insert into vulnerability_records
-              (vulnerability_id, source_id, raw_index_id, source_record_id, title, description, status, source_specific)
-            values ($1,$2,$3,$4,$5,$5,'active',$6::jsonb)
+              (vulnerability_id, source_id, raw_index_id, source_record_id, title, description, status)
+            values ($1,$2,$3,$4,$5,$5,'active')
             on conflict (source_id, source_record_id, raw_index_id) do update set
               vulnerability_id = excluded.vulnerability_id,
-              source_specific = excluded.source_specific,
               updated_at = now()
             """, connection);
         cmd.Parameters.AddWithValue(vulnerabilityId);
@@ -105,7 +104,6 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
         cmd.Parameters.AddWithValue(row.RawIndexId);
         cmd.Parameters.AddWithValue($"{row.Provider}:{row.Identifier}");
         cmd.Parameters.AddWithValue(title);
-        cmd.Parameters.AddWithValue(row.Payload);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 

@@ -89,7 +89,7 @@ public sealed class ExternalAdvisoryRawNormalizer(
             {
                 var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, draft, cache, ct);
                 await AppendIdentifiersAsync(connection, vulnerabilityId, draft.Identifiers, ct);
-                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.AdvisoryId, row.Title, row.Description ?? row.Summary, "active", row.Payload, ct);
+                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.AdvisoryId, row.Title, row.Description ?? row.Summary, "active", ct);
                 await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, Descriptions(row), ct);
                 await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, SourceFactExtractor.LabelSeverity(row.SeverityLabel, row.Payload), ct);
                 await UpdateSeverityLabelAsync(connection, vulnerabilityId, row, ct);

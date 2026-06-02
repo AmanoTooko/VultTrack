@@ -136,11 +136,10 @@ public sealed class NvdRawProcessor(
     {
         await using var cmd = new NpgsqlCommand("""
             insert into vulnerability_records
-              (vulnerability_id, source_id, raw_index_id, source_record_id, title, description, status, source_specific)
-            values ($1,$2,$3,$4,$5,$6,$7,$8::jsonb)
+              (vulnerability_id, source_id, raw_index_id, source_record_id, title, description, status)
+            values ($1,$2,$3,$4,$5,$6,$7)
             on conflict (source_id, source_record_id, raw_index_id) do update set
               vulnerability_id = excluded.vulnerability_id,
-              source_specific = excluded.source_specific,
               updated_at = now()
             returning id
             """, conn);
@@ -153,7 +152,6 @@ public sealed class NvdRawProcessor(
         cmd.Parameters.AddWithValue((object?)title ?? DBNull.Value);
         cmd.Parameters.AddWithValue((object?)title ?? DBNull.Value);
         cmd.Parameters.AddWithValue(record.Status ?? "active");
-        cmd.Parameters.AddWithValue(record.Payload);
         return (Guid)(await cmd.ExecuteScalarAsync(ct))!;
     }
 
@@ -263,7 +261,7 @@ public sealed class NvdRawProcessor(
                   (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
                    cpe23_uri, package_name, normalized_package_name, version_range_raw, range_type, vulnerable,
                    source_specific)
-                values ($1,$2,$3,$4,'cpe','cpe',$5,$6,lower($6),$7,$8,$9,$10::jsonb)
+                values ($1,$2,$3,$4,'cpe','cpe',$5,$6,lower($6),$7,$8,$9,'{}'::jsonb)
                 """, conn);
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
@@ -274,7 +272,6 @@ public sealed class NvdRawProcessor(
             cmd.Parameters.AddWithValue((object?)versionRange ?? DBNull.Value);
             cmd.Parameters.AddWithValue(rangeType);
             cmd.Parameters.AddWithValue(cpeMatch?["vulnerable"]?.GetValue<bool>() ?? true);
-            cmd.Parameters.AddWithValue(cpeMatch?.ToJsonString() ?? "{}");
             await cmd.ExecuteNonQueryAsync(ct);
             facts.Add(new AffectedFactDraft("cpe", "cpe", product, null, versionRange, rangeType, cpeMatch?.ToJsonString() ?? "{}", criteria));
         }

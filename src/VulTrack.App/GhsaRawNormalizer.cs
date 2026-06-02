@@ -88,7 +88,7 @@ public sealed class GhsaRawNormalizer(
                     var primary = row.CveId ?? row.GhsaId;
                     var payload = JsonNode.Parse(row.Payload);
                     var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, primary, row.Summary, row.Description ?? row.Summary, "active", DateValue(payload, "published_at"), DateValue(payload, "updated_at"), identifiers, ct);
-                    var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.GhsaId, row.Summary, row.Description, "active", row.Payload, ct);
+                    var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.GhsaId, row.Summary, row.Description, "active", ct);
                     await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
                     await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(row.Summary, row.Description), ct);
                     var severities = SourceFactExtractor.CvssSeverities(JsonNode.Parse(row.Cvss)).ToList();

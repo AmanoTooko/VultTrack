@@ -50,5 +50,5 @@ create table if not exists sbom_vulnerabilities (
   unique(sbom_component_id, vulnerability_id)
 );
 
-create index ix_sbom_vulns_component on sbom_vulnerabilities(sbom_component_id);
-create index ix_sbom_vulns_vuln on sbom_vulnerabilities(vulnerability_id);
+create index if not exists ix_sbom_vulns_component on sbom_vulnerabilities(sbom_component_id);
+create index if not exists ix_sbom_vulns_vuln on sbom_vulnerabilities(vulnerability_id);

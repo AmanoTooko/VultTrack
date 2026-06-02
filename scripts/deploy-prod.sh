@@ -21,9 +21,13 @@ docker compose --env-file .env.production -f docker-compose.prod.yml exec -T pos
       sleep 2
     done
     pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB"
-    psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
-  ' \
-  < db/init/001_schema.sql
+  '
+for sql_file in db/init/*.sql; do
+  echo "Applying $sql_file"
+  docker compose --env-file .env.production -f docker-compose.prod.yml exec -T postgres \
+    sh -lc 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"' \
+    < "$sql_file"
+done
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 docker compose --env-file .env.production -f docker-compose.prod.yml exec -T api \
   sh -lc '
