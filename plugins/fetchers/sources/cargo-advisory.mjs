@@ -12,13 +12,19 @@ export const sourceCode = 'cargo-advisory';
 async function ensureRepo(repoPath) {
   try {
     await fs.access(path.join(repoPath, '.git'));
-    console.error('[cargo-advisory] pulling rustsec/advisory-db...');
-    spawnSync('git', ['-C', repoPath, 'pull', '--depth', '1'], { stdio: 'inherit' });
+    console.error('[cargo-advisory] refreshing rustsec/advisory-db...');
+    runGit(['-C', repoPath, 'fetch', '--depth', '1', 'origin', 'HEAD']);
+    runGit(['-C', repoPath, 'reset', '--hard', 'FETCH_HEAD']);
   } catch {
     console.error('[cargo-advisory] cloning rustsec/advisory-db...');
     await fs.mkdir(repoPath, { recursive: true });
     spawnSync('git', ['clone', '--depth', '1', 'https://github.com/rustsec/advisory-db.git', repoPath], { stdio: 'inherit' });
   }
+}
+
+function runGit(args) {
+  const result = spawnSync('git', args, { stdio: 'inherit' });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed`);
 }
 
 // Simple TOML parser for RustSec advisory frontmatter
