@@ -72,6 +72,7 @@ try {
     await client.query('rollback');
     throw error;
   }
+  await client.query(`analyze ${tables.join(', ')}, sbom_components, sbom_uploads, source_raw_index`);
   console.log('Canonical and derived data cleared. Parsed raw records were requeued for normalization.');
 } finally {
   await client.end();
