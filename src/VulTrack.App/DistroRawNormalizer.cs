@@ -65,6 +65,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                     var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, $"{identifier}:{row.DistroRelease}:{row.PackageName}", title, title, "active", row.Payload, ct);
                     var facts = ExtractAlpineFacts(row, identifier).ToList();
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
+                    if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
                 }
 
                 succeededIds.Add(row.RawIndexId);
@@ -77,6 +78,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             }
         }
 
+        await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
         await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult("alpine-secdb", processed, failed);
@@ -118,6 +120,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                 var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", row.Payload, ct);
                 var facts = ExtractDebianFacts(row).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
+                if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
                 succeededIds.Add(row.RawIndexId);
                 processed++;
             }
@@ -128,6 +131,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             }
         }
 
+        await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
         await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult("debian-security-tracker", processed, failed);
