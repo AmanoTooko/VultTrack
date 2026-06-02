@@ -83,7 +83,10 @@ export async function writeRecord(client, ctx, record) {
     `insert into source_objects
        (source_id, sync_run_id, object_uri, content_type, compression, sha256, size_bytes, compressed_size_bytes, schema_hint)
      values ($1,$2,$3,'application/json','gzip',$4,$5,$6,$7)
-     on conflict (source_id, sha256) do update set fetched_at = now()
+     on conflict (source_id, sha256) do update set
+       object_uri = excluded.object_uri,
+       sync_run_id = excluded.sync_run_id,
+       fetched_at = now()
      returning id`,
     [ctx.source.id, ctx.run.id, objectUri, contentHash, json.length, compressed.length, record.schemaHint ?? ctx.source.code]
   );
@@ -142,7 +145,10 @@ export async function writeArtifact(client, ctx, artifact) {
     `insert into source_objects
        (source_id, sync_run_id, object_uri, content_type, compression, sha256, size_bytes, compressed_size_bytes, schema_hint, retention_class)
      values ($1,$2,$3,$4,'gzip',$5,$6,$7,$8,$9)
-     on conflict (source_id, sha256) do update set fetched_at = now()
+     on conflict (source_id, sha256) do update set
+       object_uri = excluded.object_uri,
+       sync_run_id = excluded.sync_run_id,
+       fetched_at = now()
      returning id`,
     [
       ctx.source.id,
