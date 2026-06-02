@@ -12,13 +12,19 @@ export const sourceCode = 'go-advisory';
 async function ensureRepo(repoPath) {
   try {
     await fs.access(path.join(repoPath, '.git'));
-    console.error('[go-advisory] pulling golang/vulndb...');
-    spawnSync('git', ['-C', repoPath, 'pull', '--depth', '1'], { stdio: 'inherit' });
+    console.error('[go-advisory] refreshing golang/vulndb...');
+    runGit(['-C', repoPath, 'fetch', '--depth', '1', 'origin', 'HEAD']);
+    runGit(['-C', repoPath, 'reset', '--hard', 'FETCH_HEAD']);
   } catch {
     console.error('[go-advisory] cloning golang/vulndb...');
     await fs.mkdir(repoPath, { recursive: true });
     spawnSync('git', ['clone', '--depth', '1', 'https://github.com/golang/vulndb.git', repoPath], { stdio: 'inherit' });
   }
+}
+
+function runGit(args) {
+  const result = spawnSync('git', args, { stdio: 'inherit' });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed`);
 }
 
 export async function run(client, ctx) {

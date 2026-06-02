@@ -10,6 +10,11 @@ const NVD_MAX_DATE_WINDOW_DAYS = 120;
 const GIT_REPO = 'https://github.com/fkie-cad/nvd-json-data-feeds.git';
 const MIRROR_DIR = 'data/mirrors/nvd-cve-feeds';
 
+function runGit(spawnSync, args) {
+  const result = spawnSync('git', args, { stdio: 'inherit' });
+  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed`);
+}
+
 function nvdDate(iso) {
   return String(iso).replace(/(\.\d+)?Z?$/, '.000');
 }
@@ -26,8 +31,9 @@ export async function initFromMirror(client, ctx, max) {
   // Clone or pull
   try {
     await fs.access(path.default.join(mirrorPath, '.git'));
-    console.error('[nvd-cve] pulling mirror...');
-    spawnSync('git', ['-C', mirrorPath, 'pull', '--depth', '1'], { stdio: 'inherit' });
+    console.error('[nvd-cve] refreshing mirror...');
+    runGit(spawnSync, ['-C', mirrorPath, 'fetch', '--depth', '1', 'origin', 'main']);
+    runGit(spawnSync, ['-C', mirrorPath, 'reset', '--hard', 'FETCH_HEAD']);
   } catch {
     console.error('[nvd-cve] cloning mirror (shallow)...');
     await fs.mkdir(mirrorPath, { recursive: true });
