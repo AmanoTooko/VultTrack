@@ -76,6 +76,7 @@ npm run fetch:all:smoke
 | `DATABASE_URL` | `postgres://vultrack:vultrack@localhost:5432/vultrack` | PostgreSQL 连接 |
 | `FETCHER_MAX_RECORDS` | 无限制 | 限制获取记录数 (smoke 测试用) |
 | `FETCHER_TIMEOUT_MS` | `120000` | HTTP 请求超时 (ms) |
+| `EXPLOITDB_ARCHIVE_ARTIFACTS` | `0` | 设置为 `1` 时才逐条下载并归档 Exploit-DB PoC 文件 |
 | `FETCHER_USER_AGENT` | `VulTrack/0.1` | HTTP User-Agent |
 | `NVD_API_KEY` | - | NVD API Key (避免 Cloudflare 限速) |
 | `NVD_PAGE_SIZE` | `2000` | NVD API 每页条数 |
