@@ -13,6 +13,10 @@ drop index if exists ix_affected_components_match;
 create index if not exists ix_refs_vulnerability
   on vulnerability_references(vulnerability_id, source_id);
 
+create index if not exists ix_identifier_group_fk
+  on vulnerability_identifier_index(identifier_group_id)
+  where identifier_group_id is not null;
+
 create index if not exists ix_affected_components_identity_match_v2
   on vulnerability_affected_components(
     vulnerability_id,

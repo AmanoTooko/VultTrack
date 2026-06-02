@@ -47,6 +47,22 @@ try {
     where table_schema = 'public' and table_name like '%\\_new' escape '\\'
     order by table_name
   `);
+  const missingForeignKeyIndexes = await client.query(`
+    select c.conrelid::regclass::text table_name,
+           c.conname constraint_name,
+           c.confrelid::regclass::text references_table,
+           pg_get_constraintdef(c.oid) definition
+    from pg_constraint c
+    where c.contype = 'f'
+      and not exists (
+        select 1
+        from pg_index i
+        where i.indrelid = c.conrelid
+          and i.indisvalid
+          and (i.indkey::smallint[])[0:cardinality(c.conkey) - 1] @> c.conkey
+      )
+    order by c.conrelid::regclass::text, c.conname
+  `);
   const candidateUnusedIndexes = indexes.rows.filter(index =>
     Number(index.scans) === 0 &&
     Number(index.size_bytes) >= 50 * 1024 * 1024 &&
@@ -57,6 +73,7 @@ try {
     generatedAt: new Date().toISOString(),
     database: database.rows[0],
     residualTables: residualTables.rows.map(row => row.table_name),
+    missingForeignKeyIndexes: missingForeignKeyIndexes.rows,
     largestTables: tables.rows,
     candidateUnusedIndexes,
     largestIndexes: indexes.rows
