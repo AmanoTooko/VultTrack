@@ -1008,12 +1008,12 @@ function renderDetail(data) {
           ${renderAffectedGrouped(affected)}
           ${renderAdvisories(refs)}
           ${refs.length ? renderReferenceCards(refs) : '<section class="detail-section" id="references"><h3 class="section-h">References</h3><p class="muted">No references</p></section>'}
-          ${renderSourceChanges(history)}
+          ${renderSourceChanges(history.filter(item => isVulnerabilitySource(item.code)))}
           ${renderRecordsBySource(records)}
         </div>
         <aside class="detail-rail">
           ${renderEnrichmentPanel(v)}
-          ${renderTrackingPanel(v, records, refs, history)}
+          ${renderTrackingPanel(v, records, refs, history, exploits)}
         </aside>
       </div>
     </article>
@@ -1306,12 +1306,16 @@ function renderEnrichmentPanel(v) {
   `;
 }
 
-function renderTrackingPanel(v, records, refs, history = []) {
+function renderTrackingPanel(v, records, refs, history = [], exploits = []) {
+  const vulnerabilityRecords = records.filter(record => isVulnerabilitySource(record.code));
+  const enrichmentRecords = records.filter(record => isEnrichmentSource(record.code));
   const dates = [
-    ['Source published', v.publishedAt],
-    ['Source modified', v.modifiedAt],
+    ['Vulnerability published', v.publishedAt],
+    ['Vulnerability modified', v.modifiedAt],
     ['Local normalized', v.updatedAt],
-    ['Latest source modified', records.map(r => r.sourceModifiedAt).filter(Boolean).sort().at(-1)],
+    ['Latest vuln source modified', vulnerabilityRecords.map(r => r.sourceModifiedAt).filter(Boolean).sort().at(-1)],
+    ['Latest enrichment modified', enrichmentRecords.map(r => r.sourceModifiedAt).filter(Boolean).sort().at(-1)],
+    ['Latest exploit modified', exploits.map(exploitModifiedAt).filter(Boolean).sort().at(-1)],
     ['Latest ingest', records.map(r => r.ingestedAt).filter(Boolean).sort().at(-1)]
   ];
   return `
@@ -1319,12 +1323,36 @@ function renderTrackingPanel(v, records, refs, history = []) {
       <h3 class="section-h">Tracking</h3>
       <div class="timeline-list">
         ${dates.map(([label, value]) => `<div><span>${escapeHtml(label)}</span><strong>${date(value)}</strong></div>`).join('')}
-        <div><span>Source records</span><strong>${fmt(records.length)}</strong></div>
-        <div><span>Source changes</span><strong>${fmt(history.length)}</strong></div>
+        <div><span>Vuln source records</span><strong>${fmt(vulnerabilityRecords.length)}</strong></div>
+        <div><span>Enrichment records</span><strong>${fmt(enrichmentRecords.length)}</strong></div>
+        <div><span>Source changes</span><strong>${fmt(history.filter(item => isVulnerabilitySource(item.code)).length)}</strong></div>
         <div><span>References</span><strong>${fmt(refs.length)}</strong></div>
       </div>
     </section>
   `;
+}
+
+function isVulnerabilitySource(code) {
+  const value = String(code || '').toLowerCase();
+  if (!value) return false;
+  if (isEnrichmentSource(value)) return false;
+  return true;
+}
+
+function isEnrichmentSource(code) {
+  return [
+    'first-epss',
+    'cisa-kev',
+    'metasploit',
+    'exploitdb',
+    'nuclei-templates',
+    'poc-in-github',
+    'trickest-cve'
+  ].includes(String(code || '').toLowerCase());
+}
+
+function exploitModifiedAt(item) {
+  return item?.modified_at || item?.modifiedAt || item?.published_at || item?.publishedAt || null;
 }
 
 function renderSourceChanges(history) {

@@ -30,6 +30,11 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
 
     public async Task<NormalizeBatchResult> ProcessSourcePendingAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
     {
+        if (string.Equals(sourceCode, "first-epss", StringComparison.OrdinalIgnoreCase))
+        {
+            return await ProcessEpssPendingAsync(connection, limit, ct);
+        }
+
         await using var select = new NpgsqlCommand("""
             select s.raw_index_id, s.provider, s.identifier, s.epss_score, s.epss_percentile,
                    s.observed_at, s.payload, r.source_id
@@ -87,6 +92,49 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
         await MarkNormalizedBatchAsync(connection, succeededIds, ct);
 
         return new NormalizeBatchResult(SourceCode, processed, failed);
+    }
+
+    private static async Task<NormalizeBatchResult> ProcessEpssPendingAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
+    {
+        var batchLimit = Math.Clamp(limit * 5, 1, 25_000);
+        await using var cmd = new NpgsqlCommand("""
+            with batch as (
+              select r.id as raw_index_id,
+                     t.identifier,
+                     t.epss_score,
+                     t.epss_percentile
+              from stg_threat_intel_records t
+              join source_raw_index r on r.id = t.raw_index_id
+              join sources s on s.id = r.source_id
+              where s.code = 'first-epss'
+                and r.normalize_status in ('pending', 'failed')
+              order by t.observed_at desc nulls last, t.identifier
+              limit $1
+            ),
+            updated as (
+              update vulnerabilities v
+              set epss_score = batch.epss_score,
+                  epss_percentile = batch.epss_percentile,
+                  updated_at = now()
+              from batch
+              where v.primary_identifier = batch.identifier
+                and (batch.epss_score is not null or batch.epss_percentile is not null)
+              returning batch.raw_index_id
+            ),
+            marked as (
+              update source_raw_index r
+              set normalize_status = 'succeeded',
+                  updated_at = now()
+              from batch
+              where r.id = batch.raw_index_id
+              returning r.id
+            )
+            select count(*)::integer from marked
+            """, connection);
+        cmd.CommandTimeout = 300;
+        cmd.Parameters.AddWithValue(batchLimit);
+        var processed = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
+        return new NormalizeBatchResult("first-epss", processed, 0);
     }
 
     private static async Task UpsertRecordAsync(NpgsqlConnection connection, Guid vulnerabilityId, Row row, string title, CancellationToken ct)

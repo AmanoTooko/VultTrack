@@ -1232,12 +1232,14 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
         "create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier)",
         "create index if not exists ix_raw_normalize_latest on source_raw_index(source_id, external_key, source_modified_at desc nulls last, updated_at desc, created_at desc, id desc) where normalize_status in ('pending', 'failed')",
+        "create index if not exists ix_raw_pending_status_by_source on source_raw_index(source_id, normalize_status) where normalize_status in ('pending', 'failed')",
         "create index if not exists ix_stg_cve_list_normalize_order on stg_cve_list_records(updated_at nulls last, cve_id, raw_index_id)",
         "create index if not exists ix_stg_nvd_cpe_normalize_order on stg_nvd_cpe_dictionary(cpe23_uri, raw_index_id)",
         "create index if not exists ix_stg_nvd_cves_normalize_order on stg_nvd_cves(modified_at nulls last, cve_id, raw_index_id)",
         "create index if not exists ix_stg_threat_intel_normalize_order on stg_threat_intel_records(observed_at nulls last, identifier, raw_index_id)",
         "create index if not exists ix_stg_registry_normalize_order on stg_registry_packages(ecosystem, namespace, name, raw_index_id)",
         "create index if not exists ix_stg_exploit_normalize_order on stg_exploit_pocs(modified_at desc nulls last, raw_index_id)",
+        "create index if not exists ix_component_identity_component_lookup on component_identity_index(component_id, identity_type, normalized_value)",
         "create index if not exists ix_records_source_fk on vulnerability_records(source_id)",
         "create index if not exists ix_descriptions_record_fk on vulnerability_descriptions(vulnerability_record_id)",
         "create index if not exists ix_severity_record_fk on vulnerability_severity_scores(vulnerability_record_id)",
@@ -1590,29 +1592,12 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
         var sourcePendingRows = new List<(string SourceCode, long Pending)>();
         var pendingBySource = new Dictionary<Guid, (long Pending, long Failed)>();
         await using (var pendingCmd = db.CreateCommand("""
-            with pending_estimate as (
-              select greatest(reltuples::bigint, 0) as total
-              from pg_class
-              where oid = to_regclass('ix_raw_pending_by_source')
-            ),
-            sample_counts as (
-              select source_id,
-                     count(*) filter (where normalize_status = 'pending') as normalize_pending,
-                     count(*) filter (where normalize_status = 'failed') as normalize_failed
-              from source_raw_index tablesample system (0.5)
-              where normalize_status in ('pending', 'failed')
-              group by source_id
-            ),
-            sample_total as (
-              select greatest(sum(normalize_pending + normalize_failed), 1) as total
-              from sample_counts
-            )
             select source_id,
-                   round(normalize_pending * pending_estimate.total::numeric / sample_total.total)::bigint as normalize_pending,
-                   round(normalize_failed * pending_estimate.total::numeric / sample_total.total)::bigint as normalize_failed
-            from sample_counts
-            cross join pending_estimate
-            cross join sample_total
+                   count(*) filter (where normalize_status = 'pending') as normalize_pending,
+                   count(*) filter (where normalize_status = 'failed') as normalize_failed
+            from source_raw_index
+            where normalize_status in ('pending', 'failed')
+            group by source_id
             """))
         await using (var pendingReader = await pendingCmd.ExecuteReaderAsync(ct))
         {

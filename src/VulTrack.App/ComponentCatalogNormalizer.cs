@@ -46,64 +46,145 @@ public sealed class ComponentCatalogNormalizer : ISourceScopedRawNormalizer
 
     private static async Task<NormalizeBatchResult> ProcessCpeAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
     {
-        await using var select = new NpgsqlCommand("""
-            select s.raw_index_id, s.cpe23_uri, s.part, s.vendor, s.product, s.version, s.target_sw,
-                   s.titles::text, s.refs::text, s.deprecated, s.last_modified_at, r.source_id
-            from stg_nvd_cpe_dictionary s
-            join source_raw_index r on r.id = s.raw_index_id
-            where r.normalize_status in ('pending', 'failed')
-            order by s.cpe23_uri
-            limit $1
+        var batchLimit = Math.Clamp(limit * 5, 1, 50_000);
+        await using var cmd = new NpgsqlCommand("""
+            with batch as materialized (
+              select s.raw_index_id,
+                     s.cpe23_uri,
+                     s.part,
+                     s.vendor,
+                     s.product,
+                     s.version,
+                     s.target_sw,
+                     s.titles,
+                     s.refs,
+                     s.deprecated,
+                     s.last_modified_at,
+                     r.source_id,
+                     lower('cpe:' || coalesce(nullif(s.part, ''), '*') || ':' ||
+                           coalesce(nullif(s.vendor, ''), '*') || ':' ||
+                           coalesce(nullif(s.product, ''), '*') || ':' ||
+                           coalesce(nullif(s.target_sw, ''), '*')) as component_key,
+                     case
+                       when nullif(trim(coalesce(s.vendor, '')), '') is null
+                         or nullif(trim(coalesce(s.product, '')), '') is null
+                         then 'unknown-cpe-component'
+                       else s.vendor || ':' || s.product
+                     end as canonical_name,
+                     case lower(coalesce(s.part, ''))
+                       when 'a' then 'application'
+                       when 'o' then 'operating-system'
+                       when 'h' then 'hardware'
+                       else 'cpe'
+                     end as component_type
+              from stg_nvd_cpe_dictionary s
+              join source_raw_index r on r.id = s.raw_index_id
+              join sources src on src.id = r.source_id
+              where src.code = 'nvd-cpe'
+                and r.normalize_status in ('pending', 'failed')
+              order by s.cpe23_uri
+              limit $1
+            ),
+            upsert_cpe_entries as (
+              insert into cpe_entries
+                (cpe23_uri, part, vendor, product, version, target_sw, titles_json, refs_json, deprecated, last_modified_at)
+              select cpe23_uri, part, vendor, product, version, target_sw, titles, refs, deprecated, last_modified_at
+              from batch
+              on conflict (cpe23_uri) do update set
+                part = excluded.part,
+                vendor = excluded.vendor,
+                product = excluded.product,
+                version = excluded.version,
+                target_sw = excluded.target_sw,
+                titles_json = excluded.titles_json,
+                refs_json = excluded.refs_json,
+                deprecated = excluded.deprecated,
+                last_modified_at = excluded.last_modified_at
+              returning cpe23_uri
+            ),
+            component_rows as (
+              select component_key,
+                     (array_agg(canonical_name order by cpe23_uri))[1] as canonical_name,
+                     (array_agg(component_type order by cpe23_uri))[1] as component_type,
+                     (array_agg(cpe23_uri order by cpe23_uri))[1] as primary_cpe23_uri,
+                     array(
+                       select distinct identity
+                       from unnest(array_agg(cpe23_uri) || array[component_key]) as identity
+                     ) as identities
+              from batch
+              group by component_key
+            ),
+            upsert_components as (
+              insert into components
+                (component_key, canonical_name, component_type, primary_cpe23_uri, identities)
+              select component_key, canonical_name, component_type, primary_cpe23_uri, identities
+              from component_rows
+              on conflict (component_key) do update set
+                canonical_name = excluded.canonical_name,
+                primary_cpe23_uri = coalesce(components.primary_cpe23_uri, excluded.primary_cpe23_uri),
+                identities = (select array_agg(distinct value) from unnest(components.identities || excluded.identities) value),
+                updated_at = now()
+              returning id, component_key
+            ),
+            cpe_identity_rows as (
+              select distinct c.id as component_id,
+                     'cpe23'::text as identity_type,
+                     b.cpe23_uri as identity_value,
+                     lower(b.cpe23_uri) as normalized_value,
+                     null::text as ecosystem,
+                     b.source_id,
+                     'nvd-cpe-dictionary'::text as evidence_type,
+                     1.0::numeric(4,3) as confidence
+              from batch b
+              join upsert_components c on c.component_key = b.component_key
+            ),
+            vendor_product_identity_rows as (
+              select distinct c.id as component_id,
+                     'cpe-vendor-product'::text as identity_type,
+                     b.vendor || ':' || b.product as identity_value,
+                     lower(b.vendor || ':' || b.product) as normalized_value,
+                     null::text as ecosystem,
+                     b.source_id,
+                     'nvd-cpe-dictionary'::text as evidence_type,
+                     0.9::numeric(4,3) as confidence
+              from batch b
+              join upsert_components c on c.component_key = b.component_key
+              where nullif(trim(coalesce(b.vendor, '')), '') is not null
+                and nullif(trim(coalesce(b.product, '')), '') is not null
+            ),
+            identity_rows as (
+              select * from cpe_identity_rows
+              union all
+              select * from vendor_product_identity_rows
+            ),
+            inserted_identities as (
+              insert into component_identity_index
+                (component_id, identity_type, identity_value, normalized_value, ecosystem, source_id, evidence_type, confidence, status)
+              select component_id, identity_type, identity_value, normalized_value, ecosystem, source_id, evidence_type, confidence, 'accepted'
+              from identity_rows i
+              where not exists (
+                select 1
+                from component_identity_index existing
+                where existing.component_id = i.component_id
+                  and existing.identity_type = i.identity_type
+                  and existing.normalized_value = i.normalized_value
+              )
+              returning id
+            ),
+            marked as (
+              update source_raw_index r
+              set normalize_status = 'succeeded',
+                  updated_at = now()
+              from batch
+              where r.id = batch.raw_index_id
+              returning r.id
+            )
+            select count(*)::integer from marked
             """, connection);
-        select.Parameters.AddWithValue(Math.Max(1, limit));
-
-        var rows = new List<CpeRow>();
-        await using (var reader = await select.ExecuteReaderAsync(ct))
-        {
-            while (await reader.ReadAsync(ct))
-            {
-                rows.Add(new CpeRow(
-                    reader.GetGuid(0),
-                    reader.GetString(1),
-                    reader.IsDBNull(2) ? null : reader.GetString(2),
-                    reader.IsDBNull(3) ? null : reader.GetString(3),
-                    reader.IsDBNull(4) ? null : reader.GetString(4),
-                    reader.IsDBNull(5) ? null : reader.GetString(5),
-                    reader.IsDBNull(6) ? null : reader.GetString(6),
-                    reader.GetString(7),
-                    reader.GetString(8),
-                    reader.GetBoolean(9),
-                    reader.IsDBNull(10) ? null : reader.GetFieldValue<DateTimeOffset>(10),
-                    reader.GetGuid(11)));
-            }
-        }
-
-        var processed = 0;
-        var failed = 0;
-        foreach (var row in rows)
-        {
-            try
-            {
-                await UpsertCpeEntryAsync(connection, row, ct);
-                var componentId = await UpsertCpeComponentAsync(connection, row, ct);
-                await UpsertIdentityAsync(connection, componentId, "cpe23", row.Cpe23Uri, row.Cpe23Uri, null, row.SourceId, "nvd-cpe-dictionary", 1.0m, ct);
-
-                var vendorProduct = JoinIdentity(row.Vendor, row.Product);
-                if (vendorProduct is not null)
-                {
-                    await UpsertIdentityAsync(connection, componentId, "cpe-vendor-product", vendorProduct, vendorProduct, null, row.SourceId, "nvd-cpe-dictionary", 0.9m, ct);
-                }
-
-                await MarkNormalizedAsync(connection, row.RawIndexId, ct);
-                processed++;
-            }
-            catch
-            {
-                failed++;
-            }
-        }
-
-        return new NormalizeBatchResult("nvd-cpe", processed, failed);
+        cmd.CommandTimeout = 300;
+        cmd.Parameters.AddWithValue(batchLimit);
+        var processed = (int)(await cmd.ExecuteScalarAsync(ct) ?? 0);
+        return new NormalizeBatchResult("nvd-cpe", processed, 0);
     }
 
     private static async Task<NormalizeBatchResult> ProcessRegistryAsync(NpgsqlConnection connection, int limit, CancellationToken ct)

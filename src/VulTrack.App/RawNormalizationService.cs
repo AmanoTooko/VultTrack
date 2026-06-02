@@ -33,32 +33,59 @@ public sealed class RawNormalizationService(
     public async Task<NormalizeBatchResult> ProcessSourcePendingAsync(string sourceCode, int limit, CancellationToken ct)
     {
         await using var connection = await db.OpenConnectionAsync(ct);
-        await SupersedeOlderPendingRawAsync(connection, sourceCode, ct);
-
-        var scoped = normalizers.OfType<ISourceScopedRawNormalizer>().FirstOrDefault(x => x.SupportedSourceCodes.Contains(sourceCode));
-        if (scoped is not null)
+        if (!await TryAcquireSourceNormalizeLockAsync(connection, sourceCode, ct))
         {
-            return await scoped.ProcessSourcePendingAsync(connection, sourceCode, limit, ct);
-        }
-
-        var normalizer = normalizers.FirstOrDefault(x => string.Equals(x.SourceCode, sourceCode, StringComparison.OrdinalIgnoreCase));
-        if (normalizer is null)
-        {
+            logger.LogInformation("Normalizer {SourceCode} is already running; skipping overlapping request.", sourceCode);
             return new NormalizeBatchResult(sourceCode, 0, 0);
         }
 
         try
         {
-            var result = await normalizer.ProcessPendingAsync(connection, limit, ct);
-            return result.SourceCode.Equals(sourceCode, StringComparison.OrdinalIgnoreCase)
-                ? result
-                : new NormalizeBatchResult(sourceCode, result.Processed, result.Failed);
+            await SupersedeOlderPendingRawAsync(connection, sourceCode, ct);
+
+            var scoped = normalizers.OfType<ISourceScopedRawNormalizer>().FirstOrDefault(x => x.SupportedSourceCodes.Contains(sourceCode));
+            if (scoped is not null)
+            {
+                return await scoped.ProcessSourcePendingAsync(connection, sourceCode, limit, ct);
+            }
+
+            var normalizer = normalizers.FirstOrDefault(x => string.Equals(x.SourceCode, sourceCode, StringComparison.OrdinalIgnoreCase));
+            if (normalizer is null)
+            {
+                return new NormalizeBatchResult(sourceCode, 0, 0);
+            }
+
+            try
+            {
+                var result = await normalizer.ProcessPendingAsync(connection, limit, ct);
+                return result.SourceCode.Equals(sourceCode, StringComparison.OrdinalIgnoreCase)
+                    ? result
+                    : new NormalizeBatchResult(sourceCode, result.Processed, result.Failed);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Normalizer {SourceCode} failed for source-scoped request", sourceCode);
+                return new NormalizeBatchResult(sourceCode, 0, 1);
+            }
         }
-        catch (Exception ex)
+        finally
         {
-            logger.LogError(ex, "Normalizer {SourceCode} failed for source-scoped request", sourceCode);
-            return new NormalizeBatchResult(sourceCode, 0, 1);
+            await ReleaseSourceNormalizeLockAsync(connection, sourceCode, CancellationToken.None);
         }
+    }
+
+    private static async Task<bool> TryAcquireSourceNormalizeLockAsync(NpgsqlConnection connection, string sourceCode, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("select pg_try_advisory_lock(hashtext($1), 0)", connection);
+        cmd.Parameters.AddWithValue($"normalize:{sourceCode.ToLowerInvariant()}");
+        return (bool)(await cmd.ExecuteScalarAsync(ct) ?? false);
+    }
+
+    private static async Task ReleaseSourceNormalizeLockAsync(NpgsqlConnection connection, string sourceCode, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("select pg_advisory_unlock(hashtext($1), 0)", connection);
+        cmd.Parameters.AddWithValue($"normalize:{sourceCode.ToLowerInvariant()}");
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     private async Task SupersedeOlderPendingRawAsync(NpgsqlConnection connection, string? sourceCode, CancellationToken ct)
