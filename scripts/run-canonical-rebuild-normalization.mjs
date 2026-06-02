@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
+import pg from 'pg';
 
 const phases = [
   {
@@ -56,4 +57,16 @@ for (const phase of phases) {
     throw new Error(`Canonical rebuild phase failed: ${phase.name}`);
   }
   console.log(JSON.stringify({ event: 'canonical_rebuild_phase_complete', name: phase.name }));
+}
+
+const { Client } = pg;
+const databaseUrl = process.env.DATABASE_URL ?? 'postgres://vultrack:vultrack@127.0.0.1:5432/vultrack';
+const client = new Client({ connectionString: databaseUrl });
+await client.connect();
+try {
+  console.log(JSON.stringify({ event: 'canonical_rebuild_analyze_start' }));
+  await client.query('analyze');
+  console.log(JSON.stringify({ event: 'canonical_rebuild_analyze_complete' }));
+} finally {
+  await client.end();
 }
