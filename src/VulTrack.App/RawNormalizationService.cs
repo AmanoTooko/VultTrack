@@ -47,7 +47,8 @@ public sealed class RawNormalizationService(
         {
             await SupersedeOlderPendingRawAsync(connection, sourceCode, ct);
 
-            var scoped = normalizers.OfType<ISourceScopedRawNormalizer>().FirstOrDefault(x => x.SupportedSourceCodes.Contains(sourceCode));
+            var scoped = normalizers.OfType<ISourceScopedRawNormalizer>()
+                .FirstOrDefault(x => x.SupportedSourceCodes.Any(code => string.Equals(code, sourceCode, StringComparison.OrdinalIgnoreCase)));
             if (scoped is not null)
             {
                 return await scoped.ProcessSourcePendingAsync(connection, sourceCode, limit, ct);
