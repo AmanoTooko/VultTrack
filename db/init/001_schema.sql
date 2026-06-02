@@ -386,6 +386,9 @@ create index if not exists ix_identifier_lookup
 create index if not exists ix_identifier_canonical_group
   on vulnerability_identifier_index(canonical_vulnerability_id)
   where canonical_vulnerability_id is not null;
+create index if not exists ix_identifier_group_fk
+  on vulnerability_identifier_index(identifier_group_id)
+  where identifier_group_id is not null;
 create index if not exists ix_vuln_primary_identifier
   on vulnerabilities(primary_identifier);
 
