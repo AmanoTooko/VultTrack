@@ -776,6 +776,17 @@ create unique index if not exists ux_affected_components_identity_match_v3 on vu
   coalesce(range_type, '')
 );
 create index if not exists ix_affected_facts_vuln on vulnerability_affected_facts(vulnerability_id, ecosystem, normalized_package_name);
+create index if not exists ix_affected_facts_raw_index on vulnerability_affected_facts(raw_index_id);
+create index if not exists ix_exploits_raw_index on vulnerability_exploits(raw_index_id);
+create index if not exists ix_exploits_artifact_object on vulnerability_exploits(artifact_object_id);
+create index if not exists ix_stg_exploit_pocs_artifact_object on stg_exploit_pocs(artifact_object_id);
+create index if not exists ix_identifier_edges_raw_index on vulnerability_identifier_edges(raw_index_id);
+create index if not exists ix_identifier_index_raw_index on vulnerability_identifier_index(raw_index_id);
+create index if not exists ix_records_raw_index on vulnerability_records(raw_index_id);
+create index if not exists ix_severity_scores_raw_index on vulnerability_severity_scores(raw_index_id);
+create index if not exists ix_raw_object_fk on source_raw_index(object_id);
+create index if not exists ix_raw_sync_run_fk on source_raw_index(sync_run_id);
+create index if not exists ix_source_objects_sync_run_fk on source_objects(sync_run_id);
 create table if not exists stg_android_osv (
   raw_index_id uuid primary key references source_raw_index(id) on delete cascade,
   osv_id text not null,

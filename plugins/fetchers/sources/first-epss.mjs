@@ -2,7 +2,7 @@ import zlib from 'node:zlib';
 import { promisify } from 'node:util';
 import { fetchBuffer } from '../lib/http.mjs';
 import { getIntEnv } from '../lib/env.mjs';
-import { sha256, stableJson } from '../lib/hash.mjs';
+import { sha256 } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
 import { upsertThreatIntel } from '../lib/staging.mjs';
 
@@ -35,7 +35,7 @@ export async function run(client, ctx) {
       externalId: cve,
       sourceUrl: 'https://www.first.org/epss/data_stats',
       identifiers: [cve],
-      recordHash: sha256(stableJson(item)),
+      recordHash: sha256(cve),
       payload: item
     });
     await upsertThreatIntel(client, rawIndexId, 'first-epss', cve, item, {

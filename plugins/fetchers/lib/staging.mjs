@@ -136,7 +136,11 @@ export async function upsertThreatIntel(client, rawIndexId, provider, identifier
     `insert into stg_threat_intel_records
        (raw_index_id, provider, identifier, epss_score, epss_percentile, observed_at, payload)
      values ($1,$2,$3,$4,$5,$6,$7)
-     on conflict (raw_index_id) do update set payload = excluded.payload`,
+     on conflict (raw_index_id) do update set
+       epss_score = excluded.epss_score,
+       epss_percentile = excluded.epss_percentile,
+       observed_at = excluded.observed_at,
+       payload = excluded.payload`,
     [
       rawIndexId,
       provider,
