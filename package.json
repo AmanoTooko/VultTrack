@@ -14,6 +14,7 @@
     "benchmark:trivy": "node scripts/benchmark-trivy-sbom.mjs",
     "benchmark:api": "node scripts/api-performance-check.mjs",
     "audit:canonical": "node scripts/audit-canonical-integrity.mjs",
+    "audit:storage": "node scripts/audit-database-storage.mjs",
     "smoke:canonical": "node scripts/smoke-canonical-integrity.mjs",
     "rebuild:canonical": "node scripts/rebuild-canonical-data.mjs",
     "lint": "eslint plugins scripts tests src/VulTrack.App/wwwroot",

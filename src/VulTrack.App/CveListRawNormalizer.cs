@@ -54,7 +54,7 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
                 var title = EnglishDescription(cna?["descriptions"]) ?? row.CveId;
                 var status = string.Equals(row.State, "REJECTED", StringComparison.OrdinalIgnoreCase) ? "rejected" : "active";
                 var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, row.CveId, title, title, status, row.PublishedAt, row.UpdatedAt, identifiers, ct);
-                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, title, title, status, row.Payload, ct);
+                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, title, title, status, ct);
                 await UpsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, cna?["descriptions"], ct);
                 await UpsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, cna?["references"], ct);
                 var facts = ExtractAffectedFacts(cna).ToList();

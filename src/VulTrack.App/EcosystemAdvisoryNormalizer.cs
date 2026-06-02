@@ -95,7 +95,7 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
                 var fullDraft = new VulnerabilityCanonicalDraft(primary, title, description, "active", row.PublishedAt, row.ModifiedAt, identifiers, row.SourceId, row.RawIndexId);
                 var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, fullDraft, cache, ct);
                 var sourceRecordId = isCsaf ? $"{row.AdvisoryId}:{primary}" : row.AdvisoryId;
-                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, sourceRecordId, title, description, "active", row.Payload, ct);
+                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, sourceRecordId, title, description, "active", ct);
                 await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
                 await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, description), ct);
                 var severities = ExtractSeverities(payload, isCsaf, row.SeverityLabel, row.Payload, primary).ToList();

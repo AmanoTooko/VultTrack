@@ -41,7 +41,7 @@ try {
 
   await client.query('begin');
   try {
-    for (const table of tables) await client.query(`delete from ${table}`);
+    await client.query(`truncate table ${tables.join(', ')}`);
     await client.query("update sbom_components set vuln_count = 0");
     await client.query("update sbom_uploads set matched_count = 0");
     await client.query("update source_raw_index set normalize_status = 'pending', updated_at = now() where parse_status = 'succeeded'");

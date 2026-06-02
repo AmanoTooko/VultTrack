@@ -30,7 +30,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
     private async Task<NormalizeBatchResult> ProcessAlpineAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
     {
         await using var select = new NpgsqlCommand("""
-            select s.raw_index_id, s.distro_release, s.package_name, s.identifiers, s.secfixes, s.payload, r.source_id
+            select s.raw_index_id, s.distro_release, s.package_name, s.identifiers, s.secfixes, r.source_id
             from stg_alpine_secdb s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
@@ -45,7 +45,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
         {
             while (await reader.ReadAsync(ct))
             {
-                rows.Add(new AlpineRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetFieldValue<string[]>(3), reader.GetString(4), reader.GetString(5), reader.GetGuid(6)));
+                rows.Add(new AlpineRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetFieldValue<string[]>(3), reader.GetString(4), reader.GetGuid(5)));
             }
         }
 
@@ -62,7 +62,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                     var ids = ExtractAllIdentifiers(identifier);
                     var title = $"{identifier} affects Alpine package {row.PackageName}";
                     var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, identifier, title, title, "active", null, null, ids, ct);
-                    var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, $"{identifier}:{row.DistroRelease}:{row.PackageName}", title, title, "active", row.Payload, ct);
+                    var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, $"{identifier}:{row.DistroRelease}:{row.PackageName}", title, title, "active", ct);
                     var facts = ExtractAlpineFacts(row, identifier).ToList();
                     await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                     if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
@@ -87,7 +87,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
     private async Task<NormalizeBatchResult> ProcessDebianAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
     {
         await using var select = new NpgsqlCommand("""
-            select s.raw_index_id, s.cve_id, s.packages, s.payload, r.source_id
+            select s.raw_index_id, s.cve_id, s.packages, r.source_id
             from stg_debian_security_tracker s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
@@ -102,7 +102,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
         {
             while (await reader.ReadAsync(ct))
             {
-                rows.Add(new DebianRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetGuid(4)));
+                rows.Add(new DebianRow(reader.GetGuid(0), reader.GetString(1), reader.GetString(2), reader.GetGuid(3)));
             }
         }
 
@@ -117,7 +117,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                 var title = $"{row.CveId} Debian security tracker";
                 var identifiers = ExtractAllIdentifiers(row.CveId);
                 var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", null, null, identifiers, ct);
-                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", row.Payload, ct);
+                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", ct);
                 var facts = ExtractDebianFacts(row).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                 if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
@@ -186,7 +186,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
                 $"pkg:apk/alpine/{Uri.EscapeDataString(row.PackageName)}",
                 $"< {fixedVersion}",
                 "secfixes",
-                row.Payload);
+                "{}");
         }
     }
 
@@ -216,6 +216,6 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
         return IdentifiersFrom(ids);
     }
 
-    private sealed record AlpineRow(Guid RawIndexId, string DistroRelease, string PackageName, string[] Identifiers, string Secfixes, string Payload, Guid SourceId);
-    private sealed record DebianRow(Guid RawIndexId, string CveId, string Packages, string Payload, Guid SourceId);
+    private sealed record AlpineRow(Guid RawIndexId, string DistroRelease, string PackageName, string[] Identifiers, string Secfixes, Guid SourceId);
+    private sealed record DebianRow(Guid RawIndexId, string CveId, string Packages, Guid SourceId);
 }
