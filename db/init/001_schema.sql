@@ -754,7 +754,6 @@ create index if not exists ix_stg_exploit_pocs_provider on stg_exploit_pocs(prov
 create index if not exists ix_stg_external_advisories_identifiers on stg_external_advisories using gin(identifiers);
 create index if not exists ix_stg_external_advisories_provider on stg_external_advisories(provider, modified_at desc);
 create index if not exists ix_component_identity_lookup on component_identity_index(identity_type, normalized_value);
-create index if not exists ix_component_identity_trgm on component_identity_index using gin(normalized_value gin_trgm_ops);
 create index if not exists ix_components_canonical_trgm on components using gin(canonical_name gin_trgm_ops);
 create index if not exists ix_components_primary_purl_trgm on components using gin(primary_purl gin_trgm_ops) where primary_purl is not null;
 create index if not exists ix_components_primary_cpe_trgm on components using gin(primary_cpe23_uri gin_trgm_ops) where primary_cpe23_uri is not null;
