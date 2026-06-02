@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import { createWriteStream, existsSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
-import { spawnSync } from 'node:child_process';
+import AdmZip from 'adm-zip';
 import { getBoolEnv, getIntEnv, getRootPath } from './env.mjs';
 import { fetchJson, fetchText } from './http.mjs';
 import { sha256, stableJson } from './hash.mjs';
@@ -31,19 +31,16 @@ export async function runOsvAllZipInit(client, ctx, options = {}) {
     return { fetchedCount: 0, parsedCount: 0, checkpoint: { contentHash, skipped: true } };
   }
 
-  const list = spawnSync('unzip', ['-Z1', zipPath], { encoding: 'utf8', maxBuffer: 80 * 1024 * 1024 });
-  if (list.status !== 0) throw new Error(`Failed to list OSV all.zip entries: ${list.stderr}`);
-  const entries = list.stdout
-    .split('\n')
-    .filter((entry) => entry.endsWith('.json'))
-    .filter((entry) => !options.prefixes || options.prefixes.some((prefix) => entry.startsWith(prefix)));
+  const zip = new AdmZip(zipPath);
+  const entries = zip
+    .getEntries()
+    .filter((entry) => !entry.isDirectory && entry.entryName.endsWith('.json'))
+    .filter((entry) => !options.prefixes || options.prefixes.some((prefix) => entry.entryName.startsWith(prefix)));
 
   let count = 0;
-  for (const entryName of entries) {
+  for (const entry of entries) {
     if (count >= max) break;
-    const result = spawnSync('unzip', ['-p', zipPath, entryName], { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 });
-    if (result.status !== 0) continue;
-    const item = JSON.parse(result.stdout);
+    const item = JSON.parse(entry.getData().toString('utf8'));
     if (options.filter && !options.filter(item)) continue;
     await writeOsvItem(client, ctx, item, options);
     count++;
