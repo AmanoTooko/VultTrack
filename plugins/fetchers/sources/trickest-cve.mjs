@@ -2,7 +2,7 @@ import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeArtifact, writeRecord } from '../lib/db.mjs';
 import { upsertExploitPoc } from '../lib/staging.mjs';
-import { classifyExploitType, githubHeaders, identifiersFromText, maturityFor } from '../lib/exploit-utils.mjs';
+import { classifyExploitType, githubHeaders, maturityFor } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'trickest-cve';
 
@@ -12,12 +12,11 @@ export async function run(client, ctx) {
   let count = 0;
   for (const year of years) {
     const entries = await listYear(year).catch(() => []);
-    for (const entry of entries.filter((x) => /^CVE-\d{4}-\d+\.md$/i.test(x.name))) {
+    for (const entry of entries.filter((x) => trickestCveFromFilename(x.name))) {
       if (count >= max) break;
       const body = await fetchText(entry.download_url);
-      const identifiers = identifiersFromText(entry.name, body.slice(0, 2000));
-      if (!identifiers.length) continue;
-      const cve = identifiers[0];
+      const cve = trickestCveFromFilename(entry.name);
+      const identifiers = [cve];
       const rel = `${year}/${entry.name}`;
       const title = body.match(/^###\s+\[?([^\]\n]+)\]?/m)?.[1]?.trim() ?? cve;
       const githubLinks = [...body.matchAll(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/g)].map((m) => m[0]);
@@ -64,6 +63,10 @@ export async function run(client, ctx) {
   }
 
   return { fetchedCount: count, parsedCount: count, checkpoint: { lastFetched: new Date().toISOString() } };
+}
+
+export function trickestCveFromFilename(filename) {
+  return String(filename).match(/^(CVE-\d{4}-\d+)\.md$/i)?.[1]?.toUpperCase() ?? null;
 }
 
 function yearsDescending() {

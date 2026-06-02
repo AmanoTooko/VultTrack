@@ -38,6 +38,7 @@ app.UseStaticFiles();
 app.MapGet("/", () => Results.Redirect("/index.html"));
 
 await EnsureRuntimeIndexesAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
+await BackfillCvssScoresAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
 
 app.MapGet("/api/v1/system.health", () => ApiResult.Ok(new
 {
@@ -471,7 +472,8 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     else
     {
         var hasQuery = !string.IsNullOrWhiteSpace(rawQuery);
-        if (hasQuery && !string.IsNullOrWhiteSpace(exact))
+        var cveRange = TryGetCvePrefixRange(rawQuery);
+        if (hasQuery && !string.IsNullOrWhiteSpace(exact) && (cveRange is null || exactIsCompleteCve))
         {
             await using var fastCmd = db.CreateCommand($"""
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
@@ -503,7 +505,6 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
             }
         }
 
-        var cveRange = TryGetCvePrefixRange(rawQuery);
         await using var cmd = cveRange is not null
             ? db.CreateCommand($"""
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
@@ -626,12 +627,40 @@ app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, Can
 app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
 {
     await using var cmd = db.CreateCommand("""
-        select id, primary_identifier, title, description, status, severity_label, max_cvss_score,
-               max_cvss_version, max_cvss_vector, epss_score, epss_percentile, kev_date_added,
-               known_ransomware, source_count, affected_component_count, affected_ecosystems,
-               affected_component_names, identifiers, aliases, published_at, modified_at, updated_at
-        from vulnerabilities
-        where id = $1
+        select v.id, v.primary_identifier, v.title, coalesce(nvd_description.value, v.description),
+               v.status, v.severity_label, v.max_cvss_score, v.max_cvss_version, v.max_cvss_vector,
+               v.epss_score, v.epss_percentile, v.kev_date_added, v.known_ransomware,
+               coalesce(actual_sources.source_count, 0), v.affected_component_count,
+               v.affected_ecosystems, v.affected_component_names, v.identifiers, v.aliases,
+               coalesce(nvd_dates.published_at, v.published_at),
+               coalesce(nvd_dates.modified_at, v.modified_at),
+               v.updated_at, v.published_at, v.modified_at
+        from vulnerabilities v
+        left join lateral (
+          select r.source_published_at as published_at, r.source_modified_at as modified_at
+          from source_raw_index r
+          join sources s on s.id = r.source_id
+          where s.code in ('nvd-cve', 'nvd-cve-init')
+            and r.external_key = v.primary_identifier
+          order by r.source_modified_at desc nulls last, r.created_at desc
+          limit 1
+        ) nvd_dates on true
+        left join lateral (
+          select d.value
+          from vulnerability_descriptions d
+          join sources s on s.id = d.source_id
+          where d.vulnerability_id = v.id
+            and s.code in ('nvd-cve', 'nvd-cve-init')
+            and lower(d.lang) = 'en'
+          order by case when d.description_type = 'detail' then 0 else 1 end, d.is_selected desc
+          limit 1
+        ) nvd_description on true
+        left join lateral (
+          select count(distinct vr.source_id)::integer as source_count
+          from vulnerability_records vr
+          where vr.vulnerability_id = v.id
+        ) actual_sources on true
+        where v.id = $1
         """);
     cmd.Parameters.AddWithValue(id);
     await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -660,7 +689,9 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
         aliases = reader.GetFieldValue<string[]>(18),
         publishedAt = reader.IsDBNull(19) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(19),
         modifiedAt = reader.IsDBNull(20) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(20),
-        updatedAt = reader.GetFieldValue<DateTimeOffset>(21)
+        updatedAt = reader.GetFieldValue<DateTimeOffset>(21),
+        canonicalPublishedAt = reader.IsDBNull(22) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(22),
+        canonicalModifiedAt = reader.IsDBNull(23) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(23)
     };
 
     var actualId = id;
@@ -702,15 +733,28 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             order by CASE WHEN range_type IN ('ECOSYSTEM','semver','vendor') THEN 0 ELSE 1 END,
                      CASE WHEN normalized_range IS NOT NULL AND normalized_range <> '' THEN 0 ELSE 1 END,
                      ecosystem nulls last, display_name
-            limit 50
+            limit 60
+            """, queryId, ct),
+        affectedExpressions = await QueryRowsAsync(db, """
+            select s.code, f.fact_type, f.ecosystem, f.package_name, f.purl,
+                   f.purl_without_version, f.cpe23_uri, f.version_range_raw,
+                   f.range_type, f.vulnerable, f.source_confidence
+            from vulnerability_affected_facts f
+            left join sources s on s.id = f.source_id
+            where f.vulnerability_id = $1
+            order by case when f.cpe23_uri is not null then 0 else 1 end,
+                     case when f.purl is not null then 0 else 1 end,
+                     s.code nulls last, f.package_name nulls last, f.version_range_raw nulls last
+            limit 250
             """, queryId, ct),
         descriptions = await QueryRowsAsync(db, """
             select s.code, lang, description_type, left(value, 4000) as value, is_selected
             from vulnerability_descriptions d
             left join sources s on s.id = d.source_id
             where d.vulnerability_id = $1
-            order by is_selected desc, s.code nulls last
-            limit 10
+            order by case when s.code in ('nvd-cve', 'nvd-cve-init') then 0 else 1 end,
+                     is_selected desc, s.code nulls last
+            limit 16
             """, queryId, ct),
         severities = await QueryRowsAsync(db, """
             select s.code, scoring_system, scoring_version, score_type, vector_string,
@@ -718,8 +762,9 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             from vulnerability_severity_scores vss
             left join sources s on s.id = vss.source_id
             where vss.vulnerability_id = $1
-            order by is_selected desc, score desc nulls last
-            limit 10
+            order by case when s.code in ('nvd-cve', 'nvd-cve-init') then 0 else 1 end,
+                     is_selected desc, score desc nulls last
+            limit 20
             """, queryId, ct),
         references = await QueryRowsAsync(db, """
             with ranked as (
@@ -733,7 +778,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             from ranked
             where source_rank <= 20
             order by code nulls last, source_rank, url
-            limit 100
+            limit 40
             """, queryId, ct),
         exploits = await QueryRowsAsync(db, """
             select s.code, e.source_key, e.title, e.source_url, e.artifact_url,
@@ -754,7 +799,25 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
                      e.modified_at desc nulls last,
                      s.code,
                      e.source_key
-            limit 100
+            limit 40
+            """, queryId, ct),
+        history = await QueryRowsAsync(db, """
+            select s.code, vr.source_record_id, ri.source_published_at, ri.source_modified_at,
+                   ri.created_at as ingested_at, vr.updated_at as normalized_at,
+                   left(ri.record_hash, 16) as record_hash,
+                   case
+                     when row_number() over (
+                       partition by vr.source_id, vr.source_record_id
+                       order by ri.created_at, vr.created_at
+                     ) = 1 then 'added'
+                     else 'updated'
+                   end as change_type
+            from vulnerability_records vr
+            join sources s on s.id = vr.source_id
+            join source_raw_index ri on ri.id = vr.raw_index_id
+            where vr.vulnerability_id = $1
+            order by coalesce(ri.source_modified_at, ri.created_at) desc, s.code
+            limit 40
             """, queryId, ct)
     });
 });
@@ -1110,7 +1173,7 @@ static async Task<List<object>> QueryRecordsGroupedAsync(NpgsqlDataSource db, Gu
         join source_raw_index ri on ri.id = vr.raw_index_id
         where vr.vulnerability_id = $1
         order by s.code, vr.updated_at desc
-        limit 100
+        limit 60
         """);
     cmd.Parameters.AddWithValue(vulnId);
     var rows = new List<object>();
@@ -1140,6 +1203,29 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last)",
         "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
         "create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier)",
+        "create index if not exists ix_raw_normalize_latest on source_raw_index(source_id, external_key, source_modified_at desc nulls last, updated_at desc, created_at desc, id desc) where normalize_status in ('pending', 'failed')",
+        "create index if not exists ix_stg_cve_list_normalize_order on stg_cve_list_records(updated_at nulls last, cve_id, raw_index_id)",
+        "create index if not exists ix_stg_nvd_cpe_normalize_order on stg_nvd_cpe_dictionary(cpe23_uri, raw_index_id)",
+        "create index if not exists ix_stg_nvd_cves_normalize_order on stg_nvd_cves(modified_at nulls last, cve_id, raw_index_id)",
+        "create index if not exists ix_stg_threat_intel_normalize_order on stg_threat_intel_records(observed_at nulls last, identifier, raw_index_id)",
+        "create index if not exists ix_stg_registry_normalize_order on stg_registry_packages(ecosystem, namespace, name, raw_index_id)",
+        "create index if not exists ix_stg_exploit_normalize_order on stg_exploit_pocs(modified_at desc nulls last, raw_index_id)",
+        "create index if not exists ix_records_source_fk on vulnerability_records(source_id)",
+        "create index if not exists ix_descriptions_record_fk on vulnerability_descriptions(vulnerability_record_id)",
+        "create index if not exists ix_severity_record_fk on vulnerability_severity_scores(vulnerability_record_id)",
+        "create index if not exists ix_severity_source_fk on vulnerability_severity_scores(source_id)",
+        "create index if not exists ix_weaknesses_record_fk on vulnerability_weaknesses(vulnerability_record_id)",
+        "create index if not exists ix_weaknesses_source_fk on vulnerability_weaknesses(source_id)",
+        "create index if not exists ix_refs_record_fk on vulnerability_references(vulnerability_record_id)",
+        "create index if not exists ix_refs_source_fk on vulnerability_references(source_id)",
+        "create index if not exists ix_source_properties_record_fk on vulnerability_source_properties(vulnerability_record_id)",
+        "create index if not exists ix_detail_blocks_record_fk on vulnerability_detail_blocks(vulnerability_record_id)",
+        "create index if not exists ix_detail_blocks_source_fk on vulnerability_detail_blocks(source_id)",
+        "create index if not exists ix_affected_facts_record_fk on vulnerability_affected_facts(vulnerability_record_id)",
+        "create index if not exists ix_affected_facts_source_fk on vulnerability_affected_facts(source_id)",
+        "create index if not exists ix_descriptions_source_fk on vulnerability_descriptions(source_id)",
+        "create index if not exists ix_identifier_edges_source_fk on vulnerability_identifier_edges(source_id)",
+        "create index if not exists ix_identifier_index_source_fk on vulnerability_identifier_index(source_id)",
         """
         do $$
         begin
@@ -1254,6 +1340,106 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         await cmd.ExecuteNonQueryAsync();
     }
 }
+
+static async Task BackfillCvssScoresAsync(NpgsqlDataSource db)
+{
+    var updates = new List<(Guid Id, Guid VulnerabilityId, decimal Score, string Label)>();
+    await using (var cmd = db.CreateCommand("""
+        select id, vulnerability_id, vector_string, scoring_version
+        from vulnerability_severity_scores
+        where score is null
+          and vector_string is not null
+          and (
+            vector_string like 'CVSS:3.%'
+            or vector_string like 'CVSS:2.%'
+            or scoring_version like '2%'
+          )
+        """))
+    await using (var reader = await cmd.ExecuteReaderAsync())
+    {
+        while (await reader.ReadAsync())
+        {
+            var score = CvssScoreCalculator.CalculateBaseScore(
+                reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3));
+            if (score is null) continue;
+            updates.Add((
+                reader.GetGuid(0),
+                reader.GetGuid(1),
+                score.Value,
+                CvssSeverityLabel(score.Value, reader.IsDBNull(3) ? null : reader.GetString(3))));
+        }
+    }
+
+    foreach (var chunk in updates.Chunk(500))
+    {
+        var rows = chunk.ToArray();
+        await using var updateScores = db.CreateCommand("""
+            update vulnerability_severity_scores score
+            set score = incoming.score,
+                severity_label = coalesce(score.severity_label, incoming.label),
+                normalized_severity = coalesce(score.normalized_severity, lower(incoming.label)),
+                updated_at = now()
+            from unnest($1::uuid[], $2::numeric[], $3::text[]) as incoming(id, score, label)
+            where score.id = incoming.id
+              and score.score is null
+            """);
+        updateScores.Parameters.AddWithValue(rows.Select(row => row.Id).ToArray());
+        updateScores.Parameters.AddWithValue(rows.Select(row => row.Score).ToArray());
+        updateScores.Parameters.AddWithValue(rows.Select(row => row.Label).ToArray());
+        await updateScores.ExecuteNonQueryAsync();
+
+        await using var updateVulnerabilities = db.CreateCommand("""
+            with ranked as (
+              select distinct on (vulnerability_id)
+                     vulnerability_id, score, scoring_version, vector_string, severity_label
+              from vulnerability_severity_scores
+              where vulnerability_id = any($1)
+                and score is not null
+              order by vulnerability_id, score desc, is_selected desc
+            )
+            update vulnerabilities vulnerability
+            set max_cvss_version = case
+                  when vulnerability.max_cvss_score is null or ranked.score > vulnerability.max_cvss_score then ranked.scoring_version
+                  else vulnerability.max_cvss_version
+                end,
+                max_cvss_vector = case
+                  when vulnerability.max_cvss_score is null or ranked.score > vulnerability.max_cvss_score then ranked.vector_string
+                  else vulnerability.max_cvss_vector
+                end,
+                severity_label = case
+                  when vulnerability.max_cvss_score is null or ranked.score > vulnerability.max_cvss_score then ranked.severity_label
+                  else vulnerability.severity_label
+                end,
+                max_cvss_score = greatest(coalesce(vulnerability.max_cvss_score, ranked.score), ranked.score),
+                updated_at = now()
+            from ranked
+            where vulnerability.id = ranked.vulnerability_id
+            """);
+        updateVulnerabilities.Parameters.AddWithValue(rows.Select(row => row.VulnerabilityId).Distinct().ToArray());
+        await updateVulnerabilities.ExecuteNonQueryAsync();
+    }
+
+    if (updates.Count > 0)
+        Console.WriteLine($"Backfilled {updates.Count} CVSS vector scores.");
+}
+
+static string CvssSeverityLabel(decimal score, string? version) =>
+    version?.StartsWith("2", StringComparison.Ordinal) == true
+        ? score switch
+        {
+            >= 7.0m => "HIGH",
+            >= 4.0m => "MEDIUM",
+            _ => "LOW"
+        }
+        : score switch
+        {
+            >= 9.0m => "CRITICAL",
+            >= 7.0m => "HIGH",
+            >= 4.0m => "MEDIUM",
+            > 0m => "LOW",
+            _ => "NONE"
+        };
 
 static int ClampPageSize(int pageSize) => pageSize <= 0 ? 25 : Math.Min(pageSize, 200);
 
@@ -1386,7 +1572,7 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
                      count(*) filter (where normalize_status = 'pending') as normalize_pending,
                      count(*) filter (where normalize_status = 'failed') as normalize_failed
               from source_raw_index tablesample system (0.5)
-              where normalize_status <> 'succeeded'
+              where normalize_status in ('pending', 'failed')
               group by source_id
             ),
             sample_total as (

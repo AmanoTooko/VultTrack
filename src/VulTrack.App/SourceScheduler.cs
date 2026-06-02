@@ -55,11 +55,22 @@ public sealed class SourceScheduler(
                 foreach (var source in allSources)
                 {
                     if (ct.IsCancellationRequested) break;
-                    var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
-                    if (result.Processed > 0 || result.Failed > 0)
+                    try
                     {
-                        logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
-                            result.SourceCode, result.Processed, result.Failed);
+                        var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
+                        if (result.Processed > 0 || result.Failed > 0)
+                        {
+                            logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
+                                result.SourceCode, result.Processed, result.Failed);
+                        }
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Normalizer {Source} failed; continuing normalize cycle.", source.Code);
                     }
                 }
             }
@@ -107,11 +118,22 @@ public sealed class SourceScheduler(
         var allSources = await LoadAllSourcesAsync(ct);
         foreach (var source in allSources)
         {
-            var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
-            if (result.Processed > 0 || result.Failed > 0)
+            try
             {
-                logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
-                    result.SourceCode, result.Processed, result.Failed);
+                var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
+                if (result.Processed > 0 || result.Failed > 0)
+                {
+                    logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
+                        result.SourceCode, result.Processed, result.Failed);
+                }
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Normalizer {Source} failed; continuing scheduled normalization.", source.Code);
             }
         }
 
@@ -156,7 +178,8 @@ public sealed class SourceScheduler(
         var rows = new List<ScheduledSource>();
         await using var cmd = db.CreateCommand("""
             select s.code, s.schedule_cron, s.config_json->>'runMode' as run_mode,
-                   max(r.finished_at) filter (where r.status = 'succeeded') as last_success
+                   max(r.finished_at) filter (where r.status = 'succeeded') as last_success,
+                   s.checkpoint_json->>'initComplete' as init_complete
             from sources s
             left join source_sync_runs r on r.source_id = s.id
             where s.enabled = true
@@ -164,8 +187,14 @@ public sealed class SourceScheduler(
                 s.schedule_cron is not null
                 or ($1::boolean = true and s.config_json->>'runMode' = 'init')
               )
-            group by s.id, s.code, s.schedule_cron, s.config_json->>'runMode'
-            order by s.code
+            group by s.id, s.code, s.schedule_cron, s.config_json->>'runMode', s.checkpoint_json->>'initComplete'
+            order by
+              case
+                when s.config_json->>'runMode' = 'init' then 0
+                when s.checkpoint_json->>'initComplete' = 'false' then 1
+                else 2
+              end,
+              s.code
             """);
         cmd.Parameters.AddWithValue(EnvBool("SCHEDULER_INCLUDE_INIT_SOURCES", Options.IncludeInitSources));
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -180,14 +209,17 @@ public sealed class SourceScheduler(
             var cron = reader.IsDBNull(1) ? null : reader.GetString(1);
             var runMode = reader.IsDBNull(2) ? null : reader.GetString(2);
             var lastSuccess = reader.IsDBNull(3) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(3);
+            var initComplete = reader.IsDBNull(4) ? null : reader.GetString(4);
             if (string.Equals(runMode, "init", StringComparison.OrdinalIgnoreCase) && cron is null)
             {
-                if (lastSuccess is null)
+                if (lastSuccess is null || string.Equals(initComplete, "false", StringComparison.OrdinalIgnoreCase))
                     rows.Add(new ScheduledSource(code, "", lastSuccess));
                 continue;
             }
 
-            if (cron is not null && IsDue(cron, lastSuccess, DateTimeOffset.UtcNow))
+            if (cron is not null &&
+                (string.Equals(initComplete, "false", StringComparison.OrdinalIgnoreCase) ||
+                 IsDue(cron, lastSuccess, DateTimeOffset.UtcNow)))
             {
                 rows.Add(new ScheduledSource(code, cron, lastSuccess));
             }

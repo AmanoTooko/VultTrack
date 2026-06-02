@@ -28,12 +28,7 @@ export async function run(client, ctx) {
     } catch {
       continue;
     }
-    const identifiers = identifiersFromText(
-      doc?.id,
-      doc?.info?.classification?.['cve-id'],
-      doc?.info?.tags,
-      body.slice(0, 3000)
-    );
+    const identifiers = nucleiIdentifiers(doc);
     if (!identifiers.length) continue;
     const tags = String(doc?.info?.tags ?? '').split(',').map((x) => x.trim()).filter(Boolean);
     const rel = path.relative(mirror.dir, file);
@@ -81,4 +76,8 @@ export async function run(client, ctx) {
   }
 
   return { fetchedCount: count, parsedCount: count, checkpoint: { gitRevision: mirror.revision, lastFetched: new Date().toISOString() } };
+}
+
+export function nucleiIdentifiers(doc) {
+  return identifiersFromText(doc?.id, doc?.info?.classification?.['cve-id']);
 }

@@ -16,7 +16,7 @@ public sealed class CveListRawNormalizer(IEnumerable<IAffectedComponentHook> aff
             from stg_cve_list_records s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
-            where r.normalize_status <> 'succeeded' and src.code = 'cve-list-v5'
+            where r.normalize_status in ('pending', 'failed') and src.code = 'cve-list-v5'
             order by s.updated_at nulls last, s.cve_id
             limit $1
             """, connection);

@@ -75,7 +75,7 @@ try {
     `);
   const rawCoverage = await client.query(`
       select s.code,
-             count(*) filter (where r.normalize_status <> 'succeeded')::bigint pending,
+             count(*) filter (where r.normalize_status in ('pending', 'failed'))::bigint pending,
              count(*) filter (where r.normalize_status = 'succeeded')::bigint normalized
       from source_raw_index r join sources s on s.id = r.source_id
       group by s.code order by s.code

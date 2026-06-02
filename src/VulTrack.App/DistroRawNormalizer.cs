@@ -34,7 +34,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             from stg_alpine_secdb s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
-            where r.normalize_status <> 'succeeded' and src.code = 'alpine-secdb'
+            where r.normalize_status in ('pending', 'failed') and src.code = 'alpine-secdb'
             order by s.distro_release, s.package_name
             limit $1
             """, connection);
@@ -91,7 +91,7 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             from stg_debian_security_tracker s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
-            where r.normalize_status <> 'succeeded' and src.code = 'debian-security-tracker'
+            where r.normalize_status in ('pending', 'failed') and src.code = 'debian-security-tracker'
             order by s.cve_id
             limit $1
             """, connection);

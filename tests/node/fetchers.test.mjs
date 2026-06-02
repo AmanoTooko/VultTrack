@@ -44,6 +44,52 @@ test('exploit metadata sanitizer replaces only invalid Unicode surrogates', asyn
   });
 });
 
+test('init checkpoints resume only matching incomplete imports and persist progress', async () => {
+  const { resumeInitOffset, saveInitProgress } = await import('../../plugins/fetchers/lib/db.mjs');
+  assert.equal(resumeInitOffset({ initComplete: false, initMode: 'full', offset: '500' }, { initMode: 'full' }), 500);
+  assert.equal(resumeInitOffset({ initComplete: true, initMode: 'full', offset: 500 }, { initMode: 'full' }), 0);
+  assert.equal(resumeInitOffset({ initComplete: false, initMode: 'full', offset: 500 }, { initMode: 'incremental' }), 0);
+  assert.equal(resumeInitOffset({ initComplete: false, initMode: 'full', offset: -1 }, { initMode: 'full' }), 0);
+
+  const queries = [];
+  const ctx = { source: { id: 'source-id', checkpoint_json: {} } };
+  const next = await saveInitProgress({
+    query: async (sql, values) => queries.push({ sql, values })
+  }, ctx, { initMode: 'full', offset: 500 });
+
+  assert.deepEqual(next, { initMode: 'full', offset: 500, initComplete: false });
+  assert.equal(JSON.parse(queries[0].values[1]).offset, 500);
+  assert.strictEqual(ctx.source.checkpoint_json, next);
+});
+
+test('CVE List v5 requires full import without a completed checkpoint or raw source records', async () => {
+  const { shouldRunFullImport } = await import('../../plugins/fetchers/sources/cve-list-v5.mjs');
+  assert.equal(shouldRunFullImport({}, true), true);
+  assert.equal(shouldRunFullImport({ initComplete: false }, true), true);
+  assert.equal(shouldRunFullImport({ initComplete: true }, true), true);
+  assert.equal(shouldRunFullImport({ initComplete: true }, false), true);
+  assert.equal(shouldRunFullImport({ initComplete: true, commit: 'abc123' }, true), false);
+});
+
+test('PoC fetchers keep authoritative CVE primary identifiers only', async () => {
+  const { nucleiIdentifiers } = await import('../../plugins/fetchers/sources/nuclei-templates.mjs');
+  const { trickestCveFromFilename } = await import('../../plugins/fetchers/sources/trickest-cve.mjs');
+  const { pocGithubCveFromPath } = await import('../../plugins/fetchers/sources/poc-in-github.mjs');
+
+  assert.deepEqual(nucleiIdentifiers({
+    id: 'CVE-2021-44228',
+    info: {
+      classification: { 'cve-id': 'CVE-2021-44228' },
+      tags: 'cve,CVE-2021-45046',
+      reference: ['https://example.test/CVE-2022-0070']
+    }
+  }), ['CVE-2021-44228']);
+  assert.equal(trickestCveFromFilename('CVE-2021-44228.md'), 'CVE-2021-44228');
+  assert.equal(trickestCveFromFilename('notes-CVE-2021-45046.md'), null);
+  assert.equal(pocGithubCveFromPath('/mirror/2021/CVE-2021-44228.json'), 'CVE-2021-44228');
+  assert.equal(pocGithubCveFromPath('/mirror/2021/log4j-notes.json'), null);
+});
+
 test('china advisory identifiers collect domestic ids and CVEs', async () => {
   const { chinaIdentifiers } = await import('../../plugins/fetchers/lib/china-advisory.mjs');
   assert.deepEqual(chinaIdentifiers(
@@ -59,6 +105,13 @@ test('china advisory identifiers collect domestic ids and CVEs', async () => {
     'NSFOCUS-142883',
     'CERT360-663C2362C09F255B91B17FDD'
   ]);
+});
+
+test('CNNVD baseline resumes saved pages and migrates legacy checkpoints', async () => {
+  const { cnnvdBaselinePage } = await import('../../plugins/fetchers/sources/cnnvd.mjs');
+  assert.equal(cnnvdBaselinePage({}, 0, 50), 1);
+  assert.equal(cnnvdBaselinePage({ nextPage: 17 }, 50, 50), 17);
+  assert.equal(cnnvdBaselinePage({ modifiedAt: '2026-06-01T00:00:00Z' }, 5022, 50), 101);
 });
 
 test('domestic HTML fetcher parsers keep source ids and PoC signals', async () => {

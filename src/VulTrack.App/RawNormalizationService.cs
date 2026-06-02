@@ -11,6 +11,7 @@ public sealed class RawNormalizationService(
     {
         var results = new List<NormalizeBatchResult>();
         await using var connection = await db.OpenConnectionAsync(ct);
+        await SupersedeOlderPendingRawAsync(connection, null, ct);
 
         foreach (var normalizer in normalizers)
         {
@@ -32,6 +33,8 @@ public sealed class RawNormalizationService(
     public async Task<NormalizeBatchResult> ProcessSourcePendingAsync(string sourceCode, int limit, CancellationToken ct)
     {
         await using var connection = await db.OpenConnectionAsync(ct);
+        await SupersedeOlderPendingRawAsync(connection, sourceCode, ct);
+
         var scoped = normalizers.OfType<ISourceScopedRawNormalizer>().FirstOrDefault(x => x.SupportedSourceCodes.Contains(sourceCode));
         if (scoped is not null)
         {
@@ -55,6 +58,41 @@ public sealed class RawNormalizationService(
         {
             logger.LogError(ex, "Normalizer {SourceCode} failed for source-scoped request", sourceCode);
             return new NormalizeBatchResult(sourceCode, 0, 1);
+        }
+    }
+
+    private async Task SupersedeOlderPendingRawAsync(NpgsqlConnection connection, string? sourceCode, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("""
+            with ranked as (
+              select r.id,
+                     row_number() over (
+                       partition by r.source_id, r.external_key
+                       order by
+                         case when r.status = 'priority' then 0 else 1 end,
+                         r.source_modified_at desc nulls last,
+                         r.updated_at desc,
+                         r.created_at desc,
+                         r.id desc
+                     ) as rank
+              from source_raw_index r
+              join sources s on s.id = r.source_id
+              where r.normalize_status in ('pending', 'failed')
+                and ($1::text is null or s.code = $1)
+            )
+            update source_raw_index r
+            set normalize_status = 'superseded',
+                updated_at = now()
+            from ranked
+            where r.id = ranked.id
+              and ranked.rank > 1
+            """, connection);
+        cmd.CommandTimeout = 300;
+        cmd.Parameters.AddWithValue((object?)sourceCode ?? DBNull.Value);
+        var superseded = await cmd.ExecuteNonQueryAsync(ct);
+        if (superseded > 0)
+        {
+            logger.LogInformation("Marked {Count} older raw snapshots as superseded for {SourceCode}.", superseded, sourceCode ?? "all sources");
         }
     }
 }

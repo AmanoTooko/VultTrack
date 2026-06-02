@@ -1,7 +1,7 @@
 import { authHeaders, fetchJson } from '../lib/http.mjs';
 import { getIntEnv, getRootPath } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
-import { writeRecord } from '../lib/db.mjs';
+import { resumeInitOffset, saveInitProgress, writeRecord } from '../lib/db.mjs';
 import { upsertNvdCve } from '../lib/staging.mjs';
 
 export const sourceCode = 'nvd-cve';
@@ -26,23 +26,30 @@ export async function initFromMirror(client, ctx, max) {
   const { spawnSync } = await import('node:child_process');
 
   const mirrorPath = getRootPath(MIRROR_DIR);
+  const checkpoint = ctx.source.checkpoint_json ?? {};
   console.error(`[nvd-cve] mirror dir: ${mirrorPath}`);
 
-  // Clone or pull
-  try {
-    await fs.access(path.default.join(mirrorPath, '.git'));
+  const localCommit = getMirrorCommit(spawnSync, mirrorPath);
+  const resumePinnedMirror = checkpoint.initComplete === false
+    && checkpoint.initMode === 'full'
+    && checkpoint.mirrorCommit
+    && checkpoint.mirrorCommit === localCommit;
+
+  if (resumePinnedMirror) {
+    console.error(`[nvd-cve] resuming pinned mirror at commit ${localCommit.slice(0, 8)}`);
+  } else if (localCommit) {
     console.error('[nvd-cve] refreshing mirror...');
     runGit(spawnSync, ['-C', mirrorPath, 'fetch', '--depth', '1', 'origin', 'main']);
     runGit(spawnSync, ['-C', mirrorPath, 'reset', '--hard', 'FETCH_HEAD']);
-  } catch {
+  } else {
     console.error('[nvd-cve] cloning mirror (shallow)...');
     await fs.mkdir(mirrorPath, { recursive: true });
-    spawnSync('git', ['clone', '--depth', '1', '-b', 'main', GIT_REPO, mirrorPath], { stdio: 'inherit' });
+    runGit(spawnSync, ['clone', '--depth', '1', '-b', 'main', GIT_REPO, mirrorPath]);
   }
 
   // Get the latest commit hash for checkpoint
-  const revResult = spawnSync('git', ['-C', mirrorPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
-  const commitHash = revResult.stdout.trim();
+  const commitHash = getMirrorCommit(spawnSync, mirrorPath);
+  if (!commitHash) throw new Error('Unable to resolve NVD CVE mirror revision');
   console.error(`[nvd-cve] mirror at commit ${commitHash.slice(0, 8)}`);
 
   // Walk all CVE JSON files
@@ -59,50 +66,81 @@ export async function initFromMirror(client, ctx, max) {
     }
   }
   await walk(mirrorPath);
+  entries.sort();
   console.error(`[nvd-cve] found ${entries.length} CVE files`);
 
+  const offset = resumeInitOffset(checkpoint, { initMode: 'full', mirrorCommit: commitHash });
+  let nextOffset = offset;
   let count = 0;
-  let latestMod = null;
+  let latestMod = offset > 0 ? (checkpoint.latestModStartDate ?? null) : null;
   const batchSize = 500;
 
-  for (let i = 0; i < entries.length && count < max; i++) {
+  await saveInitProgress(client, ctx, fullInitCheckpoint(nextOffset, latestMod, commitHash, entries.length));
+  if (offset > 0) {
+    console.error(`[nvd-cve] resuming full init at offset ${offset}`);
+  }
+
+  for (let i = offset; i < entries.length && count < max; i++) {
     const file = entries[i];
     const raw = await fs.readFile(file, 'utf8');
     const item = JSON.parse(raw);
     const cveId = item.id;
-    if (!cveId) continue;
+    if (cveId) {
+      if (item.lastModified && (!latestMod || item.lastModified > latestMod)) {
+        latestMod = item.lastModified;
+      }
 
-    if (item.lastModified && (!latestMod || item.lastModified > latestMod)) {
-      latestMod = item.lastModified;
+      const rawIndexId = await writeRecord(client, ctx, {
+        externalKey: cveId,
+        externalId: cveId,
+        sourceUrl: `https://nvd.nist.gov/vuln/detail/${cveId}`,
+        publishedAt: item.published,
+        modifiedAt: item.lastModified,
+        identifiers: [cveId],
+        recordHash: sha256(stableJson(item)),
+        payload: item
+      });
+      await upsertNvdCve(client, rawIndexId, item);
+      count++;
     }
 
-    const rawIndexId = await writeRecord(client, ctx, {
-      externalKey: cveId,
-      externalId: cveId,
-      sourceUrl: `https://nvd.nist.gov/vuln/detail/${cveId}`,
-      publishedAt: item.published,
-      modifiedAt: item.lastModified,
-      identifiers: [cveId],
-      recordHash: sha256(stableJson(item)),
-      payload: item
-    });
-    await upsertNvdCve(client, rawIndexId, item);
-    count++;
+    nextOffset = i + 1;
 
-    if (count % batchSize === 0) {
+    if (nextOffset % batchSize === 0) {
+      await saveInitProgress(client, ctx, fullInitCheckpoint(nextOffset, latestMod, commitHash, entries.length));
       console.error(`[nvd-cve] imported ${count}/${entries.length} (${Math.round(count/entries.length*100)}%)`);
     }
   }
 
-  console.error(`[nvd-cve] init done, imported ${count} records`);
+  const initComplete = nextOffset >= entries.length;
+  console.error(`[nvd-cve] init ${initComplete ? 'done' : 'paused'}, imported ${count} records this run`);
   return {
     fetchedCount: count,
     parsedCount: count,
-    checkpoint: {
-      lastModStartDate: latestMod ? nvdDate(latestMod) : null,
-      mirrorCommit: commitHash,
-      lastFetched: new Date().toISOString()
-    }
+    checkpoint: initComplete
+      ? {
+          initComplete: true,
+          lastModStartDate: latestMod ? nvdDate(latestMod) : null,
+          mirrorCommit: commitHash,
+          lastFetched: new Date().toISOString()
+        }
+      : await saveInitProgress(client, ctx, fullInitCheckpoint(nextOffset, latestMod, commitHash, entries.length))
+  };
+}
+
+function getMirrorCommit(spawnSync, mirrorPath) {
+  const result = spawnSync('git', ['-C', mirrorPath, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+function fullInitCheckpoint(offset, latestMod, mirrorCommit, totalFiles) {
+  return {
+    initMode: 'full',
+    offset,
+    latestModStartDate: latestMod,
+    mirrorCommit,
+    totalFiles,
+    lastFetched: new Date().toISOString()
   };
 }
 

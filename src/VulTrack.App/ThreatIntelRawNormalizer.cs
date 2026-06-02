@@ -36,7 +36,7 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
             from stg_threat_intel_records s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
-            where r.normalize_status <> 'succeeded' and src.code = $1
+            where r.normalize_status in ('pending', 'failed') and src.code = $1
             order by s.observed_at nulls last, s.identifier
             limit $2
             """, connection);
@@ -71,7 +71,7 @@ public sealed class ThreatIntelRawNormalizer(IVulnerabilityCanonicalizer canonic
                 var title = payload?["shortDescription"]?.GetValue<string>() ?? payload?["vulnerabilityName"]?.GetValue<string>() ?? row.Identifier;
                 var vulnerabilityId = await canonicalizer.UpsertCanonicalAsync(
                     connection,
-                    new VulnerabilityCanonicalDraft(row.Identifier, title, title, "active", null, row.ObservedAt, [row.Identifier], row.SourceId, row.RawIndexId),
+                    new VulnerabilityCanonicalDraft(row.Identifier, null, null, "active", null, null, [row.Identifier], row.SourceId, row.RawIndexId),
                     ct);
                 await UpsertRecordAsync(connection, vulnerabilityId, row, title, ct);
                 await UpdateThreatProjectionAsync(connection, vulnerabilityId, row, payload, ct);
