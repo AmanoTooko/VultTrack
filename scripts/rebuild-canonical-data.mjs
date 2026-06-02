@@ -61,7 +61,12 @@ try {
     await client.query(`truncate table ${tables.join(', ')}`);
     await client.query("update sbom_components set vuln_count = 0");
     await client.query("update sbom_uploads set matched_count = 0");
-    await client.query("update source_raw_index set normalize_status = 'pending', updated_at = now() where parse_status = 'succeeded'");
+    await client.query(`
+      update source_raw_index
+      set normalize_status = 'pending', updated_at = now()
+      where parse_status = 'succeeded'
+        and normalize_status <> 'pending'
+    `);
     await client.query('commit');
   } catch (error) {
     await client.query('rollback');
