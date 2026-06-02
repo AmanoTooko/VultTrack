@@ -475,20 +475,36 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
         var cveRange = TryGetCvePrefixRange(rawQuery);
         if (hasQuery && !string.IsNullOrWhiteSpace(exact) && (cveRange is null || exactIsCompleteCve))
         {
-            await using var fastCmd = db.CreateCommand($"""
+            await using var fastCmd = exactIsCompleteCve
+                ? db.CreateCommand($"""
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
                        v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
                 from vulnerabilities v
                 where v.primary_identifier = $1
-                   or ($2 = false and exists (
-                    select 1 from vulnerability_identifier_index i
-                    where i.canonical_vulnerability_id = v.id and i.normalized_value = $1
-                   ))
-                order by case when v.primary_identifier = $1 then 0 else 1 end, {orderBy}
-                limit $3
+                order by {orderBy}
+                limit $2
+                """)
+                : db.CreateCommand($"""
+                with matched as (
+                  select 0 as match_rank, v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                         v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                  from vulnerabilities v
+                  where v.primary_identifier = $1
+                  union all
+                  select 1 as match_rank, v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                         v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                  from vulnerability_identifier_index i
+                  join vulnerabilities v on v.id = i.canonical_vulnerability_id
+                  where i.normalized_value = $1
+                    and v.primary_identifier <> $1
+                )
+                select id, primary_identifier, title, severity_label, max_cvss_score,
+                       affected_component_count, affected_component_names, published_at, modified_at
+                from matched
+                order by match_rank, modified_at desc nulls last, primary_identifier desc
+                limit $2
                 """);
             fastCmd.Parameters.AddWithValue(normalizedExact);
-            fastCmd.Parameters.AddWithValue(exactIsCompleteCve);
             fastCmd.Parameters.AddWithValue(fetchLimit);
             await using var fastReader = await fastCmd.ExecuteReaderAsync(ct);
             var found = 0;
@@ -569,20 +585,32 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
 app.MapGet("/api/v1/vulnerability.getByIdentifier", async (NpgsqlDataSource db, string identifier, CancellationToken ct) =>
 {
     var normalized = Identifier.Normalize(identifier);
-    await using var cmd = db.CreateCommand("""
+    var isCve = Identifier.TypeOf(normalized) == "CVE";
+    await using var cmd = isCve
+        ? db.CreateCommand("""
         select v.id, v.primary_identifier, v.title, v.description, v.severity_label, v.max_cvss_score
         from vulnerabilities v
         where v.primary_identifier = $1
-           or ($2 = false and exists (
-                select 1
-                from vulnerability_identifier_index i
-                where i.canonical_vulnerability_id = v.id and i.normalized_value = $1
-           ))
-        order by case when v.primary_identifier = $1 then 0 else 1 end
+        limit 1
+        """)
+        : db.CreateCommand("""
+        with matched as (
+          select 0 as match_rank, v.id, v.primary_identifier, v.title, v.description, v.severity_label, v.max_cvss_score, v.modified_at
+          from vulnerabilities v
+          where v.primary_identifier = $1
+          union all
+          select 1 as match_rank, v.id, v.primary_identifier, v.title, v.description, v.severity_label, v.max_cvss_score, v.modified_at
+          from vulnerability_identifier_index i
+          join vulnerabilities v on v.id = i.canonical_vulnerability_id
+          where i.normalized_value = $1
+            and v.primary_identifier <> $1
+        )
+        select id, primary_identifier, title, description, severity_label, max_cvss_score
+        from matched
+        order by match_rank, modified_at desc nulls last, primary_identifier desc
         limit 1
         """);
     cmd.Parameters.AddWithValue(normalized);
-    cmd.Parameters.AddWithValue(Identifier.TypeOf(normalized) == "CVE");
     await using var reader = await cmd.ExecuteReaderAsync(ct);
     if (!await reader.ReadAsync(ct)) return ApiResult.NotFound("VULNERABILITY_NOT_FOUND", identifier);
     return ApiResult.Ok(new
