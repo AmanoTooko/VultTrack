@@ -201,6 +201,8 @@ public sealed class NvdRawProcessor(
 
     private static async Task UpsertSeveritiesAsync(NpgsqlConnection conn, Guid vulnerabilityId, Guid recordId, NvdStagingRecord record, CancellationToken ct)
     {
+        await DeleteRecordRowsAsync(conn, "vulnerability_severity_scores", recordId, ct);
+
         var scores = ExtractCvss(record.Metrics).ToList();
         var max = scores.OrderByDescending(x => x.Score).FirstOrDefault();
         foreach (var score in scores)
@@ -251,7 +253,19 @@ public sealed class NvdRawProcessor(
 
     private static async Task UpsertReferencesAsync(NpgsqlConnection conn, Guid vulnerabilityId, Guid recordId, NvdStagingRecord record, CancellationToken ct)
     {
-        foreach (var reference in JsonNode.Parse(record.References)?.AsArray() ?? [])
+        await DeleteRecordRowsAsync(conn, "vulnerability_references", recordId, ct);
+
+        var references = (JsonNode.Parse(record.References)?.AsArray() ?? [])
+            .Select(reference => new
+            {
+                Url = reference?["url"]?.GetValue<string>(),
+                Tags = reference?["tags"]?.AsArray().Select(x => x?.GetValue<string>() ?? "").ToArray() ?? []
+            })
+            .Where(reference => !string.IsNullOrWhiteSpace(reference.Url))
+            .DistinctBy(reference => reference.Url, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var reference in references)
         {
             await using var cmd = new NpgsqlCommand("""
                 insert into vulnerability_references
@@ -261,14 +275,16 @@ public sealed class NvdRawProcessor(
             cmd.Parameters.AddWithValue(vulnerabilityId);
             cmd.Parameters.AddWithValue(recordId);
             cmd.Parameters.AddWithValue(record.SourceId);
-            cmd.Parameters.AddWithValue(reference?["url"]?.GetValue<string>() ?? "");
-            cmd.Parameters.AddWithValue(reference?["tags"]?.AsArray().Select(x => x?.GetValue<string>() ?? "").ToArray() ?? []);
+            cmd.Parameters.AddWithValue(reference.Url!);
+            cmd.Parameters.AddWithValue(reference.Tags);
             await cmd.ExecuteNonQueryAsync(ct);
         }
     }
 
     private static async Task<IReadOnlyList<AffectedFactDraft>> UpsertAffectedFactsAsync(NpgsqlConnection conn, Guid vulnerabilityId, Guid recordId, NvdStagingRecord record, CancellationToken ct)
     {
+        await DeleteRecordRowsAsync(conn, "vulnerability_affected_facts", recordId, ct);
+
         var facts = new List<AffectedFactDraft>();
         var extracted = new List<NvdCpeFact>();
         foreach (var cpeMatch in WalkCpeMatches(JsonNode.Parse(record.Configurations)))
@@ -319,6 +335,13 @@ public sealed class NvdRawProcessor(
         }
 
         return facts;
+    }
+
+    private static async Task DeleteRecordRowsAsync(NpgsqlConnection conn, string tableName, Guid recordId, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand($"delete from {tableName} where vulnerability_record_id = $1", conn);
+        cmd.Parameters.AddWithValue(recordId);
+        await cmd.ExecuteNonQueryAsync(ct);
     }
 
     private static string? ExtractCpeVersionRange(JsonNode? cpeMatch)

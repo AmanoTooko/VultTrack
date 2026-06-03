@@ -61,6 +61,7 @@ public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
                   evidence_count = vulnerability_affected_components.evidence_count + 1,
                   updated_at = now()
                 """, connection);
+            cmd.CommandTimeout = 300;
             foreach (var parameter in parameters) cmd.Parameters.AddWithValue(parameter);
             await cmd.ExecuteNonQueryAsync(ct);
         }
@@ -69,29 +70,33 @@ public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
     public async Task FlushProjectionsAsync(NpgsqlConnection connection, IReadOnlyList<Guid> vulnerabilityIds, CancellationToken ct)
     {
         if (vulnerabilityIds.Count == 0) return;
-        await using var cmd = new NpgsqlCommand("""
-            update vulnerabilities
-            set affected_component_count = coalesce(t.cnt, 0),
-                affected_ecosystems = coalesce(t.ecos, '{}'),
-                affected_component_names = coalesce(t.names, '{}'),
-                search_text = to_tsvector('simple',
-                    coalesce(primary_identifier,'') || ' ' ||
-                    coalesce(title,'') || ' ' ||
-                    coalesce(description,'') || ' ' ||
-                    coalesce(replace(array_to_string(coalesce(t.names, '{}'), ' '), '/', ' '), '')),
-                updated_at = now()
-            from (
-                select c.vulnerability_id,
-                       count(*)::int as cnt,
-                       array_agg(distinct c.ecosystem) filter (where c.ecosystem is not null) as ecos,
-                       array_agg(distinct c.display_name) as names
-                from vulnerability_affected_components c
-                where c.vulnerability_id = any($1)
-                group by c.vulnerability_id
-            ) t
-            where vulnerabilities.id = t.vulnerability_id
-            """, connection);
-        cmd.Parameters.AddWithValue(vulnerabilityIds.ToArray());
-        await cmd.ExecuteNonQueryAsync(ct);
+        foreach (var batch in vulnerabilityIds.Distinct().Chunk(500))
+        {
+            await using var cmd = new NpgsqlCommand("""
+                update vulnerabilities
+                set affected_component_count = coalesce(t.cnt, 0),
+                    affected_ecosystems = coalesce(t.ecos, '{}'),
+                    affected_component_names = coalesce(t.names, '{}'),
+                    search_text = to_tsvector('simple',
+                        coalesce(primary_identifier,'') || ' ' ||
+                        coalesce(title,'') || ' ' ||
+                        coalesce(description,'') || ' ' ||
+                        coalesce(replace(array_to_string(coalesce(t.names, '{}'), ' '), '/', ' '), '')),
+                    updated_at = now()
+                from (
+                    select c.vulnerability_id,
+                           count(*)::int as cnt,
+                           array_agg(distinct c.ecosystem) filter (where c.ecosystem is not null) as ecos,
+                           array_agg(distinct c.display_name) as names
+                    from vulnerability_affected_components c
+                    where c.vulnerability_id = any($1)
+                    group by c.vulnerability_id
+                ) t
+                where vulnerabilities.id = t.vulnerability_id
+                """, connection);
+            cmd.CommandTimeout = 300;
+            cmd.Parameters.AddWithValue(batch);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
     }
 }
