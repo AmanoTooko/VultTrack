@@ -11,15 +11,18 @@ public sealed class NvdRawProcessor(
     IEnumerable<IAffectedComponentHook> affectedHooks,
     ILogger<NvdRawProcessor> logger)
 {
-    public async Task<ProcessPendingResult> ProcessPendingAsync(int limit, CancellationToken ct)
+    public Task<ProcessPendingResult> ProcessPendingAsync(int limit, CancellationToken ct) =>
+        ProcessPendingAsync(limit, "nvd-cve", ct);
+
+    public async Task<ProcessPendingResult> ProcessPendingAsync(int limit, string sourceCode, CancellationToken ct)
     {
         var processed = 0;
         var failed = 0;
 
-        var records = await SelectPendingRecordsAsync(limit, priorityOnly: true, ct);
+        var records = await SelectPendingRecordsAsync(limit, sourceCode, priorityOnly: true, ct);
         if (records.Count == 0)
         {
-            records = await SelectPendingRecordsAsync(limit, priorityOnly: false, ct);
+            records = await SelectPendingRecordsAsync(limit, sourceCode, priorityOnly: false, ct);
         }
 
         var succeededRawIndexIds = new List<Guid>();
@@ -66,7 +69,7 @@ public sealed class NvdRawProcessor(
         return new ProcessPendingResult(processed, failed);
     }
 
-    private async Task<List<NvdStagingRecord>> SelectPendingRecordsAsync(int limit, bool priorityOnly, CancellationToken ct)
+    private async Task<List<NvdStagingRecord>> SelectPendingRecordsAsync(int limit, string sourceCode, bool priorityOnly, CancellationToken ct)
     {
         await using var select = db.CreateCommand(priorityOnly ? """
             select s.raw_index_id, s.cve_id, s.vuln_status, s.descriptions, s.metrics,
@@ -74,8 +77,10 @@ public sealed class NvdRawProcessor(
                    s.payload, r.source_id
             from stg_nvd_cves s
             join source_raw_index r on r.id = s.raw_index_id
+            join sources src on src.id = r.source_id
             where r.normalize_status in ('pending', 'failed')
               and r.status = 'priority'
+              and src.code = $2
             order by s.modified_at nulls last, s.cve_id
             limit $1
             """ : """
@@ -84,11 +89,14 @@ public sealed class NvdRawProcessor(
                    s.payload, r.source_id
             from stg_nvd_cves s
             join source_raw_index r on r.id = s.raw_index_id
+            join sources src on src.id = r.source_id
             where r.normalize_status in ('pending', 'failed')
+              and src.code = $2
             order by s.modified_at nulls last, s.cve_id
             limit $1
             """);
         select.Parameters.AddWithValue(limit);
+        select.Parameters.AddWithValue(sourceCode);
 
         var records = new List<NvdStagingRecord>();
         await using (var reader = await select.ExecuteReaderAsync(ct))
