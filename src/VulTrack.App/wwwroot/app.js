@@ -70,6 +70,8 @@ el.themeColorInput?.addEventListener('input', (event) => {
 el.refreshButton.addEventListener('click', () => {
   loadStatus();
   if (state.mode === 'status') loadStatusPage();
+  else if (state.mode === 'admin') loadAdminPage();
+  else if (state.mode === 'sbom') loadSbomList();
   else runSearch();
 });
 
@@ -159,6 +161,22 @@ function showDetailPane() {
 function hideDetailPane() {
   el.detailPane.hidden = true;
   el.detailPane.innerHTML = '';
+  setSbomDetailView(false);
+}
+
+function setDetailOnlyView(enabled) {
+  document.body.classList.toggle('detail-only-view', enabled);
+  if (enabled) {
+    el.searchForm.hidden = true;
+    if (el.pager) el.pager.hidden = true;
+    el.resultList.innerHTML = '';
+    if (el.resultsTitle) el.resultsTitle.textContent = 'Vulnerability Detail';
+    if (el.resultsMeta) el.resultsMeta.textContent = 'Dedicated CVE record';
+  }
+}
+
+function setSbomDetailView(enabled) {
+  document.body.classList.toggle('sbom-detail-view', enabled);
 }
 
 function applyThemeColor(color) {
@@ -272,7 +290,9 @@ async function loadStatus() {
 
 function activateMode(tab, options = {}) {
   if (!tab) return;
+  setDetailOnlyView(false);
   state.mode = tab.dataset.mode;
+  if (state.mode !== 'sbom') setSbomDetailView(false);
   document.body.dataset.mode = state.mode;
   state.page = 1;
   state.hasMore = false;
@@ -297,12 +317,31 @@ function activateMode(tab, options = {}) {
 
 function modeRoute(mode) {
   return {
-    vulnerability: '/',
-    component: '/component',
+    vulnerability: searchRoute('vulnerability'),
+    component: searchRoute('component'),
     sbom: '/sbom',
     status: '/status',
     admin: '/admin'
   }[mode] || '/';
+}
+
+function searchRoute(mode = state.mode) {
+  const params = new URLSearchParams();
+  params.set('type', mode === 'component' ? 'component' : 'vulnerability');
+  const query = el.queryInput?.value?.trim() || '';
+  if (query) params.set('q', query);
+  if (state.page > 1) params.set('page', String(state.page));
+  if (state.pageSize !== 25) params.set('pageSize', String(state.pageSize));
+  if (mode !== 'component' && state.sort && state.sort !== 'modifiedDesc') params.set('sort', state.sort);
+  if (mode === 'component') {
+    const vendor = el.vendorInput?.value?.trim() || '';
+    const version = el.versionInput?.value?.trim() || '';
+    const ecosystem = el.ecosystemInput?.value?.trim() || '';
+    if (vendor) params.set('vendor', vendor);
+    if (version) params.set('version', version);
+    if (ecosystem) params.set('ecosystem', ecosystem);
+  }
+  return `/search?${params.toString()}`;
 }
 
 function cveRoute(identifier) {
@@ -321,7 +360,22 @@ function updateRoute(path, options = {}) {
 
 function parseRoute() {
   const parts = window.location.pathname.split('/').filter(Boolean).map(part => decodeURIComponent(part));
+  const params = new URLSearchParams(window.location.search);
   if (parts[0] === 'cve' && parts[1]) return { mode: 'vulnerability', identifier: parts[1] };
+  if (parts[0] === 'search') {
+    const mode = params.get('type') === 'component' ? 'component' : 'vulnerability';
+    return {
+      mode,
+      search: true,
+      query: params.get('q') || '',
+      vendor: params.get('vendor') || '',
+      version: params.get('version') || '',
+      ecosystem: params.get('ecosystem') || '',
+      page: Number(params.get('page') || 1),
+      pageSize: Number(params.get('pageSize') || state.pageSize),
+      sort: params.get('sort') || state.sort
+    };
+  }
   if ((parts[0] === 'component' || parts[0] === 'components') && parts.length === 1) return { mode: 'component' };
   if (parts[0] === 'sbom') return { mode: 'sbom', sbomId: parts[1] || null };
   if (parts[0] === 'status' && parts.length === 1) return { mode: 'status' };
@@ -333,6 +387,7 @@ async function applyRoute() {
   const route = parseRoute();
   const tab = el.tabs.find(item => item.dataset.mode === route.mode);
   activateMode(tab, { updateRoute: false, load: false });
+  applySearchRouteState(route);
   if (route.identifier) {
     await loadVulnerabilityByIdentifier(route.identifier);
   } else if (route.mode === 'sbom') {
@@ -342,8 +397,21 @@ async function applyRoute() {
   } else if (route.mode === 'admin') {
     await loadAdminPage();
   } else {
-    await runSearch();
+    await runSearch({ updateRoute: !route.search });
   }
+}
+
+function applySearchRouteState(route) {
+  if (!route.search) return;
+  el.queryInput.value = route.query || '';
+  el.vendorInput.value = route.vendor || '';
+  el.versionInput.value = route.version || '';
+  el.ecosystemInput.value = route.ecosystem || '';
+  state.page = Number.isFinite(route.page) && route.page > 0 ? route.page : 1;
+  state.pageSize = Number.isFinite(route.pageSize) && route.pageSize > 0 ? route.pageSize : state.pageSize;
+  state.sort = route.sort || state.sort;
+  if (el.limitSelect) el.limitSelect.value = String(state.pageSize);
+  if (el.sortSelect) el.sortSelect.value = state.sort;
 }
 
 function syntaxHintHtml(mode) {
@@ -632,9 +700,10 @@ async function loadExactStatusPage() {
   }
 }
 
-async function runSearch() {
+async function runSearch(options = {}) {
   const query = el.queryInput.value.trim();
   state.hasMore = false;
+  if (options.updateRoute !== false) updateRoute(searchRoute(state.mode));
   hideDetailPane();
   updatePager();
   if (el.resultsMeta) el.resultsMeta.textContent = searchMetaText(query);
@@ -744,14 +813,11 @@ function bindVulnerabilityLinks(container) {
 }
 
 async function loadVulnerabilityByIdentifier(identifier) {
+  setDetailOnlyView(true);
   showDetailPane();
-  el.resultList.innerHTML = '<div class="muted result-item">Loading direct CVE route</div>';
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading</h2></div>';
   try {
     const item = await api(`/api/v1/vulnerability.getByIdentifier?identifier=${encodeURIComponent(identifier)}`);
-    el.queryInput.value = item.primaryIdentifier;
-    el.resultList.innerHTML = vulnerabilityResult(item);
-    bindVulnerabilityLinks(el.resultList);
     await loadVulnerabilityDetail(item.id, { identifier: item.primaryIdentifier, updateRoute: false });
     updateRoute(cveRoute(item.primaryIdentifier), { replace: true });
   } catch (error) {
@@ -761,6 +827,7 @@ async function loadVulnerabilityByIdentifier(identifier) {
 
 async function loadVulnerabilityDetail(id, options = {}) {
   state.selectedId = id;
+  if (options.detailOnly !== false) setDetailOnlyView(true);
   el.resultList.querySelectorAll('.result-item').forEach((item) => {
     item.classList.toggle('is-active', item.dataset.vulnerabilityId === id);
   });
@@ -1981,6 +2048,7 @@ window.addEventListener('popstate', applyRoute);
 // ===== SBOM Management =====
 
 async function loadSbomList(options = {}) {
+  setSbomDetailView(false);
   el.searchForm.hidden = true;
   if (el.resultsMeta) el.resultsMeta.textContent = modeDescription('sbom');
   hideDetailPane();
@@ -2058,6 +2126,7 @@ function setupSbomUpload() {
 }
 
 async function loadSbomDetail(sbomId, options = {}) {
+  setSbomDetailView(true);
   showDetailPane();
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading...</h2></div>';
   try {
@@ -2087,20 +2156,20 @@ function renderSbomDetail(data, sbomId) {
     .sort((a, b) => ((b.vulnCount || 0) - (a.vulnCount || 0)) || (a.name || '').localeCompare(b.name || ''));
 
   el.detailPane.innerHTML = `
-    <header class="detail-header">
+    <header class="detail-header sbom-detail-header">
       <div class="detail-title"><h2>${escapeHtml(s.name)}</h2></div>
       <div class="detail-meta-row">
         <span class="kv-inline">Components <b>${s.componentCount}</b></span>
         <span class="kv-inline">Affected findings <b>${s.matchedCount}</b></span>
         <span class="kv-inline">Format <b>${s.format}</b></span>
       </div>
-      <div style="display:flex;gap:8px;margin-top:8px">
-        <button class="tab" type="button" id="sbomMatchBtn" style="height:32px;padding:0 12px">Match PURL + CPE</button>
-        <button class="tab" type="button" id="sbomExportBtn" style="height:32px;padding:0 12px">Export Excel</button>
-        <button class="tab" type="button" id="sbomDeleteBtn" style="height:32px;padding:0 12px;color:var(--risk)">Delete</button>
+      <div class="sbom-actions">
+        <button class="tab" type="button" id="sbomMatchBtn">Match PURL + CPE</button>
+        <button class="tab" type="button" id="sbomExportBtn">Export Excel</button>
+        <button class="tab risk-text" type="button" id="sbomDeleteBtn">Delete</button>
       </div>
     </header>
-    <div class="detail-sections" style="margin-top:16px">
+    <div class="detail-sections sbom-detail-sections">
       <section class="detail-section">
         <h3 class="section-h">Components (${sorted.length})</h3>
         <div class="card-stack">
@@ -2108,23 +2177,25 @@ function renderSbomDetail(data, sbomId) {
             const hasVulns = (c.vulnCount || 0) > 0;
             const displayVulns = c.storeVulns || [];
             return `
-              <div class="info-card" style="border-left:3px solid ${hasVulns ? 'var(--risk)' : 'var(--line)'}">
-                <div class="info-card-row" ${hasVulns ? `style="cursor:pointer" data-expand="${escapeAttr(c.id)}"` : ''}>
-                  <strong>${escapeHtml(c.name || c.product || c.purl || c.cpe23Uri || 'component')}</strong>
-                  ${c.version ? `<span class="badge">${escapeHtml(c.version)}</span>` : ''}
-                  <span class="badge ${hasVulns ? 'risk' : ''}">${c.vulnCount || 0} affected</span>
-                  ${hasVulns ? '<span class="badge" style="font-size:10px">&#9660;</span>' : ''}
+              <div class="info-card sbom-component-card ${hasVulns ? 'has-findings' : ''}">
+                <div class="info-card-row sbom-component-head" ${hasVulns ? `data-expand="${escapeAttr(c.id)}"` : ''}>
+                  <strong class="sbom-component-name">${escapeHtml(c.name || c.product || c.purl || c.cpe23Uri || 'component')}</strong>
+                  <div class="sbom-component-badges">
+                    ${c.version ? `<span class="badge">${escapeHtml(c.version)}</span>` : ''}
+                    <span class="badge ${hasVulns ? 'risk' : ''}">${c.vulnCount || 0} affected</span>
+                    ${hasVulns ? '<span class="badge sbom-expand-indicator">&#9660;</span>' : ''}
+                  </div>
                 </div>
-                <div class="chips">
+                <div class="chips sbom-component-tags">
                   ${c.ecosystem ? `<span class="badge">${escapeHtml(c.ecosystem)}</span>` : ''}
                   ${c.vendor ? `<span class="badge">${escapeHtml(c.vendor)}</span>` : ''}
                   ${c.product ? `<span class="badge">${escapeHtml(c.product)}</span>` : ''}
-                  ${c.purl ? `<code style="font-size:11px;color:var(--muted)">${escapeHtml(c.purl)}</code>` : ''}
-                  ${c.cpe23Uri ? `<code style="font-size:11px;color:var(--muted)">${escapeHtml(c.cpe23Uri)}</code>` : ''}
+                  ${c.purl ? `<code class="sbom-token">${escapeHtml(c.purl)}</code>` : ''}
+                  ${c.cpe23Uri ? `<code class="sbom-token">${escapeHtml(c.cpe23Uri)}</code>` : ''}
                 </div>
                 ${hasVulns ? `
-                <div class="sbom-expand" id="expand-${c.id}" style="display:none;margin-top:10px">
-                  <table class="table" style="border:none;margin:0"><thead><tr>
+                <div class="sbom-expand" id="expand-${c.id}" hidden>
+                  <table class="table sbom-finding-table"><thead><tr>
                     <th>CVE</th><th>Severity</th><th>Version Range</th><th>Status</th>
                   </tr></thead><tbody>
                   ${displayVulns.map(v => {
@@ -2134,15 +2205,15 @@ function renderSbomDetail(data, sbomId) {
                     const status = isMatched ? 'AFFECTED' : isFalse ? 'FIXED' : (hasRange ? '?' : 'unknown');
                     const kl = isMatched ? 'risk' : isFalse ? 'none' : '';
                     const rangeDisplay = hasRange
-                      ? `<code style="font-size:11px">${escapeHtml(v.versionRange)}</code>`
-                      : `<span class="muted" style="font-size:11px" title="Alpine secfixes: no version data">no version data</span>`;
+                      ? `<code class="sbom-token">${escapeHtml(v.versionRange)}</code>`
+                      : `<span class="muted sbom-small-note" title="Alpine secfixes: no version data">no version data</span>`;
 	                    return `<tr class="finding-row">
 	                      <td><a class="finding-cve" href="${cveRoute(v.primaryIdentifier)}" data-vulnerability-id="${escapeAttr(v.vulnerabilityId)}" data-vulnerability-identifier="${escapeAttr(v.primaryIdentifier)}">${escapeHtml(v.primaryIdentifier)}</a></td>
                       <td>${severityBadge(v.severityLabel, v.cvssScore)}</td>
                       <td>${rangeDisplay}</td>
                       <td><span class="badge ${kl}">${status}</span></td></tr>`;
                   }).join('')}
-                  ${displayVulns.length < (c.vulnCount || 0) ? `<tr><td colspan="4" class="muted" style="text-align:center">+${(c.vulnCount || 0) - displayVulns.length} more CVEs (increase limit)</td></tr>` : ''}
+                  ${displayVulns.length < (c.vulnCount || 0) ? `<tr><td colspan="4" class="muted sbom-more-row">+${(c.vulnCount || 0) - displayVulns.length} more CVEs (increase limit)</td></tr>` : ''}
                   </tbody></table>
                 </div>` : ''}
               </div>`;
@@ -2177,7 +2248,7 @@ function renderSbomDetail(data, sbomId) {
   el.detailPane.querySelectorAll('[data-expand]').forEach(row => {
     row.addEventListener('click', () => {
       const target = document.getElementById('expand-' + row.dataset.expand);
-      if (target) target.style.display = target.style.display === 'none' ? 'block' : 'none';
+      if (target) target.hidden = !target.hidden;
     });
   });
 

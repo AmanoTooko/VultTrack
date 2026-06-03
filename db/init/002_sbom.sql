@@ -34,6 +34,9 @@ create table if not exists sbom_components (
 create index if not exists ix_sbom_components_sbom on sbom_components(sbom_id);
 create index if not exists ix_sbom_components_purl on sbom_components(purl) where purl is not null;
 create index if not exists ix_sbom_components_cpe on sbom_components(cpe23_uri) where cpe23_uri is not null;
+create index if not exists ix_affected_components_purl_exact
+  on vulnerability_affected_components(primary_purl, lower(ecosystem), vulnerability_id)
+  where primary_purl is not null;
 
 create table if not exists sbom_vulnerabilities (
   id uuid primary key default gen_random_uuid(),

@@ -746,6 +746,7 @@ create index if not exists ix_vuln_search_text on vulnerabilities using gin(sear
 create index if not exists ix_vuln_identifiers on vulnerabilities using gin(identifiers);
 create index if not exists ix_vuln_affected_names on vulnerabilities using gin(affected_component_names);
 create index if not exists ix_vuln_title_trgm on vulnerabilities using gin(title gin_trgm_ops);
+create index if not exists ix_vuln_primary_identifier_trgm on vulnerabilities using gin(primary_identifier gin_trgm_ops);
 create index if not exists ix_vuln_modified on vulnerabilities(modified_at desc nulls last);
 create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last);
 create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last);

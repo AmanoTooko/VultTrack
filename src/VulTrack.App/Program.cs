@@ -533,14 +533,31 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 """)
             : hasQuery
             ? db.CreateCommand($"""
+                with matched as materialized (
+                  select v.id
+                  from vulnerabilities v
+                  where v.identifiers @> array[$1]::text[]
+                  union
+                  select v.id
+                  from vulnerabilities v
+                  where v.search_text @@ plainto_tsquery('simple', $3)
+                  union
+                  select v.id
+                  from vulnerabilities v
+                  where v.primary_identifier ilike $2
+                  union
+                  select v.id
+                  from vulnerabilities v
+                  where v.title ilike $2
+                  union
+                  select v.id
+                  from vulnerabilities v
+                  where v.affected_component_names @> array[$1]::text[]
+                )
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
                        v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
                 from vulnerabilities v
-                where ($1 = any(identifiers))
-                   or (search_text @@ plainto_tsquery('simple', $3))
-                   or (v.primary_identifier ilike $2)
-                   or (v.title ilike $2)
-                   or ($1 = any(affected_component_names))
+                join matched m on m.id = v.id
                 order by {orderBy}
                 limit $4 offset $5
                 """)
@@ -656,7 +673,7 @@ app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, Can
 app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
 {
     await using var cmd = db.CreateCommand("""
-        select v.id, v.primary_identifier, coalesce(preferred_title.value, v.title), coalesce(nvd_description.value, v.description),
+        select v.id, v.primary_identifier, coalesce(preferred_title.value, v.title), coalesce(preferred_description.value, v.description),
                v.status, v.severity_label, v.max_cvss_score, v.max_cvss_version, v.max_cvss_vector,
                v.epss_score, v.epss_percentile, v.kev_date_added, v.known_ransomware,
                coalesce(actual_sources.source_count, 0), v.affected_component_count,
@@ -674,9 +691,13 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             and length(vr.title) <= 220
           order by case
                      when s.code in ('ghsa', 'maven-advisory', 'maven-osv', 'maven-osv-init', 'osv', 'osv-init') then 0
+                     when lower(vr.title) like 'security update for %' then 3
+                     when s.code in ('cisa-kev', 'debian-security-tracker') then 1
                      when s.code in ('nvd-cve', 'nvd-cve-init') then 2
-                     else 1
+                     when s.code in ('metasploit', 'exploitdb') then 4
+                     else 2
                    end,
+                   case when length(vr.title) between 12 and 120 then 0 else 1 end,
                    length(vr.title),
                    vr.updated_at desc
           limit 1
@@ -695,11 +716,22 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
           from vulnerability_descriptions d
           join sources s on s.id = d.source_id
           where d.vulnerability_id = v.id
-            and s.code in ('nvd-cve', 'nvd-cve-init')
-            and lower(d.lang) = 'en'
-          order by case when d.description_type = 'detail' then 0 else 1 end, d.is_selected desc
+            and nullif(trim(d.value), '') is not null
+          order by case when lower(d.lang) = 'en' then 0 else 1 end,
+                   case
+                     when trim(d.value) like '#%' or d.value like E'%\n#%' or d.value like '%](/%' or d.value like '%](http%' then 0
+                     else 1
+                   end,
+                   case when d.description_type = 'detail' then 0 else 1 end,
+                   case
+                     when s.code in ('ghsa', 'maven-advisory', 'maven-osv', 'maven-osv-init', 'osv', 'osv-init') then 0
+                     when s.code in ('nvd-cve', 'nvd-cve-init') then 1
+                     else 2
+                   end,
+                   length(d.value) desc,
+                   d.is_selected desc
           limit 1
-        ) nvd_description on true
+        ) preferred_description on true
         left join lateral (
           select count(distinct vr.source_id)::integer as source_count
           from vulnerability_records vr
@@ -797,8 +829,20 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             from vulnerability_descriptions d
             left join sources s on s.id = d.source_id
             where d.vulnerability_id = $1
-            order by case when s.code in ('nvd-cve', 'nvd-cve-init') then 0 else 1 end,
-                     is_selected desc, s.code nulls last
+            order by case when lower(lang) = 'en' then 0 else 1 end,
+                     case
+                       when trim(value) like '#%' or value like E'%\n#%' or value like '%](/%' or value like '%](http%' then 0
+                       else 1
+                     end,
+                     case when description_type = 'detail' then 0 else 1 end,
+                     case
+                       when s.code in ('ghsa', 'maven-advisory', 'maven-osv', 'maven-osv-init', 'osv', 'osv-init') then 0
+                       when s.code in ('nvd-cve', 'nvd-cve-init') then 1
+                       else 2
+                     end,
+                     length(value) desc,
+                     is_selected desc,
+                     s.code nulls last
             limit 16
             """, queryId, ct),
         severities = await QueryRowsAsync(db, """
@@ -1248,6 +1292,7 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last)",
         "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
         "create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier)",
+        "create index if not exists ix_vuln_primary_identifier_trgm on vulnerabilities using gin(primary_identifier gin_trgm_ops)",
         "create index if not exists ix_raw_normalize_latest on source_raw_index(source_id, external_key, source_modified_at desc nulls last, updated_at desc, created_at desc, id desc) where normalize_status in ('pending', 'failed')",
         "create index if not exists ix_raw_pending_status_by_source on source_raw_index(source_id, normalize_status) where normalize_status in ('pending', 'failed')",
         "create index if not exists ix_stg_cve_list_normalize_order on stg_cve_list_records(updated_at nulls last, cve_id, raw_index_id)",
@@ -1364,6 +1409,7 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         """,
         "create index if not exists ix_sbom_components_purl on sbom_components(purl) where purl is not null",
         "create index if not exists ix_sbom_components_cpe on sbom_components(cpe23_uri) where cpe23_uri is not null",
+        "create index if not exists ix_affected_components_purl_exact on vulnerability_affected_components(primary_purl, lower(ecosystem), vulnerability_id) where primary_purl is not null",
         "create index if not exists ix_affected_components_cpe_prefix on vulnerability_affected_components(primary_cpe23_uri text_pattern_ops, vulnerability_id) where primary_cpe23_uri is not null",
         """
         insert into sources (code, name, kind, homepage_url, plugin_name, schedule_cron)
@@ -1615,31 +1661,63 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
         var sourceStatus = new List<object>();
         var sourcePendingRows = new List<(string SourceCode, long Pending)>();
         var pendingBySource = new Dictionary<Guid, (long Pending, long Failed)>();
-        await using (var pendingCmd = db.CreateCommand("""
+        var rawBySource = new Dictionary<Guid, long>();
+        var tables = await EstimateTablesAsync(db, [
+            "vulnerabilities",
+            "vulnerability_records",
+            "vulnerability_exploits",
+            "vulnerability_affected_components",
+            "components",
+            "registry_packages",
+            "cpe_entries",
+            "source_raw_index"
+        ], ct);
+
+        await using (var rawSampleCmd = db.CreateCommand("""
             with sample_counts as (
-              select raw.source_id,
-                     count(*) filter (where raw.normalize_status = 'pending') as normalize_pending,
-                     count(*) filter (where raw.normalize_status = 'failed') as normalize_failed
-              from source_raw_index as raw tablesample system (0.05)
-              join sources src on src.id = raw.source_id
-              where raw.normalize_status in ('pending', 'failed')
-                and src.enabled
-                and coalesce(src.config_json->>'runMode', '') <> 'manual'
-              group by raw.source_id
+              select source_id, count(*)::bigint as sample_count
+              from source_raw_index tablesample system (0.5)
+              group by source_id
+            ),
+            sample_total as (
+              select coalesce(sum(sample_count), 0)::numeric as total_count
+              from sample_counts
             )
             select source_id,
-                   round(normalize_pending * 2000)::bigint as normalize_pending,
-                   round(normalize_failed * 2000)::bigint as normalize_failed
-            from sample_counts
+                   case when total_count > 0
+                        then round(sample_count::numeric / total_count * $1)::bigint
+                        else 0::bigint
+                   end as raw_total
+            from sample_counts, sample_total
+            """))
+        {
+            rawSampleCmd.Parameters.AddWithValue(tables["source_raw_index"]);
+            await using var rawSampleReader = await rawSampleCmd.ExecuteReaderAsync(ct);
+            while (await rawSampleReader.ReadAsync(ct))
+                rawBySource[rawSampleReader.GetGuid(0)] = rawSampleReader.GetInt64(1);
+        }
+
+        await using (var pendingCmd = db.CreateCommand("""
+            select raw.source_id,
+                   count(*) filter (where raw.normalize_status = 'pending') as normalize_pending,
+                   count(*) filter (where raw.normalize_status = 'failed') as normalize_failed
+            from source_raw_index raw
+            join sources src on src.id = raw.source_id
+            where raw.normalize_status in ('pending', 'failed')
+              and src.enabled
+              and coalesce(src.config_json->>'runMode', '') <> 'manual'
+            group by raw.source_id
             """))
         await using (var pendingReader = await pendingCmd.ExecuteReaderAsync(ct))
         {
             while (await pendingReader.ReadAsync(ct))
-                pendingBySource[pendingReader.GetGuid(0)] = (pendingReader.GetInt64(1), pendingReader.GetInt64(2));
+            {
+                var sourceId = pendingReader.GetGuid(0);
+                pendingBySource[sourceId] = (pendingReader.GetInt64(1), pendingReader.GetInt64(2));
+            }
         }
 
         long parsedTotal = 0;
-        long normalizedTotal = 0;
         long errorTotal = 0;
         long normalizePendingTotal = 0;
         long normalizeFailedTotal = 0;
@@ -1657,6 +1735,14 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
               from source_sync_runs
               where status = 'succeeded'
               group by source_id
+            ),
+            successful_counts as (
+              select source_id,
+                     coalesce(sum(fetched_count), 0)::bigint as fetched_total,
+                     coalesce(sum(parsed_count), 0)::bigint as parsed_total
+              from source_sync_runs
+              where status = 'succeeded'
+              group by source_id
             )
             select s.code, s.name, s.kind, s.enabled, s.plugin_name, s.schedule_cron,
                    s.config_json->>'runMode' as run_mode, s.id,
@@ -1664,10 +1750,13 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
                    coalesce(lr.fetched_count, 0), coalesce(lr.changed_count, 0),
                    coalesce(lr.parsed_count, 0), coalesce(lr.normalized_count, 0),
                    coalesce(lr.error_count, 0), lr.log_summary,
-                   sr.last_success_at
+                   sr.last_success_at,
+                   coalesce(sc.fetched_total, 0),
+                   coalesce(sc.parsed_total, 0)
             from sources s
             left join latest_runs lr on lr.source_id = s.id
             left join successful_runs sr on sr.source_id = s.id
+            left join successful_counts sc on sc.source_id = s.id
             order by s.enabled desc, s.kind, s.code
             """))
         await using (var reader = await cmd.ExecuteReaderAsync(ct))
@@ -1676,11 +1765,14 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
             {
                 var fetched = reader.GetInt32(12);
                 var parsed = reader.GetInt32(14);
-                var normalized = reader.GetInt32(15);
                 var errors = reader.GetInt32(16);
-                var pending = pendingBySource.GetValueOrDefault(reader.GetGuid(7));
+                var sourceId = reader.GetGuid(7);
+                var pending = pendingBySource.GetValueOrDefault(sourceId);
+                var rawTotal = rawBySource.GetValueOrDefault(sourceId);
+                if (rawTotal == 0)
+                    rawTotal = Math.Max(reader.GetInt64(19), reader.GetInt64(20));
+                var normalizedEstimate = Math.Max(0L, rawTotal - pending.Pending - pending.Failed);
                 parsedTotal += parsed;
-                normalizedTotal += normalized;
                 errorTotal += errors;
                 normalizePendingTotal += pending.Pending;
                 normalizeFailedTotal += pending.Failed;
@@ -1695,14 +1787,14 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
                     pluginName = reader.GetString(4),
                     scheduleCron = reader.IsDBNull(5) ? null : reader.GetString(5),
                     runMode = reader.IsDBNull(6) ? null : reader.GetString(6),
-                    rawTotal = fetched,
+                    rawTotal,
                     parsePending = 0L,
                     parseSucceeded = parsed,
                     parseFailed = errors,
                     normalizePending = pending.Pending,
-                    normalizeSucceeded = normalized,
+                    normalizeSucceeded = normalizedEstimate,
                     normalizeFailed = pending.Failed,
-                    normalizeProgress = fetched <= 0 ? 0 : Math.Round((double)normalized / fetched * 100, 2),
+                    normalizeProgress = rawTotal <= 0 ? 0 : Math.Round((double)normalizedEstimate / rawTotal * 100, 2),
                     rawUpdatedAt = reader.IsDBNull(11) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(11),
                     latestRun = reader.IsDBNull(8) ? null : new
                     {
@@ -1713,7 +1805,7 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
                         fetchedCount = fetched,
                         changedCount = reader.GetInt32(13),
                         parsedCount = parsed,
-                        normalizedCount = normalized,
+                        normalizedCount = normalizedEstimate,
                         errorCount = errors,
                         logSummary = reader.IsDBNull(17) ? null : reader.GetString(17)
                     },
@@ -1722,16 +1814,7 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
             }
         }
 
-        var tables = await EstimateTablesAsync(db, [
-            "vulnerabilities",
-            "vulnerability_records",
-            "vulnerability_exploits",
-            "vulnerability_affected_components",
-            "components",
-            "registry_packages",
-            "cpe_entries",
-            "source_raw_index"
-        ], ct);
+        var normalizedStatusEstimate = Math.Max(0L, tables["source_raw_index"] - normalizePendingTotal - normalizeFailedTotal);
 
         var status = new
         {
@@ -1753,9 +1836,9 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
             },
             normalizeStatus = new List<object>
             {
-                new { status = "pending", count = normalizePendingTotal, estimated = false },
-                new { status = "failed", count = normalizeFailedTotal, estimated = false },
-                new { status = "succeeded", count = normalizedTotal, estimated = true }
+                new { status = "pending", count = normalizePendingTotal, estimated = true },
+                new { status = "failed", count = normalizeFailedTotal, estimated = true },
+                new { status = "succeeded", count = normalizedStatusEstimate, estimated = true }
             },
             pendingBySource = sourcePendingRows
                 .OrderByDescending(x => x.Pending)
