@@ -3,43 +3,50 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>VulTrack</title>
-  <link rel="stylesheet" href="/styles.css?v=20260603-sbom-status2">
+  <title>VulTrack Vulnerability Intelligence</title>
+  <link rel="stylesheet" href="/styles.css?v=20260603-slim">
 </head>
 <body>
   <main class="shell">
-    <header class="topbar">
-      <div class="brand-block">
-        <h1>VulTrack</h1>
-        <p id="statusLine">Loading pipeline state</p>
-      </div>
-      <nav class="search-console" aria-label="Primary sections">
-        <div class="tabs" role="tablist" aria-label="Search mode">
-          <button class="tab is-active" type="button" data-mode="vulnerability">Vulnerabilities</button>
-          <button class="tab" type="button" data-mode="component">Components</button>
-          <button class="tab" type="button" data-mode="sbom">SBOM</button>
-          <button class="tab" type="button" data-mode="status">Status</button>
-          <button class="tab" type="button" data-mode="admin">Admin</button>
+    <header class="topbar site-header">
+      <div class="header-inner">
+        <a class="brand-block" href="/" aria-label="VulTrack home">
+          <span class="brand-mark" aria-hidden="true">VT</span>
+          <div class="brand-copy">
+            <h1>VulTrack</h1>
+          </div>
+        </a>
+
+        <nav class="search-console" aria-label="Primary navigation">
+          <div class="tabs" role="tablist" aria-label="Vulnerability intelligence sections">
+            <button class="tab nav-tab is-active" type="button" data-mode="vulnerability">Vulnerabilities</button>
+            <button class="tab nav-tab" type="button" data-mode="component">Components</button>
+            <button class="tab nav-tab" type="button" data-mode="sbom">SBOM</button>
+            <button class="tab nav-tab" type="button" data-mode="status">Status</button>
+            <button class="tab nav-tab" type="button" data-mode="admin">Admin</button>
+          </div>
+        </nav>
+
+        <div class="topbar-actions" aria-label="Header controls">
+          <div class="theme-controls" aria-label="Theme color">
+            <button class="theme-swatch is-active" type="button" data-theme-color="#1f5f8b" style="--swatch:#1f5f8b" title="CVE blue"></button>
+            <button class="theme-swatch" type="button" data-theme-color="#267a5b" style="--swatch:#267a5b" title="Intel green"></button>
+            <button class="theme-swatch" type="button" data-theme-color="#a43f3f" style="--swatch:#a43f3f" title="Risk red"></button>
+            <button class="theme-swatch" type="button" data-theme-color="#6750a4" style="--swatch:#6750a4" title="Analyst purple"></button>
+            <label class="color-picker" title="Custom accent color">
+              <input id="themeColorInput" type="color" value="#1f5f8b" aria-label="Custom accent color">
+            </label>
+          </div>
+          <button id="refreshButton" class="icon-button" type="button" title="Refresh data" aria-label="Refresh data">
+            <span aria-hidden="true">&#8635;</span>
+          </button>
+          <button id="authButton" class="tab auth-button" type="button">Login</button>
         </div>
-      </nav>
-      <div class="topbar-actions">
-        <div class="theme-controls" aria-label="Theme color">
-          <button class="theme-swatch is-active" type="button" data-theme-color="#2f7da7" style="--swatch:#2f7da7" title="Ocean"></button>
-          <button class="theme-swatch" type="button" data-theme-color="#2f9f86" style="--swatch:#2f9f86" title="Mint"></button>
-          <button class="theme-swatch" type="button" data-theme-color="#d86f73" style="--swatch:#d86f73" title="Coral"></button>
-          <button class="theme-swatch" type="button" data-theme-color="#8b6fd6" style="--swatch:#8b6fd6" title="Berry"></button>
-          <label class="color-picker" title="Custom accent color">
-            <input id="themeColorInput" type="color" value="#2f7da7" aria-label="Custom accent color">
-          </label>
-        </div>
-        <button id="refreshButton" class="icon-button" type="button" title="Refresh data" aria-label="Refresh data">
-          <span aria-hidden="true">&#8635;</span>
-        </button>
-        <button id="authButton" class="tab" type="button">Login</button>
       </div>
+
     </header>
 
-    <section class="workspace">
+    <section class="workspace site-body" aria-label="Vulnerability intelligence body">
       <section class="content-pane">
         <section class="results-panel" aria-label="Search results">
           <div class="results-header">
@@ -104,16 +111,21 @@
       </section>
     </section>
 
-    <footer class="status-footer" aria-label="System status">
-      <button id="statusButton" class="status-pill" type="button">
-        <span>Status</span>
-        <strong id="statusPending">- pending</strong>
-      </button>
-      <div class="footer-metric"><span>Vulnerabilities</span><strong id="metricVulns">-</strong></div>
-      <div class="footer-metric"><span>Source records</span><strong id="metricRecords">-</strong></div>
-      <div class="footer-metric"><span>Affected</span><strong id="metricAffected">-</strong></div>
-      <div class="footer-metric"><span>Components</span><strong id="metricComponents">-</strong></div>
-      <div class="footer-metric"><span>Sources</span><strong id="metricSources">-</strong></div>
+    <footer class="status-footer site-footer" aria-label="System status">
+      <div class="footer-divider" aria-hidden="true"></div>
+      <div class="footer-line">
+        <span class="footer-stat">Index: <strong id="metricRaw">-</strong> raw &middot; <strong id="metricVulns">-</strong> CVEs &middot; <strong id="metricComponents">-</strong> components</span>
+        <span class="footer-stat">Pending: <strong id="statusPending">-</strong></span>
+        <button id="statusButton" class="footer-stat footer-stat-link" type="button">Status &rarr;</button>
+      </div>
+      <div class="footer-line footer-copy">
+        <small>
+          <a href="https://www.cve.org/" target="_blank" rel="noreferrer">CVE</a> &middot;
+          <a href="https://nvd.nist.gov/" target="_blank" rel="noreferrer">NVD</a> &middot;
+          <a href="https://osv.dev/" target="_blank" rel="noreferrer">OSV</a> &middot;
+          &copy; VulTrack 2026
+        </small>
+      </div>
     </footer>
   </main>
 
@@ -139,6 +151,6 @@
     </form>
   </dialog>
 
-  <script src="/app.js?v=20260603-sbom-status2" defer></script>
+  <script src="/app.js?v=20260603-slim" defer></script>
 </body>
 </html>

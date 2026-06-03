@@ -1,7 +1,7 @@
 const state = {
   mode: 'vulnerability',
   selectedId: null,
-  themeColor: localStorage.getItem('vultrack.themeColor') || '#2f7da7',
+  themeColor: localStorage.getItem('vultrack.themeColor') || '#1f5f8b',
   page: 1,
   pageSize: Number(localStorage.getItem('vultrack.pageSize') || 25),
   sort: localStorage.getItem('vultrack.sort') || 'modifiedDesc',
@@ -18,12 +18,10 @@ const el = {
   refreshButton: document.querySelector('#refreshButton'),
   statusButton: document.querySelector('#statusButton'),
   statusPending: document.querySelector('#statusPending'),
+  metricRaw: document.querySelector('#metricRaw'),
   metricVulns: document.querySelector('#metricVulns'),
-  metricRecords: document.querySelector('#metricRecords'),
-  metricAffected: document.querySelector('#metricAffected'),
   metricComponents: document.querySelector('#metricComponents'),
-  metricSources: document.querySelector('#metricSources'),
-  tabs: [...document.querySelectorAll('.tab')],
+  tabs: [...document.querySelectorAll('button[data-mode]')],
   searchForm: document.querySelector('#searchForm'),
   queryInput: document.querySelector('#queryInput'),
   vendorInput: document.querySelector('#vendorInput'),
@@ -180,7 +178,7 @@ function setSbomDetailView(enabled) {
 }
 
 function applyThemeColor(color) {
-  const normalized = normalizeHexColor(color) || '#2f7da7';
+  const normalized = normalizeHexColor(color) || '#1f5f8b';
   state.themeColor = normalized;
   localStorage.setItem('vultrack.themeColor', normalized);
   document.documentElement.style.setProperty('--accent', normalized);
@@ -273,18 +271,16 @@ async function loadStatus() {
   try {
     const data = await api('/api/v1/system.status?fast=true');
     state.statusData = data;
+    if (el.metricRaw) el.metricRaw.textContent = fmt(data.sourceRawRecords);
     el.metricVulns.textContent = fmt(data.vulnerabilities);
-    el.metricRecords.textContent = fmt(data.vulnerabilityRecords);
-    el.metricAffected.textContent = fmt(data.affectedComponents);
     el.metricComponents.textContent = fmt(data.components);
-    if (el.metricSources) el.metricSources.textContent = fmt(data.sources);
     const pending = data.normalizeStatus.find((item) => item.status === 'pending')?.count ?? 0;
-    el.statusLine.textContent = `${fmt(pending)} raw records pending normalization`;
-    if (el.statusPending) el.statusPending.textContent = `${fmt(pending)} pending`;
+    if (el.statusLine) el.statusLine.textContent = `${fmt(pending)} raw records pending normalization`;
+    if (el.statusPending) el.statusPending.textContent = fmt(pending);
     if (state.mode === 'status') renderStatusPage(data);
   } catch (error) {
-    el.statusLine.textContent = error.message;
-    if (el.statusPending) el.statusPending.textContent = 'status error';
+    if (el.statusLine) el.statusLine.textContent = error.message;
+    if (el.statusPending) el.statusPending.textContent = '-';
   }
 }
 
