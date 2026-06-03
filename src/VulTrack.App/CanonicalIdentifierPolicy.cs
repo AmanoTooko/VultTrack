@@ -15,7 +15,12 @@ public static class CanonicalIdentifierPolicy
     {
         var identifiers = EvidenceIdentifiers(draft);
         var cves = identifiers.Where(IsCve).ToArray();
-        return cves.Length == 0 ? identifiers : [PreferredCve(draft, cves)];
+        if (cves.Length == 0) return identifiers;
+        var preferred = PreferredCve(draft, cves);
+        return identifiers
+            .Where(identifier => IsCve(identifier) || Identifier.ContainsEmbeddedCve(identifier, preferred))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private static string[] Normalize(IEnumerable<string> identifiers) =>

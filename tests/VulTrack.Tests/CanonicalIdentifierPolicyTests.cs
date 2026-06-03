@@ -14,6 +14,17 @@ public sealed class CanonicalIdentifierPolicyTests
     }
 
     [Fact]
+    public void ResolutionIdentifiers_KeepsDistroPrefixedCveForMerge()
+    {
+        var identifiers = Identifier.ExpandWithEmbeddedCves("UBUNTU-CVE-2026-42006");
+        var draft = Draft("UBUNTU-CVE-2026-42006", identifiers);
+
+        Assert.Equal(["UBUNTU-CVE-2026-42006", "CVE-2026-42006"], identifiers);
+        Assert.Equal(["UBUNTU-CVE-2026-42006", "CVE-2026-42006"], CanonicalIdentifierPolicy.ResolutionIdentifiers(draft));
+        Assert.Equal(["UBUNTU-CVE-2026-42006", "CVE-2026-42006"], CanonicalIdentifierPolicy.EvidenceIdentifiers(draft));
+    }
+
+    [Fact]
     public void EvidenceIdentifiers_DropsAmbiguousMultiCveAliases()
     {
         var draft = Draft("CVE-2026-31402", ["POC-REPOSITORY", "CVE-2021-41864", "CVE-2026-31402"]);

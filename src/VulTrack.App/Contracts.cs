@@ -64,6 +64,8 @@ public sealed record ComponentVulnerabilityMatch(
     string? Purl,
     string? VersionRange,
     string? RangeType,
+    string[] Identifiers,
+    string[] Aliases,
     bool? VersionMatched);
 
 public sealed record SbomUploadRequest(

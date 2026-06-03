@@ -818,8 +818,8 @@ async function loadVulnerabilityByIdentifier(identifier) {
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading</h2></div>';
   try {
     const item = await api(`/api/v1/vulnerability.getByIdentifier?identifier=${encodeURIComponent(identifier)}`);
-    await loadVulnerabilityDetail(item.id, { identifier: item.primaryIdentifier, updateRoute: false });
-    updateRoute(cveRoute(item.primaryIdentifier), { replace: true });
+    const data = await loadVulnerabilityDetail(item.id, { identifier: item.primaryIdentifier, updateRoute: false });
+    updateRoute(cveRoute(displayIdentifier(data?.vulnerability || item)), { replace: true });
   } catch (error) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Request failed</h2><p>${escapeHtml(error.message)}</p></div>`;
   }
@@ -837,9 +837,10 @@ async function loadVulnerabilityDetail(id, options = {}) {
     const data = await api(`/api/v1/vulnerability.detail?id=${encodeURIComponent(id)}`);
     renderDetail(data);
     if (options.updateRoute !== false) {
-      updateRoute(cveRoute(data.vulnerability.primaryIdentifier || options.identifier || id));
+      updateRoute(cveRoute(displayIdentifier(data.vulnerability) || options.identifier || id));
     }
     el.detailPane.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    return data;
   } catch (error) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Request failed</h2><p>${escapeHtml(error.message)}</p></div>`;
   }
@@ -1031,6 +1032,7 @@ function renderDetail(data) {
   const primaryDescription = descriptions[0] || { value: v.description || v.title || '', sources: [] };
   const descriptionIsLong = String(primaryDescription.value || '').length > 900;
   const title = selectDetailHeadline(v, data.descriptions || [], records);
+  const displayId = displayIdentifier(v);
 
   el.detailPane.innerHTML = `
     <article class="cve-page">
@@ -1041,12 +1043,16 @@ function renderDetail(data) {
             ${sourceTags.slice(0, 6).map(s => `<span class="badge tag-source">${escapeHtml(s)}</span>`).join('')}
           </div>
           <div class="detail-title">
-            <h2>${escapeHtml(v.primaryIdentifier)}</h2>
+            <h2>${escapeHtml(displayId)}</h2>
             ${severityBadge(v.severityLabel, v.maxCvssScore)}
             ${v.epssScore ? `<span class="badge warn">EPSS ${pct(v.epssScore)}</span>` : ''}
             ${v.kevDateAdded ? '<span class="badge risk">KEV</span>' : ''}
           </div>
           <h3 class="cve-headline">${escapeHtml(title)}</h3>
+          <div class="cve-page-actions" aria-label="Detail navigation">
+            <a class="tab" href="${searchRouteFor('vulnerability')}">Vulnerability Search</a>
+            <a class="tab" href="${searchRouteFor('vulnerability', displayId)}">Search ${escapeHtml(displayId)}</a>
+          </div>
           <section class="hero-description" aria-label="Description">
             <div class="hero-description-head">
               <span>Description</span>
@@ -1245,10 +1251,11 @@ function renderExploitItem(item) {
 }
 
 function renderMitreData(v, records, sourceUrls) {
+  const displayId = displayIdentifier(v);
   const cveListRecords = records.filter(r =>
     ['cve-list-v5', 'nvd-cve', 'nvd-cve-init'].includes(String(r.code || '').toLowerCase()) &&
-    String(r.recordId || '').toUpperCase() === String(v.primaryIdentifier || '').toUpperCase());
-  const aliases = [...new Set([...(v.identifiers || []), ...(v.aliases || [])].filter(Boolean))];
+    String(r.recordId || '').toUpperCase() === String(displayId || '').toUpperCase());
+  const aliases = [...new Set([...(v.identifiers || []), ...(v.aliases || [])].filter(Boolean).map(displayIdentifierValue))];
   return `
     <section class="detail-section" id="mitre-data">
       <div class="section-title-row">
@@ -1434,13 +1441,46 @@ function renderSourceChanges(history) {
         ${history.slice(0, 30).map(item => `
           <div>
             <span>${escapeHtml(item.code || 'source')} · ${escapeHtml(item.change_type || 'updated')}</span>
-            <strong>${dateTime(item.source_modified_at || item.ingested_at)}</strong>
-            <small>${escapeHtml(item.source_record_id || '')}${item.record_hash ? ` · ${escapeHtml(item.record_hash)}` : ''}</small>
+            <strong>source modified ${dateTime(item.source_modified_at || item.ingested_at)}</strong>
+            <small>local ingest ${dateTime(item.ingested_at)} · ${escapeHtml(displayIdentifierValue(item.source_record_id || ''))}${item.record_hash ? ` · ${escapeHtml(item.record_hash)}` : ''}</small>
           </div>
         `).join('')}
       </div>
     </section>
   `;
+}
+
+function searchRouteFor(mode, query) {
+  const params = new URLSearchParams();
+  params.set('type', mode === 'component' ? 'component' : 'vulnerability');
+  if (query) params.set('q', query);
+  return `/search?${params.toString()}`;
+}
+
+function displayIdentifier(item) {
+  const ids = [item?.primaryIdentifier, ...(item?.identifiers || []), ...(item?.aliases || [])]
+    .filter(Boolean)
+    .map(value => String(value).trim())
+    .filter(Boolean);
+  const embedded = ids.map(embeddedCve).find(Boolean);
+  return ids.find(isCveIdentifier)
+    || embedded
+    || item?.primaryIdentifier
+    || item?.vulnerabilityId
+    || '';
+}
+
+function isCveIdentifier(value) {
+  return /^CVE-\d{4}-\d{4,}$/i.test(String(value || ''));
+}
+
+function embeddedCve(value) {
+  return String(value || '').match(/\bCVE-\d{4}-\d{4,}\b/i)?.[0] || null;
+}
+
+function displayIdentifierValue(value) {
+  const text = String(value || '').trim();
+  return embeddedCve(text) || text;
 }
 
 function renderDataGap(message) {
@@ -1496,18 +1536,19 @@ function selectDetailHeadline(v, descriptions, records) {
   const candidates = [];
   for (const item of descriptions || []) {
     const value = String(item.value || '').trim();
-    if (!value || value.length > 140) continue;
+    const headline = headlineFromDescription(value);
+    if (!headline) continue;
     candidates.push({
-      value,
+      value: headline,
       code: item.code,
       lang: item.lang,
       kind: item.description_type,
-      score: headlineScore(item.code, item.lang, item.description_type, value)
+      score: headlineScore(item.code, item.lang, item.description_type, headline) + 10
     });
   }
   for (const record of records || []) {
     const value = String(record.title || '').trim();
-    if (!value || value.length > 140) continue;
+    if (!value || value.length > 140 || isLowQualityHeadline(value)) continue;
     candidates.push({
       value,
       code: record.code,
@@ -1517,10 +1558,32 @@ function selectDetailHeadline(v, descriptions, records) {
     });
   }
   candidates.sort((a, b) => b.score - a.score || a.value.length - b.value.length);
-  const selected = candidates.find(c => c.value && !/^security update for /i.test(c.value)) || candidates[0];
+  const selected = candidates.find(c => c.value && !isLowQualityHeadline(c.value)) || candidates[0];
   if (selected) return selected.value;
   const fallback = String(v.title || '').trim();
-  return fallback.length > 140 ? v.primaryIdentifier : (fallback || v.primaryIdentifier);
+  const displayId = displayIdentifier(v);
+  return headlineFromDescription(fallback) || displayId;
+}
+
+function headlineFromDescription(value) {
+  const text = String(value || '')
+    .replace(/\[[^\]]+\]\(([^)]+)\)/g, '$1')
+    .replace(/(^|\n)\s{0,3}#{1,6}\s+/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (!text || isLowQualityHeadline(text)) return null;
+  if (text.length <= 140) return text;
+  const sentence = text.match(/^.{24,180}?[.!?](?=\s|$)/)?.[0]?.trim();
+  if (sentence && !isLowQualityHeadline(sentence)) return sentence;
+  const clause = text.slice(0, 180).replace(/[,;:]\s+\S*$/, '').trim();
+  return clause.length >= 24 && !isLowQualityHeadline(clause) ? `${clause}...` : null;
+}
+
+function isLowQualityHeadline(value) {
+  const text = String(value || '').trim();
+  return /^security update for /i.test(text)
+    || /^log4shell http scanner$/i.test(text)
+    || /^CVE-\d{4}-\d{4,}\s+(debian security tracker|ubuntu|osv|nvd|cve list)/i.test(text);
 }
 
 function headlineScore(code, lang, kind, value) {
@@ -1532,7 +1595,7 @@ function headlineScore(code, lang, kind, value) {
           source.includes('osv') ? 15 : 0;
   const langScore = String(lang || '').toLowerCase().startsWith('en') ? 30 : 0;
   const kindScore = String(kind || '').includes('summary') ? 20 : 0;
-  const qualityPenalty = /^log4shell http scanner$/i.test(value) || /^security update for /i.test(value) ? 50 : 0;
+  const qualityPenalty = isLowQualityHeadline(value) ? 50 : 0;
   return sourceScore + langScore + kindScore - qualityPenalty;
 }
 
@@ -1692,7 +1755,7 @@ function renderRecordsBySource(records) {
       <div class="card-stack scroll-stack">
         ${items.map(r => `
           <div class="info-card">
-            <div class="info-card-row"><strong>${escapeHtml(r.recordId || '-')}</strong></div>
+            <div class="info-card-row"><strong>${escapeHtml(displayIdentifierValue(r.recordId || '-'))}</strong></div>
             <p style="font-size:12px;color:var(--muted);margin:4px 0">${escapeHtml(r.title || '')}</p>
             <small class="muted">source ${date(r.sourceModifiedAt)} · ingested ${date(r.ingestedAt)} · normalized ${date(r.normalizedAt)}</small>
           </div>
@@ -1729,10 +1792,11 @@ function renderReferenceCards(refs) {
 
 function vulnerabilityResult(item) {
   const names = (item.affectedComponentNames || []).slice(0, 3);
+  const displayId = displayIdentifier(item);
   return `
-    <a class="result-item" href="${cveRoute(item.primaryIdentifier)}" data-vulnerability-id="${escapeAttr(item.id)}" data-vulnerability-identifier="${escapeAttr(item.primaryIdentifier)}">
+    <a class="result-item" href="${cveRoute(displayId)}" data-vulnerability-id="${escapeAttr(item.id)}" data-vulnerability-identifier="${escapeAttr(displayId)}">
       <div class="result-main">
-        <span class="result-title">${escapeHtml(item.primaryIdentifier)}</span>
+        <span class="result-title">${escapeHtml(displayId)}</span>
         ${severityBadge(item.severityLabel, item.maxCvssScore)}
       </div>
       <div class="result-summary">${escapeHtml(item.title || '')}</div>
@@ -1749,10 +1813,11 @@ function vulnerabilityResult(item) {
 function componentVulnerabilityResult(item) {
   const match = item.versionMatched === true ? 'version match' : item.versionMatched === false ? 'range miss' : 'range unknown';
   const matchKlass = item.versionMatched === true ? 'low' : item.versionMatched === false ? 'none' : '';
+  const displayId = displayIdentifier(item);
   return `
-    <a class="result-item" href="${cveRoute(item.primaryIdentifier)}" data-vulnerability-id="${escapeAttr(item.vulnerabilityId)}" data-vulnerability-identifier="${escapeAttr(item.primaryIdentifier)}">
+    <a class="result-item" href="${cveRoute(displayId)}" data-vulnerability-id="${escapeAttr(item.vulnerabilityId)}" data-vulnerability-identifier="${escapeAttr(displayId)}">
       <div class="result-main">
-        <span class="result-title">${escapeHtml(item.primaryIdentifier)}</span>
+        <span class="result-title">${escapeHtml(displayId)}</span>
         ${severityBadge(item.severityLabel, item.cvssScore)}
       </div>
       <div class="muted">${escapeHtml(item.packageName || item.purl || '')}</div>
@@ -2204,11 +2269,12 @@ function renderSbomDetail(data, sbomId) {
                     const hasRange = v.versionRange && v.versionRange !== '';
                     const status = isMatched ? 'AFFECTED' : isFalse ? 'FIXED' : (hasRange ? '?' : 'unknown');
                     const kl = isMatched ? 'risk' : isFalse ? 'none' : '';
+                    const displayId = displayIdentifier(v);
                     const rangeDisplay = hasRange
                       ? `<code class="sbom-token">${escapeHtml(v.versionRange)}</code>`
                       : `<span class="muted sbom-small-note" title="Alpine secfixes: no version data">no version data</span>`;
-	                    return `<tr class="finding-row">
-	                      <td><a class="finding-cve" href="${cveRoute(v.primaryIdentifier)}" data-vulnerability-id="${escapeAttr(v.vulnerabilityId)}" data-vulnerability-identifier="${escapeAttr(v.primaryIdentifier)}">${escapeHtml(v.primaryIdentifier)}</a></td>
+		                    return `<tr class="finding-row">
+		                      <td><a class="finding-cve" href="${cveRoute(displayId)}" data-vulnerability-id="${escapeAttr(v.vulnerabilityId)}" data-vulnerability-identifier="${escapeAttr(displayId)}">${escapeHtml(displayId)}</a></td>
                       <td>${severityBadge(v.severityLabel, v.cvssScore)}</td>
                       <td>${rangeDisplay}</td>
                       <td><span class="badge ${kl}">${status}</span></td></tr>`;

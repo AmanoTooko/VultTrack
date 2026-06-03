@@ -937,6 +937,19 @@ a.result-item {
   overflow-wrap: anywhere;
 }
 
+.cve-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.cve-page-actions .tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 .hero-description {
   display: grid;
   gap: 7px;

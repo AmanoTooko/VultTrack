@@ -145,7 +145,7 @@ public static class SbomEndpoints
 
         var vulns = new List<object>();
         await using (var vc = db.CreateCommand(
-            "SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched,sv.match_basis,sv.matched_version FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT $2 OFFSET $3"))
+            "SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched,sv.match_basis,sv.matched_version,v.identifiers,v.aliases FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT $2 OFFSET $3"))
         {
             vc.Parameters.AddWithValue(id);
             vc.Parameters.AddWithValue(Math.Clamp(vulnerabilityLimit ?? 2000, 1, 10000));
@@ -165,7 +165,9 @@ public static class SbomEndpoints
                 versionRange = r.IsDBNull(9) ? null : r.GetString(9),
                 versionMatched = r.IsDBNull(10) ? (bool?)null : r.GetBoolean(10),
                 matchBasis = r.IsDBNull(11) ? null : r.GetString(11),
-                matchedVersion = r.IsDBNull(12) ? null : r.GetString(12)
+                matchedVersion = r.IsDBNull(12) ? null : r.GetString(12),
+                identifiers = r.GetFieldValue<string[]>(13),
+                aliases = r.GetFieldValue<string[]>(14)
             });
         }
 

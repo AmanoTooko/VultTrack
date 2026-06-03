@@ -431,13 +431,15 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     var sort = NormalizeVulnerabilitySort(request.Sort);
     var orderBy = VulnerabilityOrderBy(sort, "v");
 
-    var ecosystemVersion = ParseEcosystemVersion(rawQuery);
+    var queryHasCveIdentifier = Identifier.ExpandWithEmbeddedCves(rawQuery).Any(x => Identifier.TypeOf(x) == "CVE");
+    var ecosystemVersion = queryHasCveIdentifier ? null : ParseEcosystemVersion(rawQuery);
 
     if (ecosystemVersion is not null)
     {
         await using var cmd = db.CreateCommand($"""
             select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
-                   v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                   v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                   v.identifiers, v.aliases
             from vulnerabilities v
             where v.id in (
                 select c.vulnerability_id
@@ -465,6 +467,8 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 affectedComponentNames = TruncateNames(reader.GetFieldValue<string[]>(6)),
                 publishedAt = reader.IsDBNull(7) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(7),
                 modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8),
+                identifiers = reader.GetFieldValue<string[]>(9),
+                aliases = reader.GetFieldValue<string[]>(10),
                 matchedByEcosystem = true,
                 matchedVersion = ecosystemVersion.Value.Version
             });
@@ -478,29 +482,47 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
         {
             await using var fastCmd = exactIsCompleteCve
                 ? db.CreateCommand($"""
-                select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
-                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
-                from vulnerabilities v
-                where v.primary_identifier = $1
-                order by {orderBy}
-                limit $2
-                """)
-                : db.CreateCommand($"""
                 with matched as (
                   select 0 as match_rank, v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
-                         v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                         v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                         v.identifiers, v.aliases
                   from vulnerabilities v
                   where v.primary_identifier = $1
                   union all
                   select 1 as match_rank, v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
-                         v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                         v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                         v.identifiers, v.aliases
                   from vulnerability_identifier_index i
                   join vulnerabilities v on v.id = i.canonical_vulnerability_id
                   where i.normalized_value = $1
                     and v.primary_identifier <> $1
                 )
                 select id, primary_identifier, title, severity_label, max_cvss_score,
-                       affected_component_count, affected_component_names, published_at, modified_at
+                       affected_component_count, affected_component_names, published_at, modified_at,
+                       identifiers, aliases
+                from matched
+                order by match_rank, modified_at desc nulls last, primary_identifier desc
+                limit $2
+                """)
+                : db.CreateCommand($"""
+                with matched as (
+                  select 0 as match_rank, v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                         v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                         v.identifiers, v.aliases
+                  from vulnerabilities v
+                  where v.primary_identifier = $1
+                  union all
+                  select 1 as match_rank, v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                         v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                         v.identifiers, v.aliases
+                  from vulnerability_identifier_index i
+                  join vulnerabilities v on v.id = i.canonical_vulnerability_id
+                  where i.normalized_value = $1
+                    and v.primary_identifier <> $1
+                )
+                select id, primary_identifier, title, severity_label, max_cvss_score,
+                       affected_component_count, affected_component_names, published_at, modified_at,
+                       identifiers, aliases
                 from matched
                 order by match_rank, modified_at desc nulls last, primary_identifier desc
                 limit $2
@@ -525,7 +547,8 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
         await using var cmd = cveRange is not null
             ? db.CreateCommand($"""
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
-                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                       v.identifiers, v.aliases
                 from vulnerabilities v
                 where v.primary_identifier >= $1 and v.primary_identifier < $2
                 order by {orderBy}
@@ -537,6 +560,10 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                   select v.id
                   from vulnerabilities v
                   where v.identifiers @> array[$1]::text[]
+                  union
+                  select v.id
+                  from vulnerabilities v
+                  where v.aliases @> array[$1]::text[]
                   union
                   select v.id
                   from vulnerabilities v
@@ -555,7 +582,8 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                   where v.affected_component_names @> array[$1]::text[]
                 )
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
-                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                       v.identifiers, v.aliases
                 from vulnerabilities v
                 join matched m on m.id = v.id
                 order by {orderBy}
@@ -563,7 +591,8 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                 """)
             : db.CreateCommand($"""
                 select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
-                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at
+                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                       v.identifiers, v.aliases
                 from vulnerabilities v
                 order by {orderBy}
                 limit $1 offset $2
@@ -603,27 +632,21 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
 app.MapGet("/api/v1/vulnerability.getByIdentifier", async (NpgsqlDataSource db, string identifier, CancellationToken ct) =>
 {
     var normalized = Identifier.Normalize(identifier);
-    var isCve = Identifier.TypeOf(normalized) == "CVE";
-    await using var cmd = isCve
-        ? db.CreateCommand("""
-        select v.id, v.primary_identifier, v.title, v.description, v.severity_label, v.max_cvss_score
-        from vulnerabilities v
-        where v.primary_identifier = $1
-        limit 1
-        """)
-        : db.CreateCommand("""
+    await using var cmd = db.CreateCommand("""
         with matched as (
-          select 0 as match_rank, v.id, v.primary_identifier, v.title, v.description, v.severity_label, v.max_cvss_score, v.modified_at
+          select 0 as match_rank, v.id, v.primary_identifier, v.title, v.description, v.severity_label,
+                 v.max_cvss_score, v.modified_at, v.identifiers, v.aliases
           from vulnerabilities v
           where v.primary_identifier = $1
           union all
-          select 1 as match_rank, v.id, v.primary_identifier, v.title, v.description, v.severity_label, v.max_cvss_score, v.modified_at
+          select 1 as match_rank, v.id, v.primary_identifier, v.title, v.description, v.severity_label,
+                 v.max_cvss_score, v.modified_at, v.identifiers, v.aliases
           from vulnerability_identifier_index i
           join vulnerabilities v on v.id = i.canonical_vulnerability_id
           where i.normalized_value = $1
             and v.primary_identifier <> $1
         )
-        select id, primary_identifier, title, description, severity_label, max_cvss_score
+        select id, primary_identifier, title, description, severity_label, max_cvss_score, identifiers, aliases
         from matched
         order by match_rank, modified_at desc nulls last, primary_identifier desc
         limit 1
@@ -638,7 +661,9 @@ app.MapGet("/api/v1/vulnerability.getByIdentifier", async (NpgsqlDataSource db, 
         title = reader.IsDBNull(2) ? null : reader.GetString(2),
         description = reader.IsDBNull(3) ? null : reader.GetString(3),
         severityLabel = reader.IsDBNull(4) ? null : reader.GetString(4),
-        maxCvssScore = reader.IsDBNull(5) ? (decimal?)null : reader.GetDecimal(5)
+        maxCvssScore = reader.IsDBNull(5) ? (decimal?)null : reader.GetDecimal(5),
+        identifiers = reader.GetFieldValue<string[]>(6),
+        aliases = reader.GetFieldValue<string[]>(7)
     });
 });
 
@@ -1293,6 +1318,7 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
         "create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier)",
         "create index if not exists ix_vuln_primary_identifier_trgm on vulnerabilities using gin(primary_identifier gin_trgm_ops)",
+        "create index if not exists ix_vuln_aliases on vulnerabilities using gin(aliases)",
         "create index if not exists ix_raw_normalize_latest on source_raw_index(source_id, external_key, source_modified_at desc nulls last, updated_at desc, created_at desc, id desc) where normalize_status in ('pending', 'failed')",
         "create index if not exists ix_raw_pending_status_by_source on source_raw_index(source_id, normalize_status) where normalize_status in ('pending', 'failed')",
         "create index if not exists ix_stg_cve_list_normalize_order on stg_cve_list_records(updated_at nulls last, cve_id, raw_index_id)",
@@ -1933,7 +1959,9 @@ static object MakeResult(NpgsqlDataReader reader) => new
     affectedComponentCount = reader.GetInt32(5),
     affectedComponentNames = TruncateNames(reader.GetFieldValue<string[]>(6)),
     publishedAt = reader.IsDBNull(7) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(7),
-    modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8)
+    modifiedAt = reader.IsDBNull(8) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(8),
+    identifiers = reader.GetFieldValue<string[]>(9),
+    aliases = reader.GetFieldValue<string[]>(10)
 };
 
 static string[] TruncateNames(string[] names) =>

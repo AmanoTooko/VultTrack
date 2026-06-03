@@ -6,6 +6,28 @@ public static partial class Identifier
 {
     public static string Normalize(string value) => value.Trim().ToUpperInvariant();
 
+    public static string[] ExpandWithEmbeddedCves(string value)
+    {
+        var normalized = Normalize(value);
+        var values = new List<string> { normalized };
+        foreach (var match in CveRegex().Matches(normalized).Cast<Match>())
+        {
+            var cve = match.Value;
+            if (!values.Contains(cve, StringComparer.OrdinalIgnoreCase))
+                values.Add(cve);
+        }
+        return values.ToArray();
+    }
+
+    public static bool ContainsEmbeddedCve(string identifier, string cve)
+    {
+        var normalized = Normalize(identifier);
+        var normalizedCve = Normalize(cve);
+        return !string.Equals(normalized, normalizedCve, StringComparison.OrdinalIgnoreCase)
+               && CveRegex().Matches(normalized).Cast<Match>()
+                   .Any(match => string.Equals(match.Value, normalizedCve, StringComparison.OrdinalIgnoreCase));
+    }
+
     public static string TypeOf(string value)
     {
         var normalized = Normalize(value);
@@ -29,4 +51,7 @@ public static partial class Identifier
 
     [GeneratedRegex("^CWE-[0-9]+$")]
     private static partial Regex CweRegex();
+
+    [GeneratedRegex(@"\bCVE-\d{4}-\d{4,}\b", RegexOptions.IgnoreCase)]
+    private static partial Regex CveRegex();
 }
