@@ -57,13 +57,32 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
             }
 
             await using var select = new NpgsqlCommand($"""
+                with pending_raw as materialized (
+                    select id, source_id
+                    from (
+                        select r.id, r.source_id, r.updated_at
+                        from source_raw_index r
+                        where r.normalize_status = 'pending'
+                          and r.source_id = (select id from sources where code = $1)
+                        order by r.updated_at, r.id
+                        limit $2
+                    ) pending
+                    union all
+                    select id, source_id
+                    from (
+                        select r.id, r.source_id, r.updated_at
+                        from source_raw_index r
+                        where r.normalize_status = 'failed'
+                          and r.source_id = (select id from sources where code = $1)
+                        order by r.updated_at, r.id
+                        limit $2
+                    ) failed
+                    limit $2
+                )
                 select s.raw_index_id, s.osv_id, s.aliases, s.payload, r.source_id
-                from {table} s
-                join source_raw_index r on r.id = s.raw_index_id
-                join sources src on src.id = r.source_id
-                where r.normalize_status in ('pending', 'failed') and src.code = $1
-                order by r.updated_at
-                limit $2
+                from pending_raw r
+                join {table} s on s.raw_index_id = r.id
+                order by s.raw_index_id
                 """, connection);
             select.Parameters.AddWithValue(tableSourceCode);
             select.Parameters.AddWithValue(Math.Max(1, limit - processed));
