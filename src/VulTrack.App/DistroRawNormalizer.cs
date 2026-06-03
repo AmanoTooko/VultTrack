@@ -117,10 +117,9 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
         {
             try
             {
-                var title = $"{row.CveId} Debian security tracker";
                 var identifiers = ExtractAllIdentifiers(row.CveId);
-                var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", null, null, identifiers, ct);
-                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, title, title, "active", ct);
+                var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, row.CveId, null, null, "active", null, null, identifiers, ct);
+                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, null, null, "active", ct);
                 var facts = ExtractDebianFacts(row).ToList();
                 await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
                 if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);

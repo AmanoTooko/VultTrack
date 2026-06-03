@@ -714,9 +714,10 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
           where vr.vulnerability_id = v.id
             and nullif(trim(vr.title), '') is not null
             and length(vr.title) <= 220
+            and lower(vr.title) !~ '^cve-[0-9]{4}-[0-9]{4,}[[:space:]]+(debian security tracker|ubuntu|osv|nvd|cve list)$'
+            and lower(vr.title) !~ '^security update for '
           order by case
                      when s.code in ('ghsa', 'maven-advisory', 'maven-osv', 'maven-osv-init', 'osv', 'osv-init') then 0
-                     when lower(vr.title) like 'security update for %' then 3
                      when s.code in ('cisa-kev', 'debian-security-tracker') then 1
                      when s.code in ('nvd-cve', 'nvd-cve-init') then 2
                      when s.code in ('metasploit', 'exploitdb') then 4
