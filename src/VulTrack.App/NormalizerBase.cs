@@ -342,7 +342,12 @@ public abstract class NormalizerBase(
     }
 
     protected static string[] IdentifiersFrom(params IEnumerable<string?>[] groups) =>
-        groups.SelectMany(x => x).Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x!).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        groups
+            .SelectMany(x => x)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .SelectMany(x => Identifier.ExpandWithEmbeddedCves(x!))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
     protected static DateTimeOffset? DateValue(JsonNode? node, string name)
     {

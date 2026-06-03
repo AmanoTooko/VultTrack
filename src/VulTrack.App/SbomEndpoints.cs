@@ -145,7 +145,7 @@ public static class SbomEndpoints
 
         var vulns = new List<object>();
         await using (var vc = db.CreateCommand(
-            "SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched,sv.match_basis,sv.matched_version FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT $2 OFFSET $3"))
+            "SELECT sv.id,sv.sbom_component_id,sv.vulnerability_id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,sv.display_name,sv.ecosystem,sv.normalized_range,sv.version_matched,sv.match_basis,sv.matched_version,v.identifiers,v.aliases FROM sbom_vulnerabilities sv JOIN vulnerabilities v ON v.id=sv.vulnerability_id JOIN sbom_components c ON c.id=sv.sbom_component_id WHERE c.sbom_id=$1 ORDER BY coalesce(v.max_cvss_score,0) DESC LIMIT $2 OFFSET $3"))
         {
             vc.Parameters.AddWithValue(id);
             vc.Parameters.AddWithValue(Math.Clamp(vulnerabilityLimit ?? 2000, 1, 10000));
@@ -165,7 +165,9 @@ public static class SbomEndpoints
                 versionRange = r.IsDBNull(9) ? null : r.GetString(9),
                 versionMatched = r.IsDBNull(10) ? (bool?)null : r.GetBoolean(10),
                 matchBasis = r.IsDBNull(11) ? null : r.GetString(11),
-                matchedVersion = r.IsDBNull(12) ? null : r.GetString(12)
+                matchedVersion = r.IsDBNull(12) ? null : r.GetString(12),
+                identifiers = r.GetFieldValue<string[]>(13),
+                aliases = r.GetFieldValue<string[]>(14)
             });
         }
 
@@ -206,103 +208,243 @@ public static class SbomEndpoints
             await reset.ExecuteNonQueryAsync(ct);
         }
 
-        foreach (var (cid, purl, name, ver, eco, vendor, product, cpe23Uri, sourcePackageName, sourcePackageVersion) in comps)
+        await using (var temp = new NpgsqlCommand("""
+            create temp table temp_sbom_match_components (
+              component_id uuid primary key,
+              purl text,
+              purl_decoded text,
+              purl_without_version text,
+              name text,
+              version text,
+              ecosystem text,
+              mapped_ecosystem text,
+              cpe23_uri text,
+              cpe_prefix text,
+              cpe_product text,
+              source_package_name text,
+              source_package_version text
+            ) on commit drop
+            """, conn))
         {
-            var purlDec = string.IsNullOrWhiteSpace(purl) ? null : Uri.UnescapeDataString(purl);
-            var pwv = purlDec is null ? null : StripVersion(purlDec) ?? purlDec;
-            var meco = MapEcosystem(eco);
-            var cpePrefix = CpeProductPrefix(cpe23Uri);
-            var cpeProduct = ParseCpe(cpe23Uri)?.Product ?? product;
+            await temp.ExecuteNonQueryAsync(ct);
+        }
 
-            await using var sq = new NpgsqlCommand(@"
-                with candidates as (
-                  select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 1 as match_priority, 'cpe-exact' as match_basis
-                  from vulnerability_affected_components c
-                  where $5::text is not null and c.primary_cpe23_uri = $5
-                  union all
-                  select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 2 as match_priority, 'purl' as match_basis
-                  from vulnerability_affected_components c
-                  where $1::text is not null and (c.primary_purl = $1 or c.primary_purl = $2)
-                    and ($4::text is null or lower(coalesce(c.ecosystem,'')) = lower($4) or (position(':' in $4) = 0 and lower(coalesce(c.ecosystem,'')) like lower($4) || ':%'))
-                  union all
-                  select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 3 as match_priority, 'source-package' as match_basis
-                  from vulnerability_affected_components c
-                  where $8::text is not null and lower(c.package_name)=lower($8) and ($4::text is null or lower(coalesce(c.ecosystem,'')) = lower($4) or (position(':' in $4) = 0 and lower(coalesce(c.ecosystem,'')) like lower($4) || ':%'))
-                  union all
-                  select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 4 as match_priority, 'name' as match_basis
-                  from vulnerability_affected_components c
-                  where $3::text is not null and lower(c.display_name)=lower($3) and ($4::text is null or lower(coalesce(c.ecosystem,'')) = lower($4) or (position(':' in $4) = 0 and lower(coalesce(c.ecosystem,'')) like lower($4) || ':%'))
-                  union all
-                  select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 5 as match_priority, 'package' as match_basis
-                  from vulnerability_affected_components c
-                  where $3::text is not null and lower(c.package_name)=lower($3) and ($4::text is null or lower(coalesce(c.ecosystem,'')) = lower($4) or (position(':' in $4) = 0 and lower(coalesce(c.ecosystem,'')) like lower($4) || ':%'))
-                  union all
-                  select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 6 as match_priority, 'cpe-product' as match_basis
-                  from vulnerability_affected_components c
-                  where $6::text is not null and c.primary_cpe23_uri like $6 || '%'
-                  union all
-                  select c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, 7 as match_priority, 'cpe-product' as match_basis
-                  from vulnerability_affected_components c
-                  where $7::text is not null and lower(c.package_name)=lower($7) and lower(coalesce(c.ecosystem,''))='cpe'
-                )
-                SELECT DISTINCT ON (v.id) v.id,v.primary_identifier,v.title,v.severity_label,v.max_cvss_score,
-                       c.display_name,c.ecosystem,c.normalized_range,c.primary_cpe23_uri,c.match_basis
-                FROM candidates c
-                JOIN vulnerabilities v ON v.id=c.vulnerability_id
-                ORDER BY v.id, c.match_priority,
-                  CASE WHEN c.normalized_range IS NOT NULL AND c.normalized_range <> '' AND c.normalized_range ~ '^[<>]=?' THEN 0 ELSE 1 END,
-                  coalesce(v.max_cvss_score,0) DESC
-                ", conn);
-            sq.Parameters.AddWithValue((object?)pwv ?? DBNull.Value);
-            sq.Parameters.AddWithValue((object?)purlDec ?? DBNull.Value);
-            sq.Parameters.AddWithValue((object?)name ?? DBNull.Value);
-            sq.Parameters.AddWithValue((object?)meco ?? DBNull.Value);
-            sq.Parameters.AddWithValue((object?)cpe23Uri ?? DBNull.Value);
-            sq.Parameters.AddWithValue((object?)cpePrefix ?? DBNull.Value);
-            sq.Parameters.AddWithValue((object?)cpeProduct ?? DBNull.Value);
-            sq.Parameters.AddWithValue((object?)sourcePackageName ?? DBNull.Value);
-
-            var matches = new List<(Guid VulnId, string? PrimaryId, string? Title, string? SeveLabel, decimal? Cvss,
-                string? DisplayName, string? Eco, string? Range, string? MatchedCpe, string? Basis)>();
-            await using (var sr = await sq.ExecuteReaderAsync(ct))
-                while (await sr.ReadAsync(ct))
-                    matches.Add((sr.GetGuid(0), sr.IsDBNull(1) ? null : sr.GetString(1),
-                        sr.IsDBNull(2) ? null : sr.GetString(2), sr.IsDBNull(3) ? null : sr.GetString(3),
-                        sr.IsDBNull(4) ? (decimal?)null : sr.GetDecimal(4), sr.IsDBNull(5) ? null : sr.GetString(5),
-                        sr.IsDBNull(6) ? null : sr.GetString(6), sr.IsDBNull(7) ? null : sr.GetString(7),
-                        sr.IsDBNull(8) ? null : sr.GetString(8), sr.IsDBNull(9) ? null : sr.GetString(9)));
-
-            foreach (var (vid, _, _, _, _, dname, ecosys, range, matchedCpe, basis) in matches)
+        foreach (var chunk in comps.Chunk(400))
+        {
+            var p = 1;
+            var values = new List<string>();
+            var parameters = new List<object>();
+            foreach (var (cid, purl, name, ver, eco, _, _, cpe23Uri, sourcePackageName, sourcePackageVersion) in chunk)
             {
-                var matchedVersion = string.Equals(basis, "source-package", StringComparison.OrdinalIgnoreCase)
-                    ? sourcePackageVersion ?? ver
-                    : ver;
-                var vm = ResolveSbomVersionMatch(matchedVersion, range, ecosys ?? meco, cpe23Uri, matchedCpe, basis);
-
-                if (vm != true) continue;
-
-                await using var ins = new NpgsqlCommand(@"
-                    INSERT INTO sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched,match_basis,matched_version)
-                    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
-                    ON CONFLICT(sbom_component_id,vulnerability_id)
-                    DO UPDATE SET version_matched = coalesce(excluded.version_matched, sbom_vulnerabilities.version_matched),
-                                  normalized_range = coalesce(excluded.normalized_range, sbom_vulnerabilities.normalized_range),
-                                  display_name = coalesce(excluded.display_name, sbom_vulnerabilities.display_name),
-                                  ecosystem = coalesce(excluded.ecosystem, sbom_vulnerabilities.ecosystem),
-                                  match_basis = coalesce(excluded.match_basis, sbom_vulnerabilities.match_basis),
-                                  matched_version = coalesce(excluded.matched_version, sbom_vulnerabilities.matched_version)", conn);
-                ins.Parameters.AddWithValue(cid); ins.Parameters.AddWithValue(vid); ins.Parameters.AddWithValue((object?)purl ?? DBNull.Value);
-                ins.Parameters.AddWithValue((object?)dname ?? DBNull.Value); ins.Parameters.AddWithValue((object?)ecosys ?? DBNull.Value);
-                ins.Parameters.AddWithValue((object?)range ?? DBNull.Value); ins.Parameters.AddWithValue((object?)vm ?? DBNull.Value);
-                ins.Parameters.AddWithValue((object?)basis ?? DBNull.Value); ins.Parameters.AddWithValue((object?)matchedVersion ?? DBNull.Value);
-                await ins.ExecuteNonQueryAsync(ct);
-                m++;
+                var purlDec = string.IsNullOrWhiteSpace(purl) ? null : Uri.UnescapeDataString(purl);
+                var pwv = purlDec is null ? null : StripVersion(purlDec) ?? purlDec;
+                var meco = MapEcosystem(eco);
+                var cpePrefix = CpeProductPrefix(cpe23Uri);
+                var cpeProduct = ParseCpe(cpe23Uri)?.Product;
+                values.Add($"(${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++})");
+                parameters.Add(cid);
+                parameters.Add((object?)purl ?? DBNull.Value);
+                parameters.Add((object?)purlDec ?? DBNull.Value);
+                parameters.Add((object?)pwv ?? DBNull.Value);
+                parameters.Add((object?)name ?? DBNull.Value);
+                parameters.Add((object?)ver ?? DBNull.Value);
+                parameters.Add((object?)eco ?? DBNull.Value);
+                parameters.Add((object?)meco ?? DBNull.Value);
+                parameters.Add((object?)cpe23Uri ?? DBNull.Value);
+                parameters.Add((object?)cpePrefix ?? DBNull.Value);
+                parameters.Add((object?)cpeProduct ?? DBNull.Value);
+                parameters.Add((object?)sourcePackageName ?? DBNull.Value);
+                parameters.Add((object?)sourcePackageVersion ?? DBNull.Value);
             }
+            await using var insertTemp = new NpgsqlCommand($"""
+                insert into temp_sbom_match_components (
+                  component_id, purl, purl_decoded, purl_without_version, name, version,
+                  ecosystem, mapped_ecosystem, cpe23_uri, cpe_prefix, cpe_product,
+                  source_package_name, source_package_version
+                ) values {string.Join(",", values)}
+                """, conn);
+            foreach (var parameter in parameters) insertTemp.Parameters.AddWithValue(parameter);
+            await insertTemp.ExecuteNonQueryAsync(ct);
+        }
 
-            await using var uc = new NpgsqlCommand(
-                "UPDATE sbom_components SET vuln_count=(SELECT count(*) FROM sbom_vulnerabilities WHERE sbom_component_id=$1) WHERE id=$1", conn);
-            uc.Parameters.AddWithValue(cid);
-            await uc.ExecuteNonQueryAsync(ct);
+        await using (var analyzeTemp = new NpgsqlCommand("analyze temp_sbom_match_components", conn))
+        {
+            await analyzeTemp.ExecuteNonQueryAsync(ct);
+        }
+
+        var matches = new List<SbomCandidateMatch>();
+        await using (var sq = new NpgsqlCommand("""
+            with candidates as (
+              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
+                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
+                     c.normalized_range, c.primary_cpe23_uri, 1 as match_priority, 'cpe-exact' as match_basis
+              from temp_sbom_match_components t
+              join vulnerability_affected_components c on t.cpe23_uri is not null and c.primary_cpe23_uri = t.cpe23_uri
+              union all
+              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
+                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
+                     c.normalized_range, c.primary_cpe23_uri, 2 as match_priority, 'purl' as match_basis
+              from temp_sbom_match_components t
+              join vulnerability_affected_components c on t.purl_without_version is not null
+               and (c.primary_purl = t.purl_without_version or c.primary_purl = t.purl_decoded)
+               and (
+                 t.mapped_ecosystem is null
+                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
+                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
+               )
+              union all
+              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
+                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
+                     c.normalized_range, c.primary_cpe23_uri, 3 as match_priority, 'source-package' as match_basis
+              from temp_sbom_match_components t
+              join vulnerability_affected_components c on t.source_package_name is not null
+               and lower(c.package_name)=lower(t.source_package_name)
+               and (
+                 t.mapped_ecosystem is null
+                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
+                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
+               )
+              union all
+              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
+                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
+                     c.normalized_range, c.primary_cpe23_uri, 4 as match_priority, 'name' as match_basis
+              from temp_sbom_match_components t
+              join vulnerability_affected_components c on t.purl_without_version is null
+               and t.cpe23_uri is null
+               and t.source_package_name is null
+               and t.name is not null
+               and lower(c.display_name)=lower(t.name)
+               and (
+                 t.mapped_ecosystem is null
+                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
+                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
+               )
+              union all
+              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
+                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
+                     c.normalized_range, c.primary_cpe23_uri, 5 as match_priority, 'package' as match_basis
+              from temp_sbom_match_components t
+              join vulnerability_affected_components c on t.purl_without_version is null
+               and t.cpe23_uri is null
+               and t.source_package_name is null
+               and t.name is not null
+               and lower(c.package_name)=lower(t.name)
+               and (
+                 t.mapped_ecosystem is null
+                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
+                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
+               )
+              union all
+              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
+                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
+                     c.normalized_range, c.primary_cpe23_uri, 6 as match_priority, 'cpe-product' as match_basis
+              from temp_sbom_match_components t
+              join vulnerability_affected_components c on t.cpe_prefix is not null and c.primary_cpe23_uri like t.cpe_prefix || '%'
+              union all
+              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
+                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
+                     c.normalized_range, c.primary_cpe23_uri, 7 as match_priority, 'cpe-product' as match_basis
+              from temp_sbom_match_components t
+              join vulnerability_affected_components c on t.cpe_product is not null
+               and lower(c.package_name)=lower(t.cpe_product)
+               and lower(coalesce(c.ecosystem,''))='cpe'
+            )
+            select distinct on (c.component_id, c.vulnerability_id)
+                   c.component_id, c.purl, c.component_version, c.component_cpe, c.source_package_version,
+                   c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, c.match_basis
+            from candidates c
+            order by c.component_id, c.vulnerability_id, c.match_priority,
+              case when c.normalized_range is not null and c.normalized_range <> '' and c.normalized_range ~ '^[<>]=?' then 0 else 1 end
+            """, conn))
+        {
+            await using var sr = await sq.ExecuteReaderAsync(ct);
+            while (await sr.ReadAsync(ct))
+                matches.Add(new SbomCandidateMatch(
+                    sr.GetGuid(0),
+                    sr.IsDBNull(1) ? null : sr.GetString(1),
+                    sr.IsDBNull(2) ? null : sr.GetString(2),
+                    sr.IsDBNull(3) ? null : sr.GetString(3),
+                    sr.IsDBNull(4) ? null : sr.GetString(4),
+                    sr.GetGuid(5),
+                    sr.IsDBNull(6) ? null : sr.GetString(6),
+                    sr.IsDBNull(7) ? null : sr.GetString(7),
+                    sr.IsDBNull(8) ? null : sr.GetString(8),
+                    sr.IsDBNull(9) ? null : sr.GetString(9),
+                    sr.IsDBNull(10) ? null : sr.GetString(10)));
+        }
+
+        var matched = matches
+            .Select(item =>
+            {
+                var matchedVersion = string.Equals(item.Basis, "source-package", StringComparison.OrdinalIgnoreCase)
+                    ? item.SourcePackageVersion ?? item.ComponentVersion
+                    : item.ComponentVersion;
+                var versionMatched = ResolveSbomVersionMatch(matchedVersion, item.Range, item.Ecosystem, item.ComponentCpe, item.MatchedCpe, item.Basis);
+                return new
+                {
+                    item.ComponentId,
+                    item.VulnerabilityId,
+                    item.Purl,
+                    item.DisplayName,
+                    item.Ecosystem,
+                    item.Range,
+                    item.Basis,
+                    MatchedVersion = matchedVersion,
+                    VersionMatched = versionMatched
+                };
+            })
+            .Where(item => item.VersionMatched == true)
+            .ToList();
+
+        foreach (var chunk in matched.Chunk(1000))
+        {
+            var p = 1;
+            var values = new List<string>();
+            var parameters = new List<object>();
+            foreach (var item in chunk)
+            {
+                values.Add($"(${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++})");
+                parameters.Add(item.ComponentId);
+                parameters.Add(item.VulnerabilityId);
+                parameters.Add((object?)item.Purl ?? DBNull.Value);
+                parameters.Add((object?)item.DisplayName ?? DBNull.Value);
+                parameters.Add((object?)item.Ecosystem ?? DBNull.Value);
+                parameters.Add((object?)item.Range ?? DBNull.Value);
+                parameters.Add(item.VersionMatched.GetValueOrDefault());
+                parameters.Add((object?)item.Basis ?? DBNull.Value);
+                parameters.Add((object?)item.MatchedVersion ?? DBNull.Value);
+            }
+            await using var ins = new NpgsqlCommand($"""
+                insert into sbom_vulnerabilities(sbom_component_id,vulnerability_id,purl,display_name,ecosystem,normalized_range,version_matched,match_basis,matched_version)
+                values {string.Join(",", values)}
+                on conflict(sbom_component_id,vulnerability_id)
+                do update set version_matched = coalesce(excluded.version_matched, sbom_vulnerabilities.version_matched),
+                              normalized_range = coalesce(excluded.normalized_range, sbom_vulnerabilities.normalized_range),
+                              display_name = coalesce(excluded.display_name, sbom_vulnerabilities.display_name),
+                              ecosystem = coalesce(excluded.ecosystem, sbom_vulnerabilities.ecosystem),
+                              match_basis = coalesce(excluded.match_basis, sbom_vulnerabilities.match_basis),
+                              matched_version = coalesce(excluded.matched_version, sbom_vulnerabilities.matched_version)
+                """, conn);
+            foreach (var parameter in parameters) ins.Parameters.AddWithValue(parameter);
+            await ins.ExecuteNonQueryAsync(ct);
+        }
+        m = matched.Count;
+
+        await using (var updateCounts = new NpgsqlCommand("""
+            update sbom_components sc
+            set vuln_count = coalesce(t.cnt, 0)
+            from (
+              select sc2.id, count(sv.*)::integer as cnt
+              from sbom_components sc2
+              left join sbom_vulnerabilities sv on sv.sbom_component_id = sc2.id
+              where sc2.sbom_id = $1
+              group by sc2.id
+            ) t
+            where sc.id = t.id
+            """, conn))
+        {
+            updateCounts.Parameters.AddWithValue(req.SbomId);
+            await updateCounts.ExecuteNonQueryAsync(ct);
         }
 
         await using var us = new NpgsqlCommand(
@@ -517,6 +659,19 @@ public static class SbomEndpoints
     private sealed record CpeParts(string Part, string Vendor, string Product, string? Version);
 
     private sealed record PurlParts(string Type, string? Namespace, string Name);
+
+    private sealed record SbomCandidateMatch(
+        Guid ComponentId,
+        string? Purl,
+        string? ComponentVersion,
+        string? ComponentCpe,
+        string? SourcePackageVersion,
+        Guid VulnerabilityId,
+        string? DisplayName,
+        string? Ecosystem,
+        string? Range,
+        string? MatchedCpe,
+        string? Basis);
 
     private static string? MapEcosystem(string? eco) => eco?.ToLowerInvariant() switch
     {
