@@ -1324,7 +1324,7 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_raw_pending_status_by_source on source_raw_index(source_id, normalize_status) where normalize_status in ('pending', 'failed')",
         "create index if not exists ix_raw_pending_source_updated on source_raw_index(source_id, normalize_status, updated_at, id) where normalize_status in ('pending', 'failed')",
         "create index if not exists ix_raw_pending_source_order on source_raw_index(source_id, updated_at, id) where normalize_status in ('pending', 'failed')",
-        "create index if not exists ix_stg_cve_list_normalize_order on stg_cve_list_records(updated_at nulls last, cve_id, raw_index_id)",
+        "drop index if exists ix_raw_pending_by_source",
         "create index if not exists ix_stg_nvd_cpe_normalize_order on stg_nvd_cpe_dictionary(cpe23_uri, raw_index_id)",
         "create index if not exists ix_stg_nvd_cves_normalize_order on stg_nvd_cves(modified_at nulls last, cve_id, raw_index_id)",
         "create index if not exists ix_stg_threat_intel_normalize_order on stg_threat_intel_records(observed_at nulls last, identifier, raw_index_id)",
