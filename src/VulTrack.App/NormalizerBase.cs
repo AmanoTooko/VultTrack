@@ -56,6 +56,14 @@ public abstract class NormalizerBase(
             .Select(g => g.First())
             .ToList();
 
+        // Delete existing facts for this record to avoid duplicates on re-normalize
+        await using (var delCmd = new NpgsqlCommand(
+            "delete from vulnerability_affected_facts where vulnerability_record_id = $1", connection))
+        {
+            delCmd.Parameters.AddWithValue(recordId);
+            await delCmd.ExecuteNonQueryAsync(ct);
+        }
+
         if (dedupedFacts.Count == 1)
         {
             var fact = dedupedFacts[0];
@@ -172,6 +180,14 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertSeverityScoresAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, Guid rawIndexId, IReadOnlyList<SeverityScoreDraft> scores, CancellationToken ct)
     {
+        // Delete existing scores for this record to avoid duplicates on re-normalize
+        await using (var delCmd = new NpgsqlCommand(
+            "delete from vulnerability_severity_scores where vulnerability_record_id = $1", connection))
+        {
+            delCmd.Parameters.AddWithValue(recordId);
+            await delCmd.ExecuteNonQueryAsync(ct);
+        }
+
         var selected = scores
             .Where(x => x.Score is not null)
             .OrderByDescending(x => x.Score)
@@ -226,6 +242,14 @@ public abstract class NormalizerBase(
     {
         var valid = references.Where(x => !string.IsNullOrWhiteSpace(x.Url)).DistinctBy(x => x.Url).ToList();
         if (valid.Count == 0) return;
+
+        // Delete existing references for this record to avoid duplicates on re-normalize
+        await using (var delCmd = new NpgsqlCommand(
+            "delete from vulnerability_references where vulnerability_record_id = $1", connection))
+        {
+            delCmd.Parameters.AddWithValue(recordId);
+            await delCmd.ExecuteNonQueryAsync(ct);
+        }
 
         if (valid.Count == 1)
         {
