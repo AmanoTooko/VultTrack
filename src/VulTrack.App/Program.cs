@@ -28,6 +28,12 @@ builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>
 builder.Services.AddSingleton<ComponentVulnerabilitySearchService>();
 builder.Services.AddSingleton<AdminAuthService>();
 builder.Services.AddSingleton<SourceScheduler>();
+builder.Services.AddMemoryCache();
+builder.Services.AddSingleton<DuckDbEvidenceStore>();
+builder.Services.AddSingleton<DuckDbEvidenceNormalizer>();
+builder.Services.AddSingleton<VulnerabilityDetailService>();
+builder.Services.AddSingleton<VulnerabilityDetailSnapshotStore>();
+builder.Services.AddSingleton<VulnerabilityDetailSnapshotBuilder>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SourceScheduler>());
 
 var app = builder.Build();
@@ -411,6 +417,26 @@ app.MapPost("/api/v1/admin.scheduler.runDue", async (HttpContext context, AdminA
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     await scheduler.RunDueSourcesAsync(ct);
     return ApiResult.Ok(new { completed = true });
+});
+
+app.MapPost("/api/v1/admin.duckdbEvidence.normalize", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer normalizer, DuckDbEvidenceNormalizeRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var result = await normalizer.NormalizeAsync(request, ct);
+    return ApiResult.Ok(result);
+});
+
+app.MapGet("/api/v1/admin.duckdbEvidence.stats", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await store.StatsAsync(ct));
+});
+
+app.MapPost("/api/v1/admin.detailSnapshot.rebuild", async (HttpContext context, AdminAuthService auth, VulnerabilityDetailSnapshotBuilder builder, DetailSnapshotBuildRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var result = await builder.RebuildAsync(request, ct);
+    return ApiResult.Ok(result);
 });
 
 app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, VulnerabilitySearchRequest request, CancellationToken ct) =>
@@ -840,7 +866,6 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
             """, queryId, ct),
         affectedExpressions = duckDb.Enabled
             ? (await duckDb.QueryAffectedFactsAsync(vulnerability.primaryIdentifier, 250, ct))
-                .Select(r => (IReadOnlyDictionary<string, object?>)r).ToList().AsReadOnly()
             : await QueryRowsAsync(db, """
             select s.code, f.fact_type, f.ecosystem, f.package_name, f.purl,
                    f.purl_without_version, f.cpe23_uri, f.version_range_raw,
@@ -876,7 +901,6 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
             """, queryId, ct),
         severities = duckDb.Enabled
             ? (await duckDb.QuerySeverityScoresAsync(vulnerability.primaryIdentifier, 20, ct))
-                .Select(r => (IReadOnlyDictionary<string, object?>)r).ToList().AsReadOnly()
             : await QueryRowsAsync(db, """
             select s.code, scoring_system, scoring_version, score_type, vector_string,
                    score, severity_label, is_selected
@@ -889,7 +913,6 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
             """, queryId, ct),
         references = duckDb.Enabled
             ? (await duckDb.QueryReferencesAsync(vulnerability.primaryIdentifier, 160, ct))
-                .Select(r => (IReadOnlyDictionary<string, object?>)r).ToList().AsReadOnly()
             : await QueryRowsAsync(db, """
             with ranked as (
               select s.code, url, ref_type, tags,
@@ -903,51 +926,6 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
             where source_rank <= 40
             order by code nulls last, source_rank, url
             limit 160
-            """, queryId, ct),
-        descriptions = await QueryRowsAsync(db, """
-            select s.code, lang, description_type, left(value, 4000) as value, is_selected
-            from vulnerability_descriptions d
-            left join sources s on s.id = d.source_id
-            where d.vulnerability_id = $1
-            order by case when lower(lang) = 'en' then 0 else 1 end,
-                     case
-                       when trim(value) like '#%' or value like E'%\n#%' or value like '%](/%' or value like '%](http%' then 0
-                       else 1
-                     end,
-                     case when description_type = 'detail' then 0 else 1 end,
-                     case
-                       when s.code in ('ghsa', 'maven-advisory', 'maven-osv', 'maven-osv-init', 'osv', 'osv-init') then 0
-                       when s.code in ('nvd-cve', 'nvd-cve-init') then 1
-                       else 2
-                     end,
-                     length(value) desc,
-                     is_selected desc,
-                     s.code nulls last
-            limit 16
-            """, queryId, ct),
-        severities = await QueryRowsAsync(db, """
-            select s.code, scoring_system, scoring_version, score_type, vector_string,
-                   score, severity_label, is_selected
-            from vulnerability_severity_scores vss
-            left join sources s on s.id = vss.source_id
-            where vss.vulnerability_id = $1
-            order by case when s.code in ('nvd-cve', 'nvd-cve-init') then 0 else 1 end,
-                     is_selected desc, score desc nulls last
-            limit 20
-            """, queryId, ct),
-        references = await QueryRowsAsync(db, """
-            with ranked as (
-              select s.code, url, ref_type, tags,
-                     row_number() over (partition by s.code order by url) as source_rank
-              from vulnerability_references r
-              left join sources s on s.id = r.source_id
-              where r.vulnerability_id = $1
-            )
-            select code, url, ref_type, tags
-            from ranked
-            where source_rank <= 20
-            order by code nulls last, source_rank, url
-            limit 40
             """, queryId, ct),
         exploits = await QueryRowsAsync(db, """
             select s.code, e.source_key, e.title, e.source_url, e.artifact_url,
