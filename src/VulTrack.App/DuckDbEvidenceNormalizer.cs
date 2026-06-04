@@ -580,15 +580,14 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
 
     private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCsafAsync(string sourceCode, int limit, CancellationToken ct)
     {
+        var provider = sourceCode; // suse-csaf or redhat-csaf
         await using var command = db.CreateCommand("""
-            select r.id, r.external_key, r.payload::text
-            from source_raw_index r
-            join sources s on s.id = r.source_id
-            where s.code = $1 and r.parse_status = 'succeeded'
-            order by r.updated_at desc
+            select raw_index_id, advisory_id, identifiers, payload::text
+            from stg_ecosystem_advisories
+            where provider = $1
             limit $2
             """);
-        command.Parameters.AddWithValue(sourceCode);
+        command.Parameters.AddWithValue(provider);
         command.Parameters.AddWithValue(limit);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
@@ -596,22 +595,35 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         while (await reader.ReadAsync(ct))
         {
             var rawId = reader.GetGuid(0);
-            var key = reader.GetString(1);
-            if (reader.IsDBNull(2)) continue;
-            var payload = JsonNode.Parse(reader.GetString(2));
+            var advisoryId = reader.GetString(1);
+            var identifiers = reader.IsDBNull(2) ? [] : reader.GetFieldValue<string[]>(2);
+            if (reader.IsDBNull(3)) continue;
+            var payload = JsonNode.Parse(reader.GetString(3));
             if (payload is null) continue;
-            // CSAF payload structure: {"cves": ["CVE-xxx", ...], "products": [...], "references": [...]}
-            var cves = payload["cves"]?.AsArray() ?? [];
+            // Parse CSAF payload: {"cves": ["CVE-xxx"], "products": [...], "references": [...]}
+            var cves = new List<string>();
+            // Try to find CVE from identifiers first, then from payload
+            foreach (var id in identifiers)
+                if (id.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase))
+                    cves.Add(id);
+            if (cves.Count == 0)
+            {
+                var payloadCves = payload["cves"]?.AsArray() ?? [];
+                foreach (var c in payloadCves)
+                {
+                    var cv = c?.GetValue<string>();
+                    if (!string.IsNullOrWhiteSpace(cv)) cves.Add(cv);
+                }
+            }
             var facts = ExtractCsafFacts(payload, "").ToList();
             var refs = ExtractCsafReferences(payload).ToList();
-            foreach (var cveNode in cves)
+            if (cves.Count > 0)
             {
-                var cve = cveNode?.GetValue<string>();
-                if (string.IsNullOrWhiteSpace(cve)) continue;
-                records.Add(EmptyRecord(sourceCode, rawId, cve, key) with { AffectedFacts = facts, References = refs });
+                foreach (var cve in cves)
+                    records.Add(EmptyRecord(sourceCode, rawId, cve, advisoryId) with { AffectedFacts = facts, References = refs });
             }
-            if (!cves.Any() && facts.Count > 0)
-                records.Add(EmptyRecord(sourceCode, rawId, key, key) with { AffectedFacts = facts, References = refs });
+            else if (facts.Count > 0)
+                records.Add(EmptyRecord(sourceCode, rawId, advisoryId, advisoryId) with { AffectedFacts = facts, References = refs });
         }
         return records;
     }
@@ -835,11 +847,9 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
     private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCnnvdAsync(int limit, CancellationToken ct)
     {
         await using var command = db.CreateCommand("""
-            select r.id, r.external_key, r.payload::text
-            from source_raw_index r
-            join sources s on s.id = r.source_id
-            where s.code = 'cnnvd' and r.parse_status = 'succeeded'
-            order by r.updated_at desc
+            select raw_index_id, advisory_id, identifiers, payload::text
+            from stg_external_advisories
+            where provider = 'cnnvd'
             limit $1
             """);
         command.Parameters.AddWithValue(limit);
@@ -849,10 +859,12 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         while (await reader.ReadAsync(ct))
         {
             var rawId = reader.GetGuid(0);
-            var key = reader.GetString(1);
-            if (reader.IsDBNull(2)) continue;
-            var payload = JsonNode.Parse(reader.GetString(2));
+            var advisoryId = reader.GetString(1);
+            var identifiers = reader.IsDBNull(2) ? [] : reader.GetFieldValue<string[]>(2);
+            if (reader.IsDBNull(3)) continue;
+            var payload = JsonNode.Parse(reader.GetString(3));
             if (payload is null) continue;
+            var key = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? advisoryId;
             var cve = payload["cveId"]?.GetValue<string>()
                 ?? payload["cve_id"]?.GetValue<string>()
                 ?? payload["cve"]?.GetValue<string>()
@@ -866,7 +878,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 if (!string.IsNullOrWhiteSpace(name))
                     facts.Add(new DuckDbAffectedFact("package", null, name, null, null, null, null, true));
             }
-            records.Add(EmptyRecord("cnnvd", rawId, cve, key) with
+            records.Add(EmptyRecord("cnnvd", rawId, cve, advisoryId) with
             {
                 AffectedFacts = facts,
                 SeverityScores = sev is not null ? [new DuckDbSeverityScore("cnnvd", null, null, null, null, sev)] : []
@@ -878,29 +890,62 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
     private static IEnumerable<DuckDbAffectedFact> ExtractCsafFacts(JsonNode? payload, string cve)
     {
         if (payload is null) yield break;
-        var products = payload["products"]?.AsArray() ?? [];
-        foreach (var p in products)
+        var productTree = payload["product_tree"];
+        // Build product_id -> name map from relationships
+        var productNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var branches = productTree?["branches"]?.AsArray() ?? [];
+        foreach (var branch in branches)
+            CollectBranchProducts(branch, productNames);
+        // Also from relationships
+        var relationships = productTree?["relationships"]?.AsArray() ?? [];
+        foreach (var rel in relationships)
         {
-            var name = p?["name"]?.GetValue<string>();
-            if (string.IsNullOrWhiteSpace(name)) continue;
-            var eco = p?["type"]?.GetValue<string>() ?? p?["ecosystem"]?.GetValue<string>();
-            var cpe = p?["cpe"]?.GetValue<string>();
-            var vers = p?["versions"]?.AsArray();
-            if (vers is not null)
-            {
-                foreach (var v in vers)
-                    yield return new DuckDbAffectedFact("package", eco, name, null, cpe, v?.GetValue<string>(), "SEMVER", true);
-            }
-            else
-                yield return new DuckDbAffectedFact("package", eco, name, null, cpe, null, null, true);
+            var fullName = rel?["full_product_name"]?["name"]?.GetValue<string>();
+            var pid = rel?["product_reference"]?.GetValue<string>() ?? rel?["full_product_name"]?["product_id"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(pid) && !string.IsNullOrWhiteSpace(fullName))
+                productNames[pid] = fullName;
         }
+        // Extract affected products per CVE
+        var vulns = payload["vulnerabilities"]?.AsArray() ?? [];
+        foreach (var vuln in vulns)
+        {
+            var vulnCve = vuln?["cve"]?.GetValue<string>() ?? "";
+            if (!string.IsNullOrWhiteSpace(cve) && !vulnCve.Equals(cve, StringComparison.OrdinalIgnoreCase)) continue;
+            var productIds = vuln?["product_status"]?["recommended"]?.AsArray()
+                ?? vuln?["product_status"]?["fixed"]?.AsArray()
+                ?? vuln?["product_status"]?["known_affected"]?.AsArray()
+                ?? [];
+            foreach (var pid in productIds)
+            {
+                var pidStr = pid?.GetValue<string>();
+                if (string.IsNullOrWhiteSpace(pidStr)) continue;
+                var name = productNames.TryGetValue(pidStr, out var n) ? n : pidStr;
+                yield return new DuckDbAffectedFact("package", "suse", name, null, null, null, null, true);
+            }
+        }
+    }
+
+    private static void CollectBranchProducts(JsonNode? branch, Dictionary<string, string> map)
+    {
+        if (branch is null) return;
+        var productId = branch["product"]?["product_id"]?.GetValue<string>();
+        var productName = branch["product"]?["name"]?.GetValue<string>();
+        if (!string.IsNullOrWhiteSpace(productId) && !string.IsNullOrWhiteSpace(productName))
+            map[productId] = productName;
+        // Also the branch name itself can be a product
+        var branchName = branch["name"]?.GetValue<string>();
+        if (!string.IsNullOrWhiteSpace(productId) && !map.ContainsKey(productId) && !string.IsNullOrWhiteSpace(branchName))
+            map[productId] = branchName;
+        // Recurse into sub-branches
+        foreach (var sub in branch["branches"]?.AsArray() ?? [])
+            CollectBranchProducts(sub, map);
     }
 
     private static IEnumerable<DuckDbReference> ExtractCsafReferences(JsonNode? payload)
     {
         if (payload is null) yield break;
-        var refs = payload["references"]?.AsArray() ?? [];
-        foreach (var r in refs)
+        var docRefs = payload["document"]?["references"]?.AsArray() ?? [];
+        foreach (var r in docRefs)
         {
             var url = r?["url"]?.GetValue<string>();
             if (!string.IsNullOrWhiteSpace(url))
