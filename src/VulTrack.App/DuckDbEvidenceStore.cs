@@ -146,8 +146,24 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
         return await ReadRowsAsync(command, ct);
     }
-}
-}
+
+    public async Task<IReadOnlyList<Dictionary<string, object?>>> QueryReferencesAsync(string vulnerabilityKey, int limit = 160, CancellationToken ct = default)
+    {
+        if (!Enabled) return Array.Empty<Dictionary<string, object?>>();
+        ct.ThrowIfCancellationRequested();
+        await InitializeAsync(ct);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            select source_code, url, ref_type
+            from evidence_references
+            where vulnerability_key = $1
+            order by source_code nulls last, url
+            limit {limit}
+            """;
+        command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
+        return await ReadRowsAsync(command, ct);
+    }
 
     public async Task<IReadOnlyList<Dictionary<string, object?>>> QuerySeverityScoresAsync(string vulnerabilityKey, int limit = 40, CancellationToken ct = default)
     {
@@ -515,3 +531,4 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
         return await ReadRowsAsync(command, ct);
     }
+}

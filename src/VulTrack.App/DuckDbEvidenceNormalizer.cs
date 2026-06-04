@@ -850,65 +850,6 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private static IEnumerable<DuckDbAffectedFact> ExtractGhsaFacts(JsonNode? payload)
-    {
-        if (payload is null) yield break;
-        var affected = payload["affected"]?.AsArray() ?? [];
-        foreach (var item in affected)
-        {
-            var pkg = item?["package"];
-            var eco = pkg?["ecosystem"]?.GetValue<string>();
-            var name = pkg?["name"]?.GetValue<string>();
-            var purl = pkg?["purl"]?.GetValue<string>() ?? ToPurl(eco, name);
-            var ranges = item?["ranges"]?.AsArray() ?? [];
-            foreach (var range in ranges)
-            {
-                var events = range?["events"]?.AsArray();
-                var introduced = events?.FirstOrDefault(x => x?["introduced"] is not null)?["introduced"]?.GetValue<string>();
-                var fixedVer = events?.FirstOrDefault(x => x?["fixed"] is not null)?["fixed"]?.GetValue<string>();
-                var rawRange = fixedVer is not null ? (introduced is not null ? $">= {introduced}, < {fixedVer}" : $"< {fixedVer}") : null;
-                if (!string.IsNullOrWhiteSpace(name))
-                    yield return new DuckDbAffectedFact("package", eco, name, purl, null, rawRange, range?["type"]?.GetValue<string>(), true);
-            }
-        }
-    }
-
-    private static IEnumerable<DuckDbSeverityScore> ExtractGhsaSeverity(JsonNode? cvss)
-    {
-        if (cvss is null) yield break;
-        var score = cvss["score"]?.GetValue<decimal>();
-        var vector = cvss["vectorString"]?.GetValue<string>();
-        var sev = cvss["severity"]?.GetValue<string>();
-        var version = cvss["version"]?.GetValue<string>();
-        yield return new DuckDbSeverityScore("CVSS", version, null, vector, score, sev);
-    }
-
-    private static IEnumerable<DuckDbWeakness> ExtractGhsaWeaknesses(JsonNode? cwes)
-    {
-        if (cwes is null) yield break;
-        foreach (var cwe in cwes.AsArray())
-        {
-            var id = cwe?["cweId"]?.GetValue<string>();
-            yield return new DuckDbWeakness("CWE", id, cwe?["name"]?.GetValue<string>());
-        }
-    }
-
-    private static IEnumerable<DuckDbReference> ExtractReferences(JsonNode? references)
-    {
-        if (references is null) yield break;
-        foreach (var refNode in references.AsArray())
-        {
-            if (refNode is JsonValue val && val.TryGetValue<string>(out var urlStr) && !string.IsNullOrWhiteSpace(urlStr))
-                yield return new DuckDbReference(urlStr, null, []);
-            else
-            {
-                var url = refNode?["url"]?.GetValue<string>();
-                if (!string.IsNullOrWhiteSpace(url))
-                    yield return new DuckDbReference(url, refNode?["type"]?.GetValue<string>(), []);
-            }
-        }
-    }
-
     private static IEnumerable<DuckDbAffectedFact> ExtractCsafFacts(JsonNode? payload, string cve)
     {
         if (payload is null) yield break;
