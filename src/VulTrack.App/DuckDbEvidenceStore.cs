@@ -72,7 +72,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         using var connection = OpenConnection();
         foreach (var statement in SchemaStatements)
             Execute(connection, statement);
-        foreach (var table in EvidenceTables)
+        foreach (var table in ResetTables)
             Execute(connection, $"delete from {table}");
         return Task.CompletedTask;
     }
@@ -91,7 +91,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             foreach (var batch in rawIds.Chunk(1000))
             {
                 var idList = string.Join(",", batch.Select(SqlValue));
-                foreach (var table in EvidenceTables)
+                foreach (var table in RecordEvidenceTables)
                     Execute(connection, $"delete from {table} where source_code = {SqlValue(sourceCode)} and raw_index_id in ({idList})");
             }
 
@@ -137,7 +137,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             select source_code, fact_type, ecosystem, package_name,
                    purl, cpe23_uri, version_range_raw, range_type, vulnerable
             from affected_facts
-            where vulnerability_key = $1
+            where upper(vulnerability_key) = upper($1)
             order by case when cpe23_uri is not null then 0 else 1 end,
                      case when purl is not null then 0 else 1 end,
                      source_code nulls last, package_name nulls last
@@ -157,7 +157,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         command.CommandText = $"""
             select source_code, url, ref_type
             from evidence_references
-            where vulnerability_key = $1
+            where upper(vulnerability_key) = upper($1)
             order by source_code nulls last, url
             limit {limit}
             """;
@@ -176,7 +176,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             select source_code, scoring_system, scoring_version, score_type,
                    vector_string, score, severity_label
             from severity_scores
-            where vulnerability_key = $1
+            where upper(vulnerability_key) = upper($1)
             order by score desc nulls last
             limit {limit}
             """;
@@ -369,7 +369,15 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         return Path.GetFullPath(Path.Combine(root, "data", "duckdb", "vultrack-evidence.duckdb"));
     }
 
-    private static readonly string[] EvidenceTables =
+    private static readonly string[] RecordEvidenceTables =
+    [
+        "affected_facts",
+        "severity_scores",
+        "evidence_references",
+        "weaknesses"
+    ];
+
+    private static readonly string[] ResetTables =
     [
         "affected_facts",
         "severity_scores",

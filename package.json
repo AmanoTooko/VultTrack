@@ -16,6 +16,7 @@
     "benchmark:api": "node scripts/api-performance-check.mjs",
     "benchmark:init": "node scripts/benchmark-fresh-init.mjs",
     "benchmark:duckdb": "node scripts/benchmark-duckdb-normalization.mjs",
+    "benchmark:duckdb:compare": "python3 scripts/compare-duckdb-pg-detail.py",
     "audit:canonical": "node scripts/audit-canonical-integrity.mjs",
     "audit:storage": "node scripts/audit-database-storage.mjs",
     "smoke:canonical": "node scripts/smoke-canonical-integrity.mjs",

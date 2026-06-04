@@ -63,13 +63,16 @@ staging tables and writes only `data/duckdb/vultrack-evidence.duckdb`; it does
 not update PostgreSQL normalization status and does not affect SBOM matching.
 
 ```bash
-API_BASE_URL=http://localhost:5099 npm run benchmark:duckdb -- --reset --sources osv,ubuntu-osv,android-osv,ghsa,nvd-cve --limit 5000
+API_BASE_URL=http://localhost:5099 npm run benchmark:duckdb -- --reset --sources osv,ubuntu-osv,android-osv,ghsa,nvd-cve --limit 5000 --batch-size 1000
 API_BASE_URL=http://localhost:5099 npm run benchmark:duckdb -- --reset --source debian-security-tracker --limit 10
+API_BASE_URL=http://localhost:5099 npm run benchmark:duckdb:compare -- --limit 250
 ```
 
 Current local measurements:
 
-- DuckDB-only, `osv,ubuntu-osv,android-osv,ghsa,nvd-cve`, limit 5000 per source: 25k staging records -> 502,219 affected facts, 26.5 MB DuckDB file, 10.7s.
+- DuckDB-only current-effective rebuild from local PostgreSQL staging tables, `limit=5000000`, `batchSize=10000`: 12,288,317 affected facts, 1,102,239 severity scores, 4,012,827 references, 421,699 weaknesses, 1,286,676 CPE dictionary rows, 59,689 exploit rows, 337,476 threat score rows. Final DuckDB file size: 1,016,344,576 bytes. No network fetch is performed by this path.
+- Full rebuild elapsed time observed on the local workstation was about 1,085s total across the main run and targeted consistency reruns. The main bottlenecks were NVD CVE offset paging (417s), SUSE CSAF parsing (225s), OSV (97s), Ubuntu OSV (63s), and NVD CPE dictionary streaming/COPY (106s).
+- DuckDB vs PostgreSQL detail JSON aggregation, limit 250, sample set `CVE-2021-44228,CVE-2023-4863,CVE-2017-5753,CGA-V7V4-9R6P-X7FC`: DuckDB averaged 45.7ms for affected JSON aggregation vs PostgreSQL 217.9ms, 20.5ms for references vs PostgreSQL 32.5ms, and 9.4ms for severities vs PostgreSQL 13.7ms. Severity sample Jaccard was 0.917 after key/severity normalization fixes; affected still differs because DuckDB stores current-effective/deduplicated facts while PostgreSQL contains duplicate and historical projections.
 - Debian legacy staging compatibility, limit 10: 13,593 CVE evidence records -> 60,086 affected facts, 1.0 MB DuckDB file, 1.4s end-to-end.
 - Detail snapshot rebuild, limit 5000, concurrency 8, gzip level 6: 112.45s, 256 shards touched.
 - Current detail snapshot sample: 6,229 entries, 34.6 MB gzip, 393 MB uncompressed JSON. At 417k vulnerabilities this projects to roughly 2.3 GB gzip and 26 GB uncompressed JSON serialization work.

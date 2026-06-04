@@ -6,6 +6,7 @@ const apiBaseUrl = process.env.API_BASE_URL ?? 'http://localhost:5099';
 const args = parseArgs(process.argv.slice(2));
 const sourceCode = args.source ?? args.sources ?? null;
 const limit = positiveInt(args.limit ?? process.env.DUCKDB_NORMALIZE_LIMIT, 1000);
+const batchSize = positiveInt(args.batchSize ?? args['batch-size'] ?? process.env.DUCKDB_NORMALIZE_BATCH_SIZE, 10000);
 const reset = args.reset === true || args.reset === 'true' || process.env.DUCKDB_NORMALIZE_RESET === '1';
 const cookie = await getAdminCookie(apiBaseUrl);
 
@@ -13,7 +14,7 @@ const started = performance.now();
 const response = await fetch(new URL('/api/v1/admin.duckdbEvidence.normalize', apiBaseUrl), {
   method: 'POST',
   headers: { 'content-type': 'application/json', cookie },
-  body: JSON.stringify({ sourceCode, limit, reset })
+  body: JSON.stringify({ sourceCode, limit, reset, batchSize })
 });
 const body = await response.json().catch(() => null);
 if (!response.ok || body?.ok === false) {
@@ -34,6 +35,7 @@ console.table(data.sources.map((item) => ({
 console.log(JSON.stringify({
   apiBaseUrl,
   elapsedMs,
+  batchSize,
   path: data.path,
   stats: data.stats
 }, null, 2));
