@@ -890,13 +890,9 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
     private static IEnumerable<DuckDbAffectedFact> ExtractCsafFacts(JsonNode? payload, string cve)
     {
         if (payload is null) yield break;
+        // Fast path: use relationships array (flat, no recursion)
         var productTree = payload["product_tree"];
-        // Build product_id -> name map from relationships
         var productNames = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var branches = productTree?["branches"]?.AsArray() ?? [];
-        foreach (var branch in branches)
-            CollectBranchProducts(branch, productNames);
-        // Also from relationships
         var relationships = productTree?["relationships"]?.AsArray() ?? [];
         foreach (var rel in relationships)
         {
@@ -905,7 +901,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             if (!string.IsNullOrWhiteSpace(pid) && !string.IsNullOrWhiteSpace(fullName))
                 productNames[pid] = fullName;
         }
-        // Extract affected products per CVE
+        // Extract affected products per CVE from vulnerabilities array
         var vulns = payload["vulnerabilities"]?.AsArray() ?? [];
         foreach (var vuln in vulns)
         {
@@ -923,22 +919,6 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 yield return new DuckDbAffectedFact("package", "suse", name, null, null, null, null, true);
             }
         }
-    }
-
-    private static void CollectBranchProducts(JsonNode? branch, Dictionary<string, string> map)
-    {
-        if (branch is null) return;
-        var productId = branch["product"]?["product_id"]?.GetValue<string>();
-        var productName = branch["product"]?["name"]?.GetValue<string>();
-        if (!string.IsNullOrWhiteSpace(productId) && !string.IsNullOrWhiteSpace(productName))
-            map[productId] = productName;
-        // Also the branch name itself can be a product
-        var branchName = branch["name"]?.GetValue<string>();
-        if (!string.IsNullOrWhiteSpace(productId) && !map.ContainsKey(productId) && !string.IsNullOrWhiteSpace(branchName))
-            map[productId] = branchName;
-        // Recurse into sub-branches
-        foreach (var sub in branch["branches"]?.AsArray() ?? [])
-            CollectBranchProducts(sub, map);
     }
 
     private static IEnumerable<DuckDbReference> ExtractCsafReferences(JsonNode? payload)
