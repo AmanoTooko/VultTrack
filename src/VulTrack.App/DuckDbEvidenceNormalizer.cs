@@ -58,7 +58,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         if (request.Reset) await store.ResetAsync(ct);
         else await store.InitializeAsync(ct);
 
-        var limit = Math.Clamp(request.Limit <= 0 ? 1000 : request.Limit, 1, 100000);
+        var limit = Math.Clamp(request.Limit <= 0 ? 5000000 : request.Limit, 1, 5000000);
         var sourceCodes = string.IsNullOrWhiteSpace(request.SourceCode)
             ? DefaultSources
             : request.SourceCode.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
