@@ -80,9 +80,9 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 "suse-csaf" => await LoadCsafAsync("suse-csaf", limit, ct),
                 "alpine-secdb" => await LoadAlpineAsync(limit, ct),
                 "redhat-csaf" => await LoadCsafAsync("redhat-csaf", limit, ct),
-                "nuget-advisory" => await LoadExternalAdvisoryAsync("nuget-advisory", limit, ct),
-                "npm-advisory" => await LoadExternalAdvisoryAsync("npm-advisory", limit, ct),
-                "pypi-advisory" => await LoadExternalAdvisoryAsync("pypi-advisory", limit, ct),
+                "nuget-advisory" => await LoadEcosystemAsync("nuget-vulnerability-info", limit, ct),
+                "npm-advisory" => await LoadNpmAdvisoryAsync(limit, ct),
+                "pypi-advisory" => await LoadPypiAdvisoryAsync(limit, ct),
                 "go-advisory" => await LoadEcosystemAsync("go-advisory", limit, ct),
                 "cargo-advisory" => await LoadEcosystemAsync("cargo-advisory", limit, ct),
                 "first-epss" => await LoadThreatIntelAsync("first-epss", limit, ct),
@@ -581,10 +581,11 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
     private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCsafAsync(string sourceCode, int limit, CancellationToken ct)
     {
         await using var command = db.CreateCommand("""
-            select r.id, r.external_key, r.payload::text, s.code
+            select r.id, r.external_key, r.payload::text
             from source_raw_index r
             join sources s on s.id = r.source_id
-            where s.code = $1 and r.normalize_status in ('pending', 'succeeded')
+            where s.code = $1 and r.parse_status = 'succeeded'
+            order by r.updated_at desc
             limit $2
             """);
         command.Parameters.AddWithValue(sourceCode);
@@ -596,25 +597,31 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         {
             var rawId = reader.GetGuid(0);
             var key = reader.GetString(1);
+            if (reader.IsDBNull(2)) continue;
             var payload = JsonNode.Parse(reader.GetString(2));
-            var cves = payload?["cves"]?.AsArray() ?? [];
+            if (payload is null) continue;
+            // CSAF payload structure: {"cves": ["CVE-xxx", ...], "products": [...], "references": [...]}
+            var cves = payload["cves"]?.AsArray() ?? [];
+            var facts = ExtractCsafFacts(payload, "").ToList();
+            var refs = ExtractCsafReferences(payload).ToList();
             foreach (var cveNode in cves)
             {
                 var cve = cveNode?.GetValue<string>();
                 if (string.IsNullOrWhiteSpace(cve)) continue;
-                records.Add(EmptyRecord(sourceCode, rawId, cve, key) with
-                {
-                    AffectedFacts = ExtractCsafFacts(payload, cve).ToList(),
-                    References = ExtractCsafReferences(payload).ToList()
-                });
+                records.Add(EmptyRecord(sourceCode, rawId, cve, key) with { AffectedFacts = facts, References = refs });
             }
+            if (!cves.Any() && facts.Count > 0)
+                records.Add(EmptyRecord(sourceCode, rawId, key, key) with { AffectedFacts = facts, References = refs });
         }
         return records;
     }
 
     private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadAlpineAsync(int limit, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("select raw_index_id, cve_id, package_name, version, fixed_version, release from stg_alpine_secdb limit $1");
+        await using var command = db.CreateCommand("""
+            select raw_index_id, distro_release, package_name, identifiers, secfixes::text
+            from stg_alpine_secdb limit $1
+            """);
         command.Parameters.AddWithValue(limit);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
@@ -623,15 +630,18 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         while (await reader.ReadAsync(ct))
         {
             var rawId = reader.GetGuid(0);
-            var cve = reader.GetString(1);
+            var release = reader.GetString(1);
             var pkg = reader.GetString(2);
-            var ver = reader.IsDBNull(3) ? null : reader.GetString(3);
-            var fixedVer = reader.IsDBNull(4) ? null : reader.GetString(4);
-            var release = reader.IsDBNull(5) ? null : reader.GetString(5);
-            var cveKey = $"CVE-{cve}";
-            var range = fixedVer is not null ? $"< {fixedVer}" : (ver is not null ? $"= {ver}" : null);
-            if (!seen.TryGetValue(cveKey, out var facts)) { facts = []; seen[cveKey] = facts; }
-            facts.Add(new DuckDbAffectedFact("package", $"alpine:{release ?? "edge"}", pkg, ToPurl("alpine", pkg), null, range, "SEMVER", true));
+            var identifiers = reader.IsDBNull(3) ? [] : reader.GetFieldValue<string[]>(3);
+            var secfixes = reader.IsDBNull(4) ? null : JsonNode.Parse(reader.GetString(4));
+            foreach (var id in identifiers)
+            {
+                var cveKey = id.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase) ? id : id;
+                var fixedVer = secfixes?[id]?.GetValue<string>();
+                var range = fixedVer is not null ? $"< {fixedVer}" : null;
+                if (!seen.TryGetValue(cveKey, out var facts)) { facts = []; seen[cveKey] = facts; }
+                facts.Add(new DuckDbAffectedFact("package", $"alpine:{release}", pkg, ToPurl("alpine", pkg), null, range, "SEMVER", true));
+            }
         }
         foreach (var (cveKey, facts) in seen)
             records.Add(new DuckDbEvidenceRecord("alpine-secdb", Guid.Empty, cveKey, cveKey, facts, [], [], []));
@@ -689,7 +699,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
     {
         var eco = sourceCode switch { "go-advisory" => "go", "cargo-advisory" => "cargo", _ => sourceCode };
         await using var command = db.CreateCommand("""
-            select raw_index_id, advisory_id, identifiers, ecosystem, package_name, purl, version_range_raw, range_type, payload::text
+            select raw_index_id, advisory_id, identifiers, ecosystem, package_name, purl, vulnerable_ranges::text, payload::text
             from stg_ecosystem_advisories where provider = $1 limit $2
             """);
         command.Parameters.AddWithValue(sourceCode);
@@ -705,13 +715,24 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             var ecosystem = reader.IsDBNull(3) ? eco : reader.GetString(3);
             var pkgName = reader.IsDBNull(4) ? null : reader.GetString(4);
             var purl = reader.IsDBNull(5) ? null : reader.GetString(5);
-            var range = reader.IsDBNull(6) ? null : reader.GetString(6);
-            var rangeType = reader.IsDBNull(7) ? null : reader.GetString(7);
             var key = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? advisoryId;
-            records.Add(EmptyRecord(sourceCode, rawId, key, advisoryId) with
+            var facts = new List<DuckDbAffectedFact>();
+            if (!reader.IsDBNull(6) && !string.IsNullOrWhiteSpace(pkgName))
             {
-                AffectedFacts = pkgName is not null ? [new DuckDbAffectedFact("package", ecosystem, pkgName, purl, null, range, rangeType, true)] : []
-            });
+                var ranges = JsonNode.Parse(reader.GetString(6))?.AsArray() ?? [];
+                foreach (var range in ranges)
+                {
+                    var introduced = range?["introduced"]?.GetValue<string>();
+                    var fixedVer = range?["fixed"]?.GetValue<string>();
+                    var rawRange = fixedVer is not null
+                        ? (introduced is not null ? $">= {introduced}, < {fixedVer}" : $"< {fixedVer}")
+                        : (introduced is not null ? $">= {introduced}" : null);
+                    facts.Add(new DuckDbAffectedFact("package", ecosystem, pkgName, purl, null, rawRange, "SEMVER", true));
+                }
+            }
+            if (facts.Count == 0 && !string.IsNullOrWhiteSpace(pkgName))
+                facts.Add(new DuckDbAffectedFact("package", ecosystem, pkgName, purl, null, null, null, true));
+            records.Add(EmptyRecord(sourceCode, rawId, key, advisoryId) with { AffectedFacts = facts });
         }
         return records;
     }
@@ -817,7 +838,8 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             select r.id, r.external_key, r.payload::text
             from source_raw_index r
             join sources s on s.id = r.source_id
-            where s.code = 'cnnvd' and r.normalize_status = 'succeeded'
+            where s.code = 'cnnvd' and r.parse_status = 'succeeded'
+            order by r.updated_at desc
             limit $1
             """);
         command.Parameters.AddWithValue(limit);
@@ -828,16 +850,19 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         {
             var rawId = reader.GetGuid(0);
             var key = reader.GetString(1);
-            var payload = reader.IsDBNull(2) ? null : JsonNode.Parse(reader.GetString(2));
-            var cve = payload?["cveId"]?.GetValue<string>() ?? key;
-            var title = payload?["vulName"]?.GetValue<string>();
-            var desc = payload?["vulDesc"]?.GetValue<string>();
-            var sev = payload?["severity"]?.GetValue<string>();
-            var affected = payload?["affected"]?.AsArray() ?? [];
+            if (reader.IsDBNull(2)) continue;
+            var payload = JsonNode.Parse(reader.GetString(2));
+            if (payload is null) continue;
+            var cve = payload["cveId"]?.GetValue<string>()
+                ?? payload["cve_id"]?.GetValue<string>()
+                ?? payload["cve"]?.GetValue<string>()
+                ?? key;
+            var sev = payload["severity"]?.GetValue<string>();
+            var affected = payload["affected"]?.AsArray() ?? [];
             var facts = new List<DuckDbAffectedFact>();
             foreach (var a in affected)
             {
-                var name = a?["product"]?.GetValue<string>() ?? a?["vendor"]?.GetValue<string>();
+                var name = a?["product"]?.GetValue<string>() ?? a?["vendor"]?.GetValue<string>() ?? a?.GetValue<string>();
                 if (!string.IsNullOrWhiteSpace(name))
                     facts.Add(new DuckDbAffectedFact("package", null, name, null, null, null, null, true));
             }
@@ -881,6 +906,94 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             if (!string.IsNullOrWhiteSpace(url))
                 yield return new DuckDbReference(url, r?["category"]?.GetValue<string>(), []);
         }
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadNpmAdvisoryAsync(int limit, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand("""
+            select raw_index_id, ghsa_id, cve_id, package_name, vulnerable_ranges::text, cvss::text, cwes::text
+            from stg_npm_advisories limit $1
+            """);
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var records = new List<DuckDbEvidenceRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawId = reader.GetGuid(0);
+            var ghsaId = reader.GetString(1);
+            var cve = reader.IsDBNull(2) ? null : reader.GetString(2);
+            var pkgName = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var key = string.IsNullOrWhiteSpace(cve) ? ghsaId : cve;
+            var facts = new List<DuckDbAffectedFact>();
+            if (!reader.IsDBNull(4) && !string.IsNullOrWhiteSpace(pkgName))
+            {
+                var ranges = JsonNode.Parse(reader.GetString(4))?.AsArray() ?? [];
+                foreach (var range in ranges)
+                {
+                    var introduced = range?["introduced"]?.GetValue<string>();
+                    var fixedVer = range?["fixed"]?.GetValue<string>();
+                    var rawRange = fixedVer is not null
+                        ? (introduced is not null ? $">= {introduced}, < {fixedVer}" : $"< {fixedVer}")
+                        : (introduced is not null ? $">= {introduced}" : null);
+                    facts.Add(new DuckDbAffectedFact("package", "npm", pkgName, $"pkg:npm/{Uri.EscapeDataString(pkgName)}", null, rawRange, "SEMVER", true));
+                }
+            }
+            if (facts.Count == 0 && !string.IsNullOrWhiteSpace(pkgName))
+                facts.Add(new DuckDbAffectedFact("package", "npm", pkgName, $"pkg:npm/{Uri.EscapeDataString(pkgName)}", null, null, null, true));
+            var cvss = reader.IsDBNull(5) ? null : JsonNode.Parse(reader.GetString(5));
+            var cwes = reader.IsDBNull(6) ? null : JsonNode.Parse(reader.GetString(6));
+            records.Add(EmptyRecord("npm-advisory", rawId, key, ghsaId) with
+            {
+                AffectedFacts = facts,
+                SeverityScores = ExtractGhsaSeverity(cvss).ToList(),
+                Weaknesses = ExtractGhsaWeaknesses(cwes).ToList()
+            });
+        }
+        return records;
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadPypiAdvisoryAsync(int limit, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand("""
+            select raw_index_id, pysec_id, aliases, package_name, affected::text, references_json::text
+            from stg_pypi_advisories limit $1
+            """);
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var records = new List<DuckDbEvidenceRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawId = reader.GetGuid(0);
+            var pysecId = reader.GetString(1);
+            var aliases = reader.IsDBNull(2) ? [] : reader.GetFieldValue<string[]>(2);
+            var pkgName = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var key = aliases.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? pysecId;
+            var facts = new List<DuckDbAffectedFact>();
+            if (!reader.IsDBNull(4) && !string.IsNullOrWhiteSpace(pkgName))
+            {
+                var affected = JsonNode.Parse(reader.GetString(4))?.AsArray() ?? [];
+                foreach (var a in affected)
+                {
+                    var introduced = a?["introduced"]?.GetValue<string>();
+                    var fixedVer = a?["fixed"]?.GetValue<string>();
+                    var rawRange = fixedVer is not null
+                        ? (introduced is not null ? $">= {introduced}, < {fixedVer}" : $"< {fixedVer}")
+                        : (introduced is not null ? $">= {introduced}" : null);
+                    facts.Add(new DuckDbAffectedFact("package", "pypi", pkgName, $"pkg:pypi/{pkgName.ToLowerInvariant()}", null, rawRange, "SEMVER", true));
+                }
+            }
+            if (facts.Count == 0 && !string.IsNullOrWhiteSpace(pkgName))
+                facts.Add(new DuckDbAffectedFact("package", "pypi", pkgName, $"pkg:pypi/{pkgName.ToLowerInvariant()}", null, null, null, true));
+            var refs = reader.IsDBNull(5) ? null : JsonNode.Parse(reader.GetString(5));
+            records.Add(EmptyRecord("pypi-advisory", rawId, key, pysecId) with
+            {
+                AffectedFacts = facts,
+                References = ExtractReferences(refs).ToList()
+            });
+        }
+        return records;
     }
 
     private static string SqlValue(string? value) =>
