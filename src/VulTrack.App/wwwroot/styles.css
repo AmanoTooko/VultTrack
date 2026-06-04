@@ -1329,12 +1329,59 @@ a.result-item {
   gap: 7px;
 }
 
+.analysis-field.wide {
+  grid-column: 1 / -1;
+}
+
 .analysis-field p,
 .data-gap p {
   color: #3d4654;
   font-size: 13px;
   line-height: 1.45;
   overflow-wrap: anywhere;
+}
+
+.ai-summary-output {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.ai-summary-main {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ai-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-list {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.78);
+  padding: 11px;
+}
+
+.ai-list > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.ai-list ul {
+  display: grid;
+  gap: 5px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: #3d4654;
+  font-size: 13px;
+  line-height: 1.45;
 }
 
 .kv-grid {

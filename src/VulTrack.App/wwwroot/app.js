@@ -1105,6 +1105,7 @@ function renderDetail(data) {
     body.classList.toggle('is-collapsed', expanded);
   });
   bindDetailInteractions(el.detailPane);
+  loadAiSummary(v.id);
 }
 
 function renderHeroMetadata(v, affectedByEco, records, refs, exploits = []) {
@@ -1160,12 +1161,12 @@ function renderAiAnalysisPlan(v, affected, refs, records) {
   return `
     <div class="section-title-row">
       <h3 class="section-h">AI Analysis</h3>
-      <span class="badge warn">Planned</span>
+      <span class="badge">Cache first</span>
     </div>
     <div class="ai-grid">
       <div class="analysis-field">
-        <span>Impact brief</span>
-        <p>Pending AI-generated explanation based on descriptions, CVSS metrics, affected components, and source advisories.</p>
+        <span>Status</span>
+        <p data-ai-summary-status>Checking cached summary.</p>
       </div>
       <div class="analysis-field">
         <span>Affected systems</span>
@@ -1177,8 +1178,97 @@ function renderAiAnalysisPlan(v, affected, refs, records) {
       </div>
       <div class="analysis-field">
         <span>Evidence inputs</span>
-        <p>${fmt(records.length)} source records and ${fmt(refs.length)} references are available for the future AI pipeline.</p>
+        <p>${fmt(records.length)} source records and ${fmt(refs.length)} references are available for the cached AI pipeline.</p>
       </div>
+    </div>
+    <div class="ai-summary-output" data-ai-summary-output></div>
+  `;
+}
+
+async function loadAiSummary(vulnerabilityId) {
+  const section = el.detailPane.querySelector('#ai-analysis');
+  if (!section) return;
+  try {
+    const summary = await api(`/api/v1/vulnerability.aiSummary?id=${encodeURIComponent(vulnerabilityId)}`);
+    if (state.selectedId !== vulnerabilityId) return;
+    renderAiSummary(section, vulnerabilityId, summary);
+  } catch (error) {
+    const status = section.querySelector('[data-ai-summary-status]');
+    if (status) status.textContent = `AI summary unavailable: ${error.message}`;
+  }
+}
+
+function renderAiSummary(section, vulnerabilityId, result) {
+  const status = section.querySelector('[data-ai-summary-status]');
+  const output = section.querySelector('[data-ai-summary-output]');
+  if (!status || !output) return;
+
+  if (result.summary) {
+    const s = result.summary;
+    status.textContent = `${result.cached ? 'Loaded from cache' : 'Generated'} with ${result.model}; evidence ${String(result.evidenceHash || '').slice(0, 12)}.`;
+    output.innerHTML = `
+      <div class="ai-summary-main">
+        <div class="analysis-field wide">
+          <span>Executive summary</span>
+          <p>${escapeHtml(s.executiveSummary || 'No summary text returned.')}</p>
+        </div>
+        <div class="analysis-field">
+          <span>Exploitability</span>
+          <p><strong>${escapeHtml(s.exploitabilityAssessment?.level || 'unknown')}</strong> ${escapeHtml(s.exploitabilityAssessment?.rationale || '')}</p>
+        </div>
+        <div class="analysis-field">
+          <span>Remediation</span>
+          <p><strong>${escapeHtml(s.remediation?.priority || 'track')}</strong> ${escapeHtml((s.remediation?.recommendedActions || []).slice(0, 3).join(' '))}</p>
+        </div>
+        <div class="analysis-field">
+          <span>TARA draft</span>
+          <p>${escapeHtml(s.tara?.riskRationale || s.tara?.threatScenario || 'unknown')}</p>
+        </div>
+        <div class="analysis-field">
+          <span>ISO 21434</span>
+          <p>${escapeHtml((s.iso21434?.workProducts || []).slice(0, 3).join(' / ') || s.iso21434?.cybersecurityGoal || 'unknown')}</p>
+        </div>
+      </div>
+      ${renderAiList('Signals', s.exploitabilityAssessment?.signals)}
+      ${renderAiList('Missing evidence', s.missingEvidence)}
+      ${renderAiList('Citations', s.citations)}
+    `;
+    return;
+  }
+
+  status.textContent = result.message || 'No cached AI summary exists for this evidence hash.';
+  output.innerHTML = `
+    <div class="ai-empty-actions">
+      <span class="badge ${result.configured ? 'low' : 'warn'}">${result.configured ? 'configured' : 'not configured'}</span>
+      <span class="badge">input ${fmt(result.inputChars || 0)} chars</span>
+      ${state.authenticated ? '<button class="tab" type="button" data-ai-generate>Generate</button>' : '<span class="muted">Admin login required to generate.</span>'}
+    </div>
+  `;
+  section.querySelector('[data-ai-generate]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = 'Generating';
+    try {
+      const generated = await api('/api/v1/admin.vulnerability.aiSummary', {
+        method: 'POST',
+        body: JSON.stringify({ id: vulnerabilityId, force: false })
+      });
+      renderAiSummary(section, vulnerabilityId, generated);
+    } catch (error) {
+      status.textContent = `Generation failed: ${error.message}`;
+      button.disabled = false;
+      button.textContent = 'Generate';
+    }
+  });
+}
+
+function renderAiList(title, values) {
+  const items = (values || []).filter(Boolean).slice(0, 8);
+  if (!items.length) return '';
+  return `
+    <div class="ai-list">
+      <span>${escapeHtml(title)}</span>
+      <ul>${items.map(item => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul>
     </div>
   `;
 }

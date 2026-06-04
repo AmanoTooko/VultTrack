@@ -40,6 +40,7 @@ builder.Services.AddSingleton<DuckDbEvidenceNormalizer>();
 builder.Services.AddSingleton<VulnerabilityDetailService>();
 builder.Services.AddSingleton<VulnerabilityDetailSnapshotStore>();
 builder.Services.AddSingleton<VulnerabilityDetailSnapshotBuilder>();
+builder.Services.AddHttpClient<AiVulnerabilitySummaryService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SourceScheduler>());
 
 var app = builder.Build();
@@ -443,6 +444,23 @@ app.MapPost("/api/v1/admin.detailSnapshot.rebuild", async (HttpContext context, 
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     var result = await builder.RebuildAsync(request, ct);
     return ApiResult.Ok(result);
+});
+
+app.MapGet("/api/v1/vulnerability.aiSummary", async (AiVulnerabilitySummaryService summaries, Guid id, CancellationToken ct) =>
+{
+    var result = await summaries.GetAsync(id, generate: false, force: false, ct);
+    return result is null
+        ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString())
+        : ApiResult.Ok(result);
+});
+
+app.MapPost("/api/v1/admin.vulnerability.aiSummary", async (HttpContext context, AdminAuthService auth, AiVulnerabilitySummaryService summaries, AiSummaryRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var result = await summaries.GetAsync(request.Id, generate: true, force: request.Force, ct);
+    return result is null
+        ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", request.Id.ToString())
+        : ApiResult.Ok(result);
 });
 
 app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, VulnerabilitySearchRequest request, CancellationToken ct) =>
@@ -1387,6 +1405,22 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_descriptions_source_fk on vulnerability_descriptions(source_id)",
         "create index if not exists ix_identifier_edges_source_fk on vulnerability_identifier_edges(source_id)",
         "create index if not exists ix_identifier_index_source_fk on vulnerability_identifier_index(source_id)",
+        """
+        create table if not exists ai_vulnerability_summaries (
+          vulnerability_id uuid not null references vulnerabilities(id) on delete cascade,
+          model text not null,
+          prompt_version text not null,
+          evidence_hash text not null,
+          summary_json jsonb not null,
+          input_json jsonb not null,
+          input_chars integer not null default 0,
+          output_chars integer not null default 0,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now(),
+          primary key (vulnerability_id, model, prompt_version, evidence_hash)
+        )
+        """,
+        "create index if not exists ix_ai_summaries_vuln_latest on ai_vulnerability_summaries(vulnerability_id, updated_at desc)",
         """
         do $$
         begin

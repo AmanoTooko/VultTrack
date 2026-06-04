@@ -57,6 +57,12 @@ services:
     environment:
       DOTNET_CLI_TELEMETRY_OPTOUT: "1"
       DOTNET_SYSTEM_NET_DISABLEIPV6: "1"
+      VULTRACK_AI_ENABLED: ${VULTRACK_AI_ENABLED:-false}
+      VULTRACK_AI_BASE_URL: ${VULTRACK_AI_BASE_URL:-}
+      VULTRACK_AI_API_KEY: ${VULTRACK_AI_API_KEY:-}
+      VULTRACK_AI_MODEL: ${VULTRACK_AI_MODEL:-gemini-3.1-pro-preview}
+      VULTRACK_AI_MAX_INPUT_CHARS: ${VULTRACK_AI_MAX_INPUT_CHARS:-12000}
+      VULTRACK_AI_MAX_OUTPUT_TOKENS: ${VULTRACK_AI_MAX_OUTPUT_TOKENS:-1100}
     volumes:
       - .:/workspace
       - nuget-cache:/root/.nuget/packages

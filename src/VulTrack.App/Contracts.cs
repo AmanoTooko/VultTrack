@@ -38,6 +38,10 @@ public sealed record DetailSnapshotBuildRequest(
     int Concurrency = 4,
     int GzipLevel = 6);
 
+public sealed record AiSummaryRequest(
+    Guid Id,
+    bool Force = false);
+
 public sealed record ComponentVulnerabilitySearchRequest(
     string? ComponentName = null,
     string? Name = null,

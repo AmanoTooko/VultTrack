@@ -545,6 +545,23 @@ create table if not exists vulnerability_detail_blocks (
   expires_at timestamptz
 );
 
+create table if not exists ai_vulnerability_summaries (
+  vulnerability_id uuid not null references vulnerabilities(id) on delete cascade,
+  model text not null,
+  prompt_version text not null,
+  evidence_hash text not null,
+  summary_json jsonb not null,
+  input_json jsonb not null,
+  input_chars integer not null default 0,
+  output_chars integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  primary key (vulnerability_id, model, prompt_version, evidence_hash)
+);
+
+create index if not exists ix_ai_summaries_vuln_latest
+  on ai_vulnerability_summaries(vulnerability_id, updated_at desc);
+
 create table if not exists components (
   id uuid primary key default gen_random_uuid(),
   component_key text not null unique,
