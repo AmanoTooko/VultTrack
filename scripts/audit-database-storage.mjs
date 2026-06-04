@@ -1,8 +1,11 @@
 #!/usr/bin/env node
+import { readdir, stat } from 'node:fs/promises';
+import path from 'node:path';
 import pg from 'pg';
 
 const { Client } = pg;
 const databaseUrl = process.env.DATABASE_URL ?? 'postgres://vultrack:vultrack@127.0.0.1:5432/vultrack';
+const detailSnapshotDir = path.resolve(process.env.VULTRACK_DETAIL_SNAPSHOT_DIR ?? 'data/vulnerability-details');
 const client = new Client({ connectionString: databaseUrl });
 await client.connect();
 
@@ -63,15 +66,46 @@ try {
       )
     order by c.conrelid::regclass::text, c.conname
   `);
+  const rawStatus = await client.query(`
+    select s.code,
+           r.normalize_status,
+           count(*)::bigint records,
+           pg_size_pretty(sum(pg_column_size(r.*))::bigint) approx_raw_index_size
+    from source_raw_index r
+    join sources s on s.id = r.source_id
+    group by s.code, r.normalize_status
+    order by s.code, r.normalize_status
+  `);
+  const rawPendingBySource = await client.query(`
+    select s.code,
+           count(*)::bigint pending
+    from source_raw_index r
+    join sources s on s.id = r.source_id
+    where r.normalize_status in ('pending', 'failed')
+    group by s.code
+    having count(*) > 0
+    order by count(*) desc, s.code
+  `);
+  const detailQueue = await client.query(`
+    select count(*)::bigint queued,
+           min(queued_at) oldest_queued_at,
+           max(queued_at) newest_queued_at
+    from vulnerability_detail_snapshot_queue
+  `);
   const candidateUnusedIndexes = indexes.rows.filter(index =>
     Number(index.scans) === 0 &&
     Number(index.size_bytes) >= 50 * 1024 * 1024 &&
     !index.index_name.endsWith('_pkey')
   );
+  const detailSnapshots = await directorySummary(detailSnapshotDir);
 
   console.log(JSON.stringify({
     generatedAt: new Date().toISOString(),
     database: database.rows[0],
+    rawPendingBySource: rawPendingBySource.rows,
+    rawStatus: rawStatus.rows,
+    detailSnapshotQueue: detailQueue.rows[0],
+    detailSnapshots,
     residualTables: residualTables.rows.map(row => row.table_name),
     missingForeignKeyIndexes: missingForeignKeyIndexes.rows,
     largestTables: tables.rows,
@@ -80,4 +114,47 @@ try {
   }, null, 2));
 } finally {
   await client.end();
+}
+
+async function directorySummary(root) {
+  try {
+    const entries = await walk(root);
+    const gzipShards = entries.filter(entry => entry.path.endsWith('.json.gz'));
+    return {
+      root,
+      exists: true,
+      files: entries.length,
+      bytes: entries.reduce((sum, entry) => sum + entry.bytes, 0),
+      gzipShards: gzipShards.length,
+      gzipShardBytes: gzipShards.reduce((sum, entry) => sum + entry.bytes, 0),
+      largestFiles: entries
+        .sort((a, b) => b.bytes - a.bytes)
+        .slice(0, 20)
+    };
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      return { root, exists: false, files: 0, bytes: 0, gzipShards: 0, gzipShardBytes: 0, largestFiles: [] };
+    }
+    throw error;
+  }
+}
+
+async function walk(root) {
+  const entries = [];
+  const children = await readdir(root, { withFileTypes: true });
+  for (const child of children) {
+    const fullPath = path.join(root, child.name);
+    if (child.isDirectory()) {
+      entries.push(...await walk(fullPath));
+      continue;
+    }
+
+    if (!child.isFile()) continue;
+    const info = await stat(fullPath);
+    entries.push({
+      path: path.relative(root, fullPath),
+      bytes: info.size
+    });
+  }
+  return entries;
 }

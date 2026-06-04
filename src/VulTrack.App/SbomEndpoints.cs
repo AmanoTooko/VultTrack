@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Npgsql;
 
@@ -464,8 +465,55 @@ public static class SbomEndpoints
         return ApiResult.Ok(new { deleted = true });
     }
 
-    private static async Task<IResult> Export(NpgsqlDataSource db, Guid id, CancellationToken ct)
+    private static async Task<IResult> Export(NpgsqlDataSource db, VulnerabilityDetailSnapshotStore snapshots, Guid id, CancellationToken ct)
     {
+        var exportRows = new List<SbomExportRow>();
+        await using var cmd = db.CreateCommand("""
+            select sc.name, sc.purl, sc.cpe23_uri, sc.vendor, sc.product, sc.version,
+                   sv.vulnerability_id,
+                   v.primary_identifier, sv.normalized_range, sv.version_matched,
+                   v.severity_label, v.max_cvss_score, v.title
+            from sbom_components sc
+            left join sbom_vulnerabilities sv on sv.sbom_component_id = sc.id
+            left join vulnerabilities v on v.id = sv.vulnerability_id
+            where sc.sbom_id = $1
+            order by lower(coalesce(sc.name, sc.product, sc.purl, sc.cpe23_uri, '')), coalesce(v.max_cvss_score, 0) desc nulls last, v.primary_identifier
+            """);
+        cmd.Parameters.AddWithValue(id);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            exportRows.Add(new SbomExportRow(
+                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? "" : reader.GetString(3),
+                reader.IsDBNull(4) ? "" : reader.GetString(4),
+                reader.IsDBNull(5) ? "" : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetGuid(6),
+                reader.IsDBNull(7) ? "" : reader.GetString(7),
+                reader.IsDBNull(8) ? "" : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetBoolean(9),
+                reader.IsDBNull(10) ? "" : reader.GetString(10),
+                reader.IsDBNull(11) ? null : reader.GetDecimal(11),
+                reader.IsDBNull(12) ? "" : reader.GetString(12)));
+        }
+
+        var vulnerabilityIds = exportRows
+            .Select(row => row.VulnerabilityId)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .Distinct()
+            .ToArray();
+        var snapshotDetails = await snapshots.TryGetManyAsync(vulnerabilityIds, ct);
+        var fallbackIds = vulnerabilityIds
+            .Where(vulnerabilityId =>
+                !snapshotDetails.TryGetValue(vulnerabilityId, out var detail) ||
+                string.IsNullOrWhiteSpace(SnapshotWeaknesses(detail)) ||
+                string.IsNullOrWhiteSpace(SnapshotReferenceUrls(detail)))
+            .ToArray();
+        var fallbackDetails = await LoadSbomExportFallbackDetailsAsync(db, fallbackIds, ct);
+
         var rows = new StringBuilder();
         rows.AppendLine("""
             <html><head><meta charset="utf-8"></head><body>
@@ -476,48 +524,201 @@ public static class SbomEndpoints
             </tr></thead><tbody>
             """);
 
-        await using var cmd = db.CreateCommand("""
-            select sc.name, sc.purl, sc.cpe23_uri, sc.vendor, sc.product, sc.version,
-                   v.primary_identifier, sv.normalized_range, sv.version_matched,
-                   v.severity_label, v.max_cvss_score, v.title,
-                   coalesce(w.cwes, '') as cwes,
-                   coalesce(refs.urls, '') as urls
-            from sbom_components sc
-            left join sbom_vulnerabilities sv on sv.sbom_component_id = sc.id
-            left join vulnerabilities v on v.id = sv.vulnerability_id
-            left join lateral (
-              select string_agg(distinct nullif(weakness_id,''), '; ') as cwes
-              from vulnerability_weaknesses
-              where vulnerability_id = v.id
-            ) w on true
-            left join lateral (
-              select string_agg(url, '; ') as urls
-              from (
-                select distinct url
-                from vulnerability_references
-                where vulnerability_id = v.id and url is not null
-                order by url
-                limit 20
-              ) r
-            ) refs on true
-            where sc.sbom_id = $1
-            order by lower(coalesce(sc.name, sc.product, sc.purl, sc.cpe23_uri, '')), coalesce(v.max_cvss_score, 0) desc nulls last, v.primary_identifier
-            """);
-        cmd.Parameters.AddWithValue(id);
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        foreach (var row in exportRows)
         {
-            rows.Append("<tr>");
-            for (var i = 0; i < reader.FieldCount; i++)
-                rows.Append("<td>").Append(Html(reader.IsDBNull(i) ? "" : reader.GetValue(i)?.ToString() ?? "")).Append("</td>");
-            rows.AppendLine("</tr>");
+            JsonElement? snapshotDetail = row.VulnerabilityId is Guid vulnerabilityId && snapshotDetails.TryGetValue(vulnerabilityId, out var detail)
+                ? detail
+                : null;
+            var fallback = row.VulnerabilityId is Guid fallbackId && fallbackDetails.TryGetValue(fallbackId, out var fallbackDetail)
+                ? fallbackDetail
+                : SbomExportDetail.Empty;
+            var severity = SnapshotVulnerabilityText(snapshotDetail, "severityLabel") ?? row.Severity;
+            var cvss = SnapshotVulnerabilityDecimal(snapshotDetail, "maxCvssScore") ?? row.Cvss;
+            var title = SnapshotVulnerabilityText(snapshotDetail, "title") ?? row.Title;
+            var cwes = FirstText(SnapshotWeaknesses(snapshotDetail), fallback.Cwes);
+            var urls = FirstText(SnapshotReferenceUrls(snapshotDetail), fallback.Urls);
+
+            AppendCells(rows,
+                row.ComponentName,
+                row.ComponentPurl,
+                row.Cpe23Uri,
+                row.Vendor,
+                row.Product,
+                row.ComponentVersion,
+                row.Cve,
+                row.AffectedRange,
+                row.VersionMatched?.ToString() ?? "",
+                severity,
+                cvss?.ToString() ?? "",
+                cwes,
+                urls,
+                title);
         }
+
         rows.AppendLine("</tbody></table></body></html>");
 
         return Results.File(
             Encoding.UTF8.GetBytes(rows.ToString()),
             "application/vnd.ms-excel; charset=utf-8",
             $"vultrack-sbom-{id:N}.xls");
+    }
+
+    private static async Task<IReadOnlyDictionary<Guid, SbomExportDetail>> LoadSbomExportFallbackDetailsAsync(NpgsqlDataSource db, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)
+    {
+        var details = new Dictionary<Guid, SbomExportDetail>();
+        if (vulnerabilityIds.Count == 0) return details;
+
+        await using (var cweCmd = db.CreateCommand("""
+            select vulnerability_id, string_agg(distinct nullif(weakness_id,''), '; ') as cwes
+            from vulnerability_weaknesses
+            where vulnerability_id = any($1)
+            group by vulnerability_id
+            """))
+        {
+            cweCmd.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+            await using var reader = await cweCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var vulnerabilityId = reader.GetGuid(0);
+                var current = details.TryGetValue(vulnerabilityId, out var existing)
+                    ? existing
+                    : SbomExportDetail.Empty;
+                details[vulnerabilityId] = current with
+                {
+                    Cwes = reader.IsDBNull(1) ? "" : reader.GetString(1)
+                };
+            }
+        }
+
+        await using (var urlsCmd = db.CreateCommand("""
+            with distinct_urls as (
+              select distinct vulnerability_id, url
+              from vulnerability_references
+              where vulnerability_id = any($1)
+                and url is not null
+            ),
+            ranked_urls as (
+              select vulnerability_id, url,
+                     row_number() over (partition by vulnerability_id order by url) as rn
+              from distinct_urls
+            )
+            select vulnerability_id, string_agg(url, '; ' order by url) as urls
+            from ranked_urls
+            where rn <= 20
+            group by vulnerability_id
+            """))
+        {
+            urlsCmd.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+            await using var reader = await urlsCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var vulnerabilityId = reader.GetGuid(0);
+                var current = details.TryGetValue(vulnerabilityId, out var existing)
+                    ? existing
+                    : SbomExportDetail.Empty;
+                details[vulnerabilityId] = current with
+                {
+                    Urls = reader.IsDBNull(1) ? "" : reader.GetString(1)
+                };
+            }
+        }
+
+        return details;
+    }
+
+    private static void AppendCells(StringBuilder rows, params string?[] values)
+    {
+        rows.Append("<tr>");
+        foreach (var value in values)
+            rows.Append("<td>").Append(Html(value ?? "")).Append("</td>");
+        rows.AppendLine("</tr>");
+    }
+
+    private static string? SnapshotVulnerabilityText(JsonElement? detail, string propertyName)
+    {
+        if (detail is not JsonElement element ||
+            !element.TryGetProperty("vulnerability", out var vulnerability) ||
+            !vulnerability.TryGetProperty(propertyName, out var value) ||
+            value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString();
+    }
+
+    private static decimal? SnapshotVulnerabilityDecimal(JsonElement? detail, string propertyName)
+    {
+        if (detail is not JsonElement element ||
+            !element.TryGetProperty("vulnerability", out var vulnerability) ||
+            !vulnerability.TryGetProperty(propertyName, out var value) ||
+            value.ValueKind != JsonValueKind.Number)
+        {
+            return null;
+        }
+
+        return value.TryGetDecimal(out var parsed) ? parsed : null;
+    }
+
+    private static string SnapshotWeaknesses(JsonElement? detail)
+    {
+        if (detail is not JsonElement element ||
+            !element.TryGetProperty("weaknesses", out var weaknesses) ||
+            weaknesses.ValueKind != JsonValueKind.Array)
+        {
+            return "";
+        }
+
+        return string.Join("; ", weaknesses
+            .EnumerateArray()
+            .Select(weakness =>
+                JsonPropertyText(weakness, "weakness_id") ??
+                JsonPropertyText(weakness, "weaknessId") ??
+                JsonPropertyText(weakness, "description"))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(30));
+    }
+
+    private static string SnapshotReferenceUrls(JsonElement? detail)
+    {
+        if (detail is not JsonElement element) return "";
+
+        var urls = new List<string>();
+        if (element.TryGetProperty("references", out var references) &&
+            references.ValueKind == JsonValueKind.Array)
+        {
+            urls.AddRange(references
+                .EnumerateArray()
+                .Select(reference => JsonPropertyText(reference, "url"))
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value!));
+        }
+
+        if (urls.Count == 0 &&
+            element.TryGetProperty("sourceUrls", out var sourceUrls) &&
+            sourceUrls.ValueKind == JsonValueKind.Object)
+        {
+            urls.AddRange(sourceUrls
+                .EnumerateObject()
+                .Select(property => property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() : null)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value!));
+        }
+
+        return string.Join("; ", urls
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .Take(20));
+    }
+
+    private static string? JsonPropertyText(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var value) &&
+               value.ValueKind != JsonValueKind.Null &&
+               value.ValueKind != JsonValueKind.Undefined
+            ? value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString()
+            : null;
     }
 
     private static string? StripVersion(string purl) =>
@@ -626,7 +827,7 @@ public static class SbomEndpoints
     }
 
     private static string FirstText(params string?[] values) =>
-        values.First(x => !string.IsNullOrWhiteSpace(x))!.Trim();
+        values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x))?.Trim() ?? "";
 
     private static string? SbomNameFromSerial(string? serialNumber)
     {
@@ -641,6 +842,26 @@ public static class SbomEndpoints
     private static string UnescapeCpePart(string value) => value.Replace("\\:", ":").Replace("\\\\", "\\");
 
     private static string EscapeCpePart(string value) => value.Replace("\\", "\\\\").Replace(":", "\\:");
+
+    private sealed record SbomExportRow(
+        string ComponentName,
+        string ComponentPurl,
+        string Cpe23Uri,
+        string Vendor,
+        string Product,
+        string ComponentVersion,
+        Guid? VulnerabilityId,
+        string Cve,
+        string AffectedRange,
+        bool? VersionMatched,
+        string Severity,
+        decimal? Cvss,
+        string Title);
+
+    private sealed record SbomExportDetail(string Cwes = "", string Urls = "")
+    {
+        public static readonly SbomExportDetail Empty = new();
+    }
 
     private sealed record SbomComponentDraft(
         string? Purl,

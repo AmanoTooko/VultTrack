@@ -29,6 +29,15 @@ public sealed record AdminSourceActionRequest(
     bool Force = false,
     int Limit = 100);
 
+public sealed record DetailSnapshotBuildRequest(
+    string? Shard = null,
+    int Limit = 100,
+    string? Since = null,
+    Guid[]? Ids = null,
+    bool ConsumeQueue = false,
+    int Concurrency = 4,
+    int GzipLevel = 6);
+
 public sealed record ComponentVulnerabilitySearchRequest(
     string? ComponentName = null,
     string? Name = null,

@@ -1,9 +1,10 @@
 using System.Text.Json.Nodes;
+using System.Diagnostics;
 using Npgsql;
 
 namespace VulTrack.App;
 
-public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer)
+public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affectedHooks, IVulnerabilityCanonicalizer canonicalizer, ILogger<OsvRawNormalizer> logger)
     : NormalizerBase(affectedHooks, canonicalizer), ISourceScopedRawNormalizer
 {
     public string SourceCode => "osv-family";
@@ -101,8 +102,7 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                 }
             }
 
-            var succeededIds = new List<Guid>();
-            var affectedVulnIds = new List<Guid>();
+            var drafts = new List<OsvNormalizationDraft>();
             foreach (var row in rows)
             {
                 try
@@ -112,17 +112,17 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                     var primary = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? row.OsvId;
                     var title = payload?["summary"]?.GetValue<string>();
                     var description = payload?["details"]?.GetValue<string>() ?? title;
-                    var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, primary, title, description, "active", DateValue(payload, "published"), DateValue(payload, "modified"), identifiers, ct);
-                    var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.OsvId, title, description, "active", ct);
-                    await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
-                    await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, description), ct);
-                    await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, SourceFactExtractor.OsvSeverities(payload?["severity"]), ct);
-                    await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(payload?["references"]), ct);
-                    var facts = ExtractAffectedFacts(payload).ToList();
-                    await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
-                    if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
-                    succeededIds.Add(row.RawIndexId);
-                    processed++;
+                    var draft = new VulnerabilityCanonicalDraft(primary, title, description, "active", DateValue(payload, "published"), DateValue(payload, "modified"), identifiers, row.SourceId, row.RawIndexId);
+                    drafts.Add(new OsvNormalizationDraft(
+                        row.RawIndexId,
+                        row.OsvId,
+                        row.SourceId,
+                        row.Payload,
+                        draft,
+                        SourceFactExtractor.Descriptions(title, description),
+                        SourceFactExtractor.OsvSeverities(payload?["severity"]),
+                        SourceFactExtractor.References(payload?["references"]),
+                        ExtractAffectedFacts(payload).ToList()));
                 }
                 catch
                 {
@@ -130,13 +130,165 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                 }
             }
 
-            await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
-            await MarkNormalizedBatchAsync(connection, succeededIds, ct);
+            if (drafts.Count > 0)
+            {
+                var resolveWatch = Stopwatch.StartNew();
+                var cache = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, drafts.Select(x => x.CanonicalDraft).ToList(), ct);
+                resolveWatch.Stop();
+                var canonicalized = new List<OsvCanonicalizedDraft>();
+                var canonicalWatch = Stopwatch.StartNew();
+                foreach (var draft in drafts)
+                {
+                    try
+                    {
+                        var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, draft.CanonicalDraft, cache, ct);
+                        canonicalized.Add(new OsvCanonicalizedDraft(draft, vulnerabilityId));
+                    }
+                    catch
+                    {
+                        failed++;
+                    }
+                }
+                canonicalWatch.Stop();
+                var remapWatch = Stopwatch.StartNew();
+                var currentCanonicalIds = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, canonicalized.Select(x => x.Draft.CanonicalDraft).ToList(), ct);
+                var remapped = 0;
+                canonicalized = canonicalized
+                    .Select(item =>
+                    {
+                        var currentId = ResolveCanonicalIdFromCache(item.Draft.CanonicalDraft, currentCanonicalIds, item.VulnerabilityId);
+                        if (currentId != item.VulnerabilityId) remapped++;
+                        return item with { VulnerabilityId = currentId };
+                    })
+                    .ToList();
+                remapWatch.Stop();
+                logger.LogInformation("OSV normalize {SourceCode}: parsed={Parsed}, canonicalized={Canonicalized}, resolve_ms={ResolveMs}, canonical_ms={CanonicalMs}.",
+                    tableSourceCode, drafts.Count, canonicalized.Count, resolveWatch.ElapsedMilliseconds, canonicalWatch.ElapsedMilliseconds);
+                if (remapped > 0)
+                {
+                    logger.LogInformation("OSV normalize {SourceCode}: remapped {Remapped} in-batch canonical ids after merges in {RemapMs} ms.",
+                        tableSourceCode, remapped, remapWatch.ElapsedMilliseconds);
+                }
+
+                var batchResult = await ProcessCanonicalizedBatchAsync(connection, canonicalized, ct);
+                processed += batchResult.Processed;
+                failed += batchResult.Failed;
+                await MarkNormalizedBatchAsync(connection, batchResult.SucceededRawIndexIds, ct);
+            }
 
             if (processed >= limit) break;
         }
 
         return new NormalizeBatchResult(SourceCode, processed, failed);
+    }
+
+    private async Task<(int Processed, int Failed, IReadOnlyList<Guid> SucceededRawIndexIds)> ProcessCanonicalizedBatchAsync(NpgsqlConnection connection, IReadOnlyList<OsvCanonicalizedDraft> canonicalized, CancellationToken ct)
+    {
+        if (canonicalized.Count == 0) return (0, 0, []);
+
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+        try
+        {
+            var recordInputs = canonicalized
+                .Select(item => new VulnerabilityRecordBatchItem(
+                    item.VulnerabilityId,
+                    item.Draft.SourceId,
+                    item.Draft.RawIndexId,
+                    item.Draft.SourceRecordId,
+                    item.Draft.CanonicalDraft.Title,
+                    item.Draft.CanonicalDraft.Description,
+                    "active"))
+                .ToList();
+
+            var watch = Stopwatch.StartNew();
+            var recordIds = await UpsertRecordsBatchAsync(connection, recordInputs, ct);
+            var recordsMs = watch.ElapsedMilliseconds;
+            var descriptionItems = new List<DescriptionBatchItem>();
+            var severityItems = new List<SeverityScoreBatchItem>();
+            var referenceItems = new List<ReferenceBatchItem>();
+            var affectedItems = new List<AffectedFactBatchItem>();
+            var affectedVulnIds = new List<Guid>();
+            var succeededIds = new List<Guid>();
+
+            foreach (var item in canonicalized)
+            {
+                var key = (item.Draft.SourceId, item.Draft.SourceRecordId, item.Draft.RawIndexId);
+                if (!recordIds.TryGetValue(key, out var recordId))
+                    throw new InvalidOperationException($"Missing vulnerability record id for OSV raw {item.Draft.RawIndexId}");
+
+                descriptionItems.Add(new DescriptionBatchItem(item.VulnerabilityId, recordId, item.Draft.SourceId, item.Draft.Descriptions));
+                severityItems.Add(new SeverityScoreBatchItem(item.VulnerabilityId, recordId, item.Draft.SourceId, item.Draft.RawIndexId, item.Draft.Severities));
+                referenceItems.Add(new ReferenceBatchItem(item.VulnerabilityId, recordId, item.Draft.SourceId, item.Draft.References));
+                affectedItems.Add(new AffectedFactBatchItem(item.VulnerabilityId, recordId, item.Draft.SourceId, item.Draft.RawIndexId, item.Draft.AffectedFacts));
+                if (item.Draft.AffectedFacts.Count > 0) affectedVulnIds.Add(item.VulnerabilityId);
+                succeededIds.Add(item.Draft.RawIndexId);
+            }
+
+            watch.Restart();
+            await InsertDescriptionsBatchAsync(connection, descriptionItems, ct);
+            var descriptionsMs = watch.ElapsedMilliseconds;
+            watch.Restart();
+            await InsertSeverityScoresBatchAsync(connection, severityItems, ct);
+            var severitiesMs = watch.ElapsedMilliseconds;
+            watch.Restart();
+            await InsertReferencesBatchAsync(connection, referenceItems, ct);
+            var referencesMs = watch.ElapsedMilliseconds;
+            watch.Restart();
+            await InsertAffectedFactsBatchAsync(connection, affectedItems, ct);
+            var affectedMs = watch.ElapsedMilliseconds;
+            watch.Restart();
+            await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
+            var flushMs = watch.ElapsedMilliseconds;
+            logger.LogInformation("OSV batch write count={Count}: records_ms={RecordsMs}, descriptions_ms={DescriptionsMs}, severities_ms={SeveritiesMs}, references_ms={ReferencesMs}, affected_ms={AffectedMs}, flush_ms={FlushMs}.",
+                canonicalized.Count, recordsMs, descriptionsMs, severitiesMs, referencesMs, affectedMs, flushMs);
+            return (canonicalized.Count, 0, succeededIds);
+        }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected && attempt == 1)
+        {
+            logger.LogWarning(ex, "OSV batch normalize deadlocked for {Count} records; retrying batch once.", canonicalized.Count);
+            await Task.Delay(500, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "OSV batch normalize failed for {Count} records; falling back to per-record writes.", canonicalized.Count);
+            return await ProcessCanonicalizedIndividuallyAsync(connection, canonicalized, ct);
+        }
+        }
+
+        return await ProcessCanonicalizedIndividuallyAsync(connection, canonicalized, ct);
+    }
+
+    private async Task<(int Processed, int Failed, IReadOnlyList<Guid> SucceededRawIndexIds)> ProcessCanonicalizedIndividuallyAsync(NpgsqlConnection connection, IReadOnlyList<OsvCanonicalizedDraft> canonicalized, CancellationToken ct)
+    {
+        var processed = 0;
+        var failed = 0;
+        var succeededIds = new List<Guid>();
+        var affectedVulnIds = new List<Guid>();
+
+        foreach (var item in canonicalized)
+        {
+            try
+            {
+                var draft = item.Draft;
+                var recordId = await UpsertRecordAsync(connection, item.VulnerabilityId, draft.SourceId, draft.RawIndexId, draft.SourceRecordId, draft.CanonicalDraft.Title, draft.CanonicalDraft.Description, "active", ct);
+                await UpsertIdentifiersAsync(connection, item.VulnerabilityId, draft.SourceId, draft.RawIndexId, draft.CanonicalDraft.Identifiers, ct);
+                await InsertDescriptionsAsync(connection, item.VulnerabilityId, recordId, draft.SourceId, draft.Descriptions, ct);
+                await InsertSeverityScoresAsync(connection, item.VulnerabilityId, recordId, draft.SourceId, draft.RawIndexId, draft.Severities, ct);
+                await InsertReferencesAsync(connection, item.VulnerabilityId, recordId, draft.SourceId, draft.References, ct);
+                await InsertAffectedFactsAsync(connection, item.VulnerabilityId, recordId, draft.SourceId, draft.RawIndexId, draft.AffectedFacts, ct);
+                if (draft.AffectedFacts.Count > 0) affectedVulnIds.Add(item.VulnerabilityId);
+                succeededIds.Add(draft.RawIndexId);
+                processed++;
+            }
+            catch
+            {
+                failed++;
+            }
+        }
+
+        await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
+        return (processed, failed, succeededIds);
     }
 
     private static IEnumerable<AffectedFactDraft> ExtractAffectedFacts(JsonNode? payload)
@@ -183,4 +335,17 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
             _ => null
         };
     }
+
+    private sealed record OsvNormalizationDraft(
+        Guid RawIndexId,
+        string SourceRecordId,
+        Guid SourceId,
+        string Payload,
+        VulnerabilityCanonicalDraft CanonicalDraft,
+        IReadOnlyList<DescriptionDraft> Descriptions,
+        IReadOnlyList<SeverityScoreDraft> Severities,
+        IReadOnlyList<ReferenceDraft> References,
+        IReadOnlyList<AffectedFactDraft> AffectedFacts);
+
+    private sealed record OsvCanonicalizedDraft(OsvNormalizationDraft Draft, Guid VulnerabilityId);
 }

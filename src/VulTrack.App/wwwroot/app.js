@@ -1104,6 +1104,7 @@ function renderDetail(data) {
     descriptionToggle.textContent = expanded ? 'Show full description' : 'Show less';
     body.classList.toggle('is-collapsed', expanded);
   });
+  bindDetailInteractions(el.detailPane);
 }
 
 function renderHeroMetadata(v, affectedByEco, records, refs, exploits = []) {
@@ -1309,27 +1310,31 @@ function renderCpeConfigurations(affected, expressions = []) {
     if (!grouped[cpe]) grouped[cpe] = [];
     grouped[cpe].push(item);
   });
+  const entries = Object.entries(grouped);
+  const initialLimit = 12;
   return `
     <section class="detail-section" id="cpe-configurations">
       <div class="section-title-row">
         <h3 class="section-h">CPE Configurations</h3>
-        <span class="badge">${fmt(cpeItems.length)} matches</span>
+        <span class="badge">${fmt(entries.length)} expressions · ${fmt(cpeItems.length)} matches</span>
       </div>
       <div class="config-list">
-        ${Object.entries(grouped).slice(0, 24).map(([cpe, items], index) => `
-          <div class="config-row">
+        ${entries.map(([cpe, items], index) => `
+          <div class="config-row" ${index >= initialLimit ? 'hidden data-overflow-group="cpe-configurations"' : ''}>
             <div class="config-op">CPE</div>
             <div>
               <strong>Match expression ${index + 1}</strong>
               <code>${escapeHtml(cpe)}</code>
               <div class="chips">
                 ${items.slice(0, 6).map(a => `<span class="badge">${escapeHtml(a.range || 'no range')}</span>`).join('')}
+                ${items.length > 6 ? `<span class="badge">+${fmt(items.length - 6)} ranges</span>` : ''}
                 ${items.slice(0, 3).map(a => a.source ? sourceTag(a.source) : '').join('')}
               </div>
             </div>
           </div>
         `).join('')}
       </div>
+      ${entries.length > initialLimit ? renderOverflowButton('cpe-configurations', `Show ${fmt(entries.length - initialLimit)} more CPE expressions`, 'Show fewer CPE expressions') : ''}
     </section>
   `;
 }
@@ -1427,6 +1432,7 @@ function exploitModifiedAt(item) {
 
 function renderSourceChanges(history) {
   if (!history.length) return '';
+  const initialLimit = 12;
   return `
     <section class="detail-section" id="source-changes">
       <div class="section-title-row">
@@ -1434,15 +1440,61 @@ function renderSourceChanges(history) {
         <span class="badge">${fmt(history.length)}</span>
       </div>
       <div class="timeline-list source-change-list">
-        ${history.slice(0, 30).map(item => `
-          <div>
-            <span>${escapeHtml(item.code || 'source')} · ${escapeHtml(item.change_type || 'updated')}</span>
-            <strong>source modified ${dateTime(item.source_modified_at || item.ingested_at)}</strong>
+        ${history.map((item, index) => `
+          <div class="source-change-item" ${index >= initialLimit ? 'hidden data-overflow-group="source-changes"' : ''}>
+            <div class="source-change-head">
+              <span>${escapeHtml(item.code || 'source')} · ${changeTypeBadge(item.change_type)}</span>
+              <strong>source modified ${dateTime(item.source_modified_at || item.ingested_at)}</strong>
+            </div>
             <small>local ingest ${dateTime(item.ingested_at)} · ${escapeHtml(displayIdentifierValue(item.source_record_id || ''))}${item.record_hash ? ` · ${escapeHtml(item.record_hash)}` : ''}</small>
+            ${renderHistoryDiff(item)}
           </div>
         `).join('')}
       </div>
+      ${history.length > initialLimit ? renderOverflowButton('source-changes', `Show ${fmt(history.length - initialLimit)} more changes`, 'Show fewer changes') : ''}
     </section>
+  `;
+}
+
+function changeTypeBadge(type) {
+  const normalized = String(type || 'updated').toLowerCase();
+  const label = normalized === 'added' ? 'added' : normalized === 'removed' ? 'removed' : 'updated';
+  const klass = normalized === 'added' ? 'low' : normalized === 'removed' ? 'critical' : 'medium';
+  return `<span class="badge ${klass}">${escapeHtml(label)}</span>`;
+}
+
+function renderHistoryDiff(item) {
+  const diff = Array.isArray(item.diff) ? item.diff : [];
+  if (!diff.length) {
+    return '<p class="muted source-diff-empty">Raw diff unavailable for this source snapshot.</p>';
+  }
+  const summary = item.diff_summary || {};
+  return `
+    <details class="source-diff">
+      <summary>
+        JSON diff
+        <span class="badge low">+${fmt(summary.added || diff.filter(change => change.type === 'added').length)}</span>
+        <span class="badge critical">-${fmt(summary.removed || diff.filter(change => change.type === 'removed').length)}</span>
+        <span class="badge medium">~${fmt(summary.changed || diff.filter(change => change.type === 'changed').length)}</span>
+      </summary>
+      <div class="source-diff-list">
+        ${diff.slice(0, 30).map(renderHistoryDiffRow).join('')}
+      </div>
+    </details>
+  `;
+}
+
+function renderHistoryDiffRow(change) {
+  const type = String(change.type || 'changed').toLowerCase();
+  const klass = type === 'added' ? 'low' : type === 'removed' ? 'critical' : 'medium';
+  const before = change.before != null ? `<small><b>Before</b> ${escapeHtml(change.before)}</small>` : '';
+  const after = change.after != null ? `<small><b>After</b> ${escapeHtml(change.after)}</small>` : '';
+  return `
+    <div class="source-diff-row">
+      <span class="badge ${klass}">${escapeHtml(type)}</span>
+      <code>${escapeHtml(change.path || '$')}</code>
+      <div>${before}${after}</div>
+    </div>
   `;
 }
 
@@ -1637,28 +1689,25 @@ function renderCvssPanel(v, severities) {
     vector_string: v.maxCvssVector,
     is_selected: true
   }];
-  const scores = compactSeverities(severities.length ? severities : fallback).slice(0, 8);
+  const scores = compactSeverities(severities.length ? severities : fallback);
   if (!scores.length) return '';
-  const vector = v.maxCvssVector || scores.find(score => score.is_selected)?.vector_string || scores.find(score => score.vector_string)?.vector_string;
+  const groups = groupCvssScores(scores);
+  const tabs = Object.entries(groups).filter(([, items]) => items.length);
+  const selectedKey = tabs.find(([, items]) => items.some(score => score.is_selected))?.[0] || tabs[0]?.[0];
   return `
     <section class="cvss-panel detail-section" id="cvss-scores">
       <div class="section-title-row">
         <h3 class="section-h">CVSS Scores</h3>
         <span class="badge">${fmt(scores.length)} source score${scores.length > 1 ? 's' : ''}</span>
       </div>
-      <div class="cvss-score-groups">
-        ${scores.map(score => `
-          <div class="cvss-source-score ${score.is_selected ? 'is-selected' : ''}">
-            <div>
-              <strong>${score.score != null ? Number(score.score).toFixed(1) : 'N/A'}</strong>
-              <span>${escapeHtml(score.severity_label || 'unrated')}</span>
-            </div>
-            <small>${escapeHtml(score.scoring_system || 'CVSS')} ${escapeHtml(score.scoring_version || '')}</small>
-            ${score.code ? sourceTag(score.code) : ''}
-          </div>
+      <div class="cvss-tabs" role="tablist" aria-label="CVSS score versions">
+        ${tabs.map(([key, items]) => `
+          <button class="cvss-tab ${key === selectedKey ? 'is-active' : ''}" type="button" role="tab" aria-selected="${key === selectedKey}" data-cvss-tab="${escapeAttr(key)}">
+            ${escapeHtml(cvssTabLabel(key))} <span>${fmt(items.length)}</span>
+          </button>
         `).join('')}
       </div>
-      ${vector ? cvssVectorBlock(v.maxCvssVersion, vector) : ''}
+      ${tabs.map(([key, items]) => renderCvssTabPanel(key, items, key === selectedKey)).join('')}
     </section>
   `;
 }
@@ -1680,6 +1729,118 @@ function compactSeverities(severities) {
   });
 }
 
+function groupCvssScores(scores) {
+  const groups = { v4: [], v3: [], v2: [], other: [] };
+  scores.forEach((score) => {
+    groups[cvssMajor(score)].push(score);
+  });
+  return groups;
+}
+
+function cvssMajor(score) {
+  const text = `${score.scoring_version || ''} ${score.vector_string || ''}`.toUpperCase();
+  if (/\bCVSS:4\.|^4\./.test(text) || text.includes('CVSS 4')) return 'v4';
+  if (/\bCVSS:3\.|^3\./.test(text) || text.includes('CVSS 3')) return 'v3';
+  if (/\bCVSS:2\.|^2\./.test(text) || text.includes('CVSS 2')) return 'v2';
+  return 'other';
+}
+
+function cvssTabLabel(key) {
+  return key === 'v4' ? 'CVSS v4'
+    : key === 'v3' ? 'CVSS v3'
+    : key === 'v2' ? 'CVSS v2'
+    : 'Other';
+}
+
+function renderCvssTabPanel(key, items, active) {
+  const selectedIndex = Math.max(0, items.findIndex(score => score.is_selected));
+  return `
+    <div class="cvss-tab-panel" data-cvss-panel="${escapeAttr(key)}" ${active ? '' : 'hidden'}>
+      <div class="cvss-score-groups" role="list" aria-label="${escapeAttr(cvssTabLabel(key))} sources">
+        ${items.map((score, index) => renderCvssSourceScore(key, score, index, index === selectedIndex)).join('')}
+      </div>
+      ${items.map((score, index) => renderCvssSourceDetail(key, score, index, index === selectedIndex)).join('')}
+    </div>
+  `;
+}
+
+function renderCvssSourceScore(groupKey, score, index, active) {
+  const severity = severityClass(score.severity_label, score.score);
+  const source = score.code || score.scoring_system || 'source';
+  return `
+    <button class="cvss-source-score ${active ? 'is-selected' : ''} severity-${severity}" type="button" data-cvss-source="${escapeAttr(groupKey)}:${index}" aria-pressed="${active}">
+      <div>
+        <strong>${score.score != null ? Number(score.score).toFixed(1) : 'N/A'}</strong>
+        <span>${escapeHtml(score.severity_label || 'unrated')}</span>
+      </div>
+      <small>${escapeHtml(score.scoring_system || 'CVSS')} ${escapeHtml(score.scoring_version || '')}</small>
+      ${sourceTag(source)}
+    </button>
+  `;
+}
+
+function renderCvssSourceDetail(groupKey, score, index, active) {
+  return `
+    <div class="cvss-source-detail" data-cvss-source-detail="${escapeAttr(groupKey)}:${index}" ${active ? '' : 'hidden'}>
+      <div class="kv-grid compact-kv">
+        <div><span>Source</span><strong>${escapeHtml(score.code || 'source')}</strong></div>
+        <div><span>System</span><strong>${escapeHtml(score.scoring_system || 'CVSS')}</strong></div>
+        <div><span>Version</span><strong>${escapeHtml(score.scoring_version || cvssTabLabel(groupKey))}</strong></div>
+        <div><span>Score Type</span><strong>${escapeHtml(score.score_type || 'base')}</strong></div>
+      </div>
+      ${score.vector_string ? cvssVectorBlock(score.scoring_version || cvssTabLabel(groupKey), score.vector_string) : renderDataGap('This source provides a numeric score, but no CVSS vector string.')}
+    </div>
+  `;
+}
+
+function bindDetailInteractions(root) {
+  root.querySelectorAll('[data-cvss-tab]').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const key = tab.getAttribute('data-cvss-tab');
+      root.querySelectorAll('[data-cvss-tab]').forEach((item) => {
+        const selected = item === tab;
+        item.classList.toggle('is-active', selected);
+        item.setAttribute('aria-selected', String(selected));
+      });
+      root.querySelectorAll('[data-cvss-panel]').forEach((panel) => {
+        panel.hidden = panel.getAttribute('data-cvss-panel') !== key;
+      });
+    });
+  });
+
+  root.querySelectorAll('[data-cvss-source]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const key = button.getAttribute('data-cvss-source');
+      const panel = button.closest('[data-cvss-panel]');
+      if (!panel) return;
+      panel.querySelectorAll('[data-cvss-source]').forEach((item) => {
+        const selected = item === button;
+        item.classList.toggle('is-selected', selected);
+        item.setAttribute('aria-pressed', String(selected));
+      });
+      panel.querySelectorAll('[data-cvss-source-detail]').forEach((detail) => {
+        detail.hidden = detail.getAttribute('data-cvss-source-detail') !== key;
+      });
+    });
+  });
+
+  root.querySelectorAll('[data-toggle-overflow]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const group = button.getAttribute('data-toggle-overflow');
+      const expanded = button.getAttribute('aria-expanded') === 'true';
+      root.querySelectorAll(`[data-overflow-group="${CSS.escape(group)}"]`).forEach((item) => {
+        item.hidden = expanded;
+      });
+      button.setAttribute('aria-expanded', String(!expanded));
+      button.textContent = expanded ? button.dataset.expandLabel : button.dataset.collapseLabel;
+    });
+  });
+}
+
+function renderOverflowButton(group, expandLabel, collapseLabel) {
+  return `<button class="overflow-toggle" type="button" data-toggle-overflow="${escapeAttr(group)}" data-expand-label="${escapeAttr(expandLabel)}" data-collapse-label="${escapeAttr(collapseLabel)}" aria-expanded="false">${escapeHtml(expandLabel)}</button>`;
+}
+
 function renderAffectedGrouped(affected) {
   if (!affected.length) {
     return `
@@ -1697,15 +1858,18 @@ function renderAffectedGrouped(affected) {
       </div>
       <input class="filter-input" type="text" data-affected-filter placeholder="Filter packages, ecosystems, ranges">
       <div id="affectedGroups" class="affected-groups">
-      ${Object.entries(groupByEco(affected)).sort((a,b)=>b[1].length-a[1].length).map(([eco,items])=>`
+      ${Object.entries(groupByEco(affected)).sort((a,b)=>b[1].length-a[1].length).map(([eco,items])=>{
+        const groupKey = `affected-${slug(eco)}`;
+        const initialLimit = 24;
+        return `
         <div class="aff-eco-group">
           <div class="affected-group-head">
             <strong>${escapeHtml(eco)}</strong>
             <span class="badge">${fmt(items.length)}</span>
           </div>
           <div class="affected-table">
-            ${items.map(a=>`
-              <div class="affected-row">
+            ${items.map((a,index)=>`
+              <div class="affected-row" ${index >= initialLimit ? `hidden data-overflow-group="${escapeAttr(groupKey)}"` : ''}>
                 <div>
                   <strong>${escapeHtml(a.display_name||a.package_name||'-')}</strong>
                   <small>${escapeHtml(a.primary_purl || a.primary_cpe23_uri || '')}</small>
@@ -1716,8 +1880,9 @@ function renderAffectedGrouped(affected) {
               </div>
             `).join('')}
           </div>
+          ${items.length > initialLimit ? renderOverflowButton(groupKey, `Show ${fmt(items.length - initialLimit)} more`, 'Show fewer') : ''}
         </div>
-      `).join('')}
+      `}).join('')}
       </div>
     </section>`;
 }
@@ -1763,7 +1928,7 @@ function renderRecordsBySource(records) {
 
 function renderReferenceCards(refs) {
   if (!refs.length) return '';
-  const display = refs.slice(0, 30);
+  const initialLimit = 16;
   return `
     <section class="detail-section" id="references">
       <div class="section-title-row">
@@ -1771,8 +1936,8 @@ function renderReferenceCards(refs) {
         <span class="badge">${fmt(refs.length)}</span>
       </div>
       <div class="card-stack">
-        ${display.map(r => `
-          <div class="info-card">
+        ${refs.map((r, index) => `
+          <div class="info-card" ${index >= initialLimit ? 'hidden data-overflow-group="references"' : ''}>
             ${renderExternalLink(r.url, shortUrl(r.url), 'ref-link')}
             <div class="chips">
               ${sourceTag(r.code)}
@@ -1782,6 +1947,7 @@ function renderReferenceCards(refs) {
           </div>
         `).join('')}
       </div>
+      ${refs.length > initialLimit ? renderOverflowButton('references', `Show ${fmt(refs.length - initialLimit)} more references`, 'Show fewer references') : ''}
     </section>
   `;
 }
@@ -1868,14 +2034,18 @@ function shortUrl(url) {
 }
 
 function severityBadge(label, score) {
-  const numeric = Number(score ?? 0);
-  const tag = (String(label || '')).toLowerCase();
-  const klass = tag === 'critical' || numeric >= 9 ? 'critical' :
-                tag === 'high' || numeric >= 7 ? 'high' :
-                tag === 'medium' || numeric >= 4 ? 'medium' :
-                tag === 'low' || numeric > 0 ? 'low' : 'none';
+  const klass = severityClass(label, score);
   const text = `${escapeHtml(label || 'CVSS')} ${score != null ? score : ''}`;
   return `<span class="badge ${klass}">${text}</span>`;
+}
+
+function severityClass(label, score) {
+  const numeric = Number(score ?? 0);
+  const tag = (String(label || '')).toLowerCase();
+  return tag === 'critical' || numeric >= 9 ? 'critical' :
+         tag === 'high' || numeric >= 7 ? 'high' :
+         tag === 'medium' || numeric >= 4 ? 'medium' :
+         tag === 'low' || numeric > 0 ? 'low' : 'none';
 }
 
 function fmt(value) {

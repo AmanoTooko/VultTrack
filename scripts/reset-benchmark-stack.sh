@@ -3,6 +3,8 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 docker compose -p vultrack-benchmark -f docker-compose.benchmark.yml down -v --remove-orphans
+rm -rf data/benchmark-vulnerability-details
+rm -rf data/benchmark-duckdb
 docker compose -p vultrack-benchmark -f docker-compose.benchmark.yml up -d --build
 
 for _ in $(seq 1 90); do

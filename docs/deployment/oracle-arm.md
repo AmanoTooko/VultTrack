@@ -73,6 +73,8 @@ docker compose exec api node /workspace/plugins/fetchers/run-all.mjs
 docker compose exec api npm run normalize:parallel
 ```
 
+For scheduler-driven init, set `SCHEDULER_NORMALIZE_PARALLELISM=4` first and tune upward only after watching PostgreSQL memory and I/O. The standalone `normalize:parallel` runner discovers pending sources from the database by default, so it avoids repeatedly calling idle sources during long imports.
+
 For init mirrors, run specific sources during an off-peak window:
 
 ```bash

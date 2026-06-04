@@ -7,10 +7,12 @@ namespace VulTrack.App;
 public sealed class SourceScheduler(
     NpgsqlDataSource db,
     IRawNormalizationService normalizer,
+    VulnerabilityDetailSnapshotBuilder detailSnapshotBuilder,
     IOptions<VulTrackSchedulerOptions> options,
     ILogger<SourceScheduler> logger) : BackgroundService
 {
     private VulTrackSchedulerOptions Options => options.Value;
+    private DateTimeOffset _lastDetailSnapshotQueueRun = DateTimeOffset.MinValue;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -46,33 +48,16 @@ public sealed class SourceScheduler(
     private async Task RunNormalizeLoopAsync(TimeSpan interval, CancellationToken ct)
     {
         var limit = EnvInt("SCHEDULER_NORMALIZE_LIMIT", Options.NormalizeLimit, 1);
+        var parallelism = EnvInt("SCHEDULER_NORMALIZE_PARALLELISM", Options.NormalizeParallelism, 1);
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 await DedupEpssPendingAsync(ct);
                 var allSources = await LoadAllSourcesAsync(ct);
-                foreach (var source in allSources)
-                {
-                    if (ct.IsCancellationRequested) break;
-                    try
-                    {
-                        var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
-                        if (result.Processed > 0 || result.Failed > 0)
-                        {
-                            logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
-                                result.SourceCode, result.Processed, result.Failed);
-                        }
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "Normalizer {Source} failed; continuing normalize cycle.", source.Code);
-                    }
-                }
+                await RunNormalizeSourcesAsync(allSources, limit, parallelism, "normalize cycle", ct);
+
+                await RunDetailSnapshotQueueAsync(ct);
             }
             catch (Exception ex)
             {
@@ -115,27 +100,11 @@ public sealed class SourceScheduler(
         await DedupEpssPendingAsync(ct);
 
         var limit = EnvInt("SCHEDULER_NORMALIZE_LIMIT", Options.NormalizeLimit, 1);
+        var parallelism = EnvInt("SCHEDULER_NORMALIZE_PARALLELISM", Options.NormalizeParallelism, 1);
         var allSources = await LoadAllSourcesAsync(ct);
-        foreach (var source in allSources)
-        {
-            try
-            {
-                var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
-                if (result.Processed > 0 || result.Failed > 0)
-                {
-                    logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
-                        result.SourceCode, result.Processed, result.Failed);
-                }
-            }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
-            {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "Normalizer {Source} failed; continuing scheduled normalization.", source.Code);
-            }
-        }
+        await RunNormalizeSourcesAsync(allSources, limit, parallelism, "scheduled normalization", ct);
+
+        await RunDetailSnapshotQueueAsync(ct);
 
         var dueSources = await LoadDueSourcesAsync(ct);
         foreach (var source in dueSources)
@@ -148,6 +117,101 @@ public sealed class SourceScheduler(
             {
                 logger.LogError(ex, "Fetcher {Source} failed; continuing scheduled normalization.", source.Code);
             }
+        }
+    }
+
+    private async Task RunNormalizeSourcesAsync(IReadOnlyList<ScheduledSource> sources, int limit, int parallelism, string context, CancellationToken ct)
+    {
+        if (sources.Count == 0) return;
+
+        var workerCount = Math.Clamp(parallelism, 1, Math.Min(16, sources.Count));
+        if (workerCount == 1)
+        {
+            foreach (var source in sources)
+            {
+                if (ct.IsCancellationRequested) break;
+                await RunNormalizeSourceAsync(source.Code, limit, context, ct);
+            }
+            return;
+        }
+
+        logger.LogInformation("Running {Count} normalizer sources with parallelism={Parallelism} for {Context}.", sources.Count, workerCount, context);
+        var index = 0;
+        async Task Worker()
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var current = Interlocked.Increment(ref index) - 1;
+                if (current >= sources.Count) return;
+                await RunNormalizeSourceAsync(sources[current].Code, limit, context, ct);
+            }
+        }
+
+        await Task.WhenAll(Enumerable.Range(0, workerCount).Select(_ => Worker()));
+    }
+
+    private async Task RunNormalizeSourceAsync(string sourceCode, int limit, string context, CancellationToken ct)
+    {
+        try
+        {
+            var result = await normalizer.ProcessSourcePendingAsync(sourceCode, limit, ct);
+            if (result.Processed > 0 || result.Failed > 0)
+            {
+                logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
+                    result.SourceCode, result.Processed, result.Failed);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Normalizer {Source} failed; continuing {Context}.", sourceCode, context);
+        }
+    }
+
+    private async Task RunDetailSnapshotQueueAsync(CancellationToken ct)
+    {
+        if (!EnvBool("SCHEDULER_DETAIL_SNAPSHOT_QUEUE_ENABLED", Options.DetailSnapshotQueueEnabled))
+        {
+            return;
+        }
+
+        var intervalSeconds = EnvInt("SCHEDULER_DETAIL_SNAPSHOT_QUEUE_INTERVAL_SECONDS", Options.DetailSnapshotQueueIntervalSeconds, 0);
+        var now = DateTimeOffset.UtcNow;
+        if (intervalSeconds > 0 && now - _lastDetailSnapshotQueueRun < TimeSpan.FromSeconds(intervalSeconds))
+        {
+            return;
+        }
+
+        _lastDetailSnapshotQueueRun = now;
+        var request = new DetailSnapshotBuildRequest(
+            Limit: EnvInt("SCHEDULER_DETAIL_SNAPSHOT_QUEUE_LIMIT", Options.DetailSnapshotQueueLimit, 1),
+            ConsumeQueue: true,
+            Concurrency: EnvInt("SCHEDULER_DETAIL_SNAPSHOT_QUEUE_CONCURRENCY", Options.DetailSnapshotQueueConcurrency, 1),
+            GzipLevel: EnvInt("SCHEDULER_DETAIL_SNAPSHOT_GZIP_LEVEL", Options.DetailSnapshotGzipLevel, 1));
+
+        try
+        {
+            var result = await detailSnapshotBuilder.RebuildAsync(request, ct);
+            if (result.selected > 0 || result.failed > 0)
+            {
+                logger.LogInformation(
+                    "Detail snapshot queue: selected={Selected}, written={Written}, removed={Removed}, failed={Failed}",
+                    result.selected,
+                    result.written,
+                    result.removed,
+                    result.failed);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Detail snapshot queue refresh failed; continuing scheduler cycle.");
         }
     }
 
@@ -431,4 +495,10 @@ public sealed class VulTrackSchedulerOptions
     public string PluginNodeBin { get; init; } = "node";
     public string[] SourceCodes { get; init; } = [];
     public bool IncludeInitSources { get; init; }
+    public int NormalizeParallelism { get; init; } = 1;
+    public bool DetailSnapshotQueueEnabled { get; init; } = true;
+    public int DetailSnapshotQueueIntervalSeconds { get; init; } = 300;
+    public int DetailSnapshotQueueLimit { get; init; } = 500;
+    public int DetailSnapshotQueueConcurrency { get; init; } = 4;
+    public int DetailSnapshotGzipLevel { get; init; } = 6;
 }

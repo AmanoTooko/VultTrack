@@ -1,20 +1,26 @@
 using Npgsql;
+using NpgsqlTypes;
 
 namespace VulTrack.App;
 
-public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
+public sealed class DefaultAffectedComponentHook : IBatchAffectedComponentHook
 {
-    public async Task OnAffectedFactsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid vulnerabilityRecordId, IReadOnlyList<AffectedFactDraft> facts, CancellationToken ct)
+    public Task OnAffectedFactsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid vulnerabilityRecordId, IReadOnlyList<AffectedFactDraft> facts, CancellationToken ct) =>
+        OnAffectedFactsBatchAsync(connection, [new AffectedFactBatchItem(vulnerabilityId, vulnerabilityRecordId, Guid.Empty, Guid.Empty, facts)], ct);
+
+    public async Task OnAffectedFactsBatchAsync(NpgsqlConnection connection, IReadOnlyList<AffectedFactBatchItem> items, CancellationToken ct)
     {
-        var projections = facts
-            .Select(fact => new
+        var projections = items
+            .SelectMany(item => item.Facts.Select(fact => new
             {
+                item.VulnerabilityId,
                 Fact = fact,
                 DisplayName = fact.PackageName ?? fact.Purl ?? fact.Cpe23Uri
-            })
+            }))
             .Where(x => !string.IsNullOrWhiteSpace(x.DisplayName))
             .GroupBy(x => new
             {
+                x.VulnerabilityId,
                 x.Fact.Ecosystem,
                 x.DisplayName,
                 x.Fact.Purl,
@@ -25,30 +31,55 @@ public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
             .Select(group => group.First())
             .ToList();
 
-        foreach (var batch in projections.Chunk(4000))
+        if (projections.Count == 0) return;
+
+        var tempName = $"tmp_affected_projection_{Guid.NewGuid():N}";
+        await using (var createTemp = new NpgsqlCommand($"""
+            create temporary table {tempName} (
+              vulnerability_id uuid not null,
+              ecosystem text,
+              package_name text,
+              display_name text not null,
+              primary_purl text,
+              primary_cpe23_uri text,
+              normalized_range text,
+              range_type text
+            )
+            """, connection))
         {
-            var values = new List<string>();
-            var parameters = new List<object>();
-            var parameterIndex = 1;
+            await createTemp.ExecuteNonQueryAsync(ct);
+        }
 
-            foreach (var projection in batch)
+        await using (var writer = await connection.BeginBinaryImportAsync($"""
+            copy {tempName}
+              (vulnerability_id, ecosystem, package_name, display_name, primary_purl,
+               primary_cpe23_uri, normalized_range, range_type)
+            from stdin (format binary)
+            """, ct))
+        {
+            foreach (var projection in projections)
             {
-                values.Add($"(${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++},1,'source facts','default-source-fact-hook')");
-                parameters.Add(vulnerabilityId);
-                parameters.Add((object?)projection.Fact.Ecosystem ?? DBNull.Value);
-                parameters.Add((object?)projection.Fact.PackageName ?? DBNull.Value);
-                parameters.Add(projection.DisplayName!);
-                parameters.Add((object?)projection.Fact.Purl ?? DBNull.Value);
-                parameters.Add((object?)projection.Fact.Cpe23Uri ?? DBNull.Value);
-                parameters.Add((object?)projection.Fact.VersionRange ?? DBNull.Value);
-                parameters.Add((object?)projection.Fact.RangeType ?? DBNull.Value);
+                await writer.StartRowAsync(ct);
+                await writer.WriteAsync(projection.VulnerabilityId, NpgsqlDbType.Uuid, ct);
+                await WriteNullableTextAsync(writer, projection.Fact.Ecosystem, ct);
+                await WriteNullableTextAsync(writer, projection.Fact.PackageName, ct);
+                await writer.WriteAsync(projection.DisplayName!, NpgsqlDbType.Text, ct);
+                await WriteNullableTextAsync(writer, projection.Fact.Purl, ct);
+                await WriteNullableTextAsync(writer, projection.Fact.Cpe23Uri, ct);
+                await WriteNullableTextAsync(writer, projection.Fact.VersionRange, ct);
+                await WriteNullableTextAsync(writer, projection.Fact.RangeType, ct);
             }
+            await writer.CompleteAsync(ct);
+        }
 
-            await using var cmd = new NpgsqlCommand($"""
+        await using (var cmd = new NpgsqlCommand($"""
                 insert into vulnerability_affected_components
                   (vulnerability_id, ecosystem, package_name, display_name, primary_purl,
                    primary_cpe23_uri, normalized_range, range_type, evidence_count, evidence_summary, selected_by_rule)
-                values {string.Join(",", values)}
+                select vulnerability_id, ecosystem, package_name, display_name, primary_purl,
+                       primary_cpe23_uri, normalized_range, range_type,
+                       1, 'source facts', 'default-source-fact-hook'
+                from {tempName}
                 on conflict (
                   vulnerability_id,
                   (coalesce(ecosystem, '')),
@@ -57,12 +88,10 @@ public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
                   (coalesce(primary_cpe23_uri, '')),
                   (coalesce(normalized_range, '')),
                   (coalesce(range_type, ''))
-                ) do update set
-                  evidence_count = vulnerability_affected_components.evidence_count + 1,
-                  updated_at = now()
-                """, connection);
+                ) do nothing
+                """, connection))
+        {
             cmd.CommandTimeout = 300;
-            foreach (var parameter in parameters) cmd.Parameters.AddWithValue(parameter);
             await cmd.ExecuteNonQueryAsync(ct);
         }
     }
@@ -99,4 +128,9 @@ public sealed class DefaultAffectedComponentHook : IAffectedComponentHook
             await cmd.ExecuteNonQueryAsync(ct);
         }
     }
+
+    private static Task WriteNullableTextAsync(NpgsqlBinaryImporter writer, string? value, CancellationToken ct) =>
+        string.IsNullOrWhiteSpace(value)
+            ? writer.WriteNullAsync(ct)
+            : writer.WriteAsync(value, NpgsqlDbType.Text, ct);
 }

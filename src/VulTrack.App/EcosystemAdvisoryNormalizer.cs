@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Diagnostics;
 using Npgsql;
 
 namespace VulTrack.App;
@@ -63,61 +64,210 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
 
         var processed = 0;
         var failed = 0;
-        var succeededIds = new List<Guid>();
-        var affectedVulnIds = new List<Guid>();
 
-        var drafts = new List<(Row Row, VulnerabilityCanonicalDraft Draft)>();
+        var drafts = new List<EcosystemNormalizationDraft>();
         foreach (var row in rows)
-        {
-            var identifiers = IdentifiersFrom([row.AdvisoryId], row.Identifiers);
-            var isCsaf = row.Provider is "suse-csaf" or "redhat-csaf";
-            var cves = identifiers.Where(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)).ToArray();
-            IEnumerable<string[]> identifierSets = isCsaf && cves.Length > 0 ? cves.Select(x => new[] { x }) : [identifiers];
-            foreach (var identifierSet in identifierSets)
-            {
-                var primary = identifierSet.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? row.AdvisoryId;
-                drafts.Add((row, new VulnerabilityCanonicalDraft(primary, null, null, "active", row.PublishedAt, row.ModifiedAt, identifierSet, row.SourceId, row.RawIndexId)));
-            }
-        }
-
-        var cache = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, drafts.Select(d => d.Draft).ToList(), ct);
-
-        foreach (var (row, draft) in drafts)
         {
             try
             {
-                var identifiers = draft.Identifiers;
-                var primary = draft.PreferredIdentifier;
-                var payload = JsonNode.Parse(row.Payload);
+                var identifiers = IdentifiersFrom([row.AdvisoryId], row.Identifiers);
                 var isCsaf = row.Provider is "suse-csaf" or "redhat-csaf";
-                var title = ExtractTitle(payload, isCsaf, row.AdvisoryId);
-                var description = ExtractDescription(payload, isCsaf, title);
-                var fullDraft = new VulnerabilityCanonicalDraft(primary, title, description, "active", row.PublishedAt, row.ModifiedAt, identifiers, row.SourceId, row.RawIndexId);
-                var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, fullDraft, cache, ct);
-                var sourceRecordId = isCsaf ? $"{row.AdvisoryId}:{primary}" : row.AdvisoryId;
-                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, sourceRecordId, title, description, "active", ct);
-                await UpsertIdentifiersAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, identifiers, ct);
-                await InsertDescriptionsAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.Descriptions(title, description), ct);
-                var severities = ExtractSeverities(payload, isCsaf, row.SeverityLabel, row.Payload, primary).ToList();
-                await InsertSeverityScoresAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, severities, ct);
-                await InsertReferencesAsync(connection, vulnerabilityId, recordId, row.SourceId, SourceFactExtractor.References(JsonNode.Parse(row.ReferencesJson)), ct);
-                var facts = ExtractAffectedFacts(row, payload, isCsaf, primary).ToList();
-                await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
-                if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
-                succeededIds.Add(row.RawIndexId);
+                var cves = identifiers.Where(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)).ToArray();
+                var payload = JsonNode.Parse(row.Payload);
+                IEnumerable<string[]> identifierSets = isCsaf && cves.Length > 0 ? cves.Select(x => new[] { x }) : [identifiers];
+                foreach (var identifierSet in identifierSets)
+                {
+                    var primary = identifierSet.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? row.AdvisoryId;
+                    var title = ExtractTitle(payload, isCsaf, row.AdvisoryId);
+                    var description = ExtractDescription(payload, isCsaf, title);
+                    var fullDraft = new VulnerabilityCanonicalDraft(primary, title, description, "active", row.PublishedAt, row.ModifiedAt, identifierSet, row.SourceId, row.RawIndexId);
+                    var sourceRecordId = isCsaf ? $"{row.AdvisoryId}:{primary}" : row.AdvisoryId;
+                    drafts.Add(new EcosystemNormalizationDraft(
+                        row.RawIndexId,
+                        sourceRecordId,
+                        row.SourceId,
+                        fullDraft,
+                        SourceFactExtractor.Descriptions(title, description),
+                        ExtractSeverities(payload, isCsaf, row.SeverityLabel, row.Payload, primary).ToList(),
+                        SourceFactExtractor.References(JsonNode.Parse(row.ReferencesJson)),
+                        ExtractAffectedFacts(row, payload, isCsaf, primary).ToList()));
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to parse ecosystem advisory {AdvisoryId} from raw {RawIndexId}", row.AdvisoryId, row.RawIndexId);
+                failed++;
+            }
+        }
+
+        if (drafts.Count > 0)
+        {
+            var resolveWatch = Stopwatch.StartNew();
+            var cache = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, drafts.Select(d => d.CanonicalDraft).ToList(), ct);
+            resolveWatch.Stop();
+
+            var canonicalized = new List<EcosystemCanonicalizedDraft>();
+            var canonicalWatch = Stopwatch.StartNew();
+            foreach (var draft in drafts)
+            {
+                try
+                {
+                    var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, draft.CanonicalDraft, cache, ct);
+                    canonicalized.Add(new EcosystemCanonicalizedDraft(draft, vulnerabilityId));
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to canonicalize ecosystem advisory {SourceRecordId} from raw {RawIndexId}", draft.SourceRecordId, draft.RawIndexId);
+                    failed++;
+                }
+            }
+            canonicalWatch.Stop();
+
+            var remapWatch = Stopwatch.StartNew();
+            var currentCanonicalIds = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, canonicalized.Select(x => x.Draft.CanonicalDraft).ToList(), ct);
+            var remapped = 0;
+            canonicalized = canonicalized
+                .Select(item =>
+                {
+                    var currentId = ResolveCanonicalIdFromCache(item.Draft.CanonicalDraft, currentCanonicalIds, item.VulnerabilityId);
+                    if (currentId != item.VulnerabilityId) remapped++;
+                    return item with { VulnerabilityId = currentId };
+                })
+                .ToList();
+            remapWatch.Stop();
+
+            logger.LogInformation("Ecosystem advisory normalize {SourceCode}: parsed={Parsed}, canonicalized={Canonicalized}, resolve_ms={ResolveMs}, canonical_ms={CanonicalMs}.",
+                sourceCode ?? SourceCode, drafts.Count, canonicalized.Count, resolveWatch.ElapsedMilliseconds, canonicalWatch.ElapsedMilliseconds);
+            if (remapped > 0)
+            {
+                logger.LogInformation("Ecosystem advisory normalize {SourceCode}: remapped {Remapped} in-batch canonical ids after merges in {RemapMs} ms.",
+                    sourceCode ?? SourceCode, remapped, remapWatch.ElapsedMilliseconds);
+            }
+
+            var batchResult = await ProcessCanonicalizedBatchAsync(connection, canonicalized, ct);
+            processed += batchResult.Processed;
+            failed += batchResult.Failed;
+            await MarkNormalizedBatchAsync(connection, batchResult.SucceededRawIndexIds, ct);
+        }
+
+        return new NormalizeBatchResult(sourceCode ?? SourceCode, processed, failed);
+    }
+
+    private async Task<(int Processed, int Failed, IReadOnlyList<Guid> SucceededRawIndexIds)> ProcessCanonicalizedBatchAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<EcosystemCanonicalizedDraft> canonicalized,
+        CancellationToken ct)
+    {
+        if (canonicalized.Count == 0) return (0, 0, []);
+
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            try
+            {
+                var recordInputs = canonicalized
+                    .Select(item => new VulnerabilityRecordBatchItem(
+                        item.VulnerabilityId,
+                        item.Draft.SourceId,
+                        item.Draft.RawIndexId,
+                        item.Draft.SourceRecordId,
+                        item.Draft.CanonicalDraft.Title,
+                        item.Draft.CanonicalDraft.Description,
+                        "active"))
+                    .ToList();
+
+                var watch = Stopwatch.StartNew();
+                var recordIds = await UpsertRecordsBatchAsync(connection, recordInputs, ct);
+                var recordsMs = watch.ElapsedMilliseconds;
+                var descriptionItems = new List<DescriptionBatchItem>();
+                var severityItems = new List<SeverityScoreBatchItem>();
+                var referenceItems = new List<ReferenceBatchItem>();
+                var affectedItems = new List<AffectedFactBatchItem>();
+                var affectedVulnIds = new List<Guid>();
+                var succeededIds = new List<Guid>();
+
+                foreach (var item in canonicalized)
+                {
+                    var key = (item.Draft.SourceId, item.Draft.SourceRecordId, item.Draft.RawIndexId);
+                    if (!recordIds.TryGetValue(key, out var recordId))
+                        throw new InvalidOperationException($"Missing vulnerability record id for ecosystem advisory raw {item.Draft.RawIndexId}");
+
+                    descriptionItems.Add(new DescriptionBatchItem(item.VulnerabilityId, recordId, item.Draft.SourceId, item.Draft.Descriptions));
+                    severityItems.Add(new SeverityScoreBatchItem(item.VulnerabilityId, recordId, item.Draft.SourceId, item.Draft.RawIndexId, item.Draft.Severities));
+                    referenceItems.Add(new ReferenceBatchItem(item.VulnerabilityId, recordId, item.Draft.SourceId, item.Draft.References));
+                    affectedItems.Add(new AffectedFactBatchItem(item.VulnerabilityId, recordId, item.Draft.SourceId, item.Draft.RawIndexId, item.Draft.AffectedFacts));
+                    if (item.Draft.AffectedFacts.Count > 0) affectedVulnIds.Add(item.VulnerabilityId);
+                    succeededIds.Add(item.Draft.RawIndexId);
+                }
+
+                watch.Restart();
+                await InsertDescriptionsBatchAsync(connection, descriptionItems, ct);
+                var descriptionsMs = watch.ElapsedMilliseconds;
+                watch.Restart();
+                await InsertSeverityScoresBatchAsync(connection, severityItems, ct);
+                var severitiesMs = watch.ElapsedMilliseconds;
+                watch.Restart();
+                await InsertReferencesBatchAsync(connection, referenceItems, ct);
+                var referencesMs = watch.ElapsedMilliseconds;
+                watch.Restart();
+                await InsertAffectedFactsBatchAsync(connection, affectedItems, ct);
+                var affectedMs = watch.ElapsedMilliseconds;
+                watch.Restart();
+                await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
+                var flushMs = watch.ElapsedMilliseconds;
+                logger.LogInformation("Ecosystem advisory batch write count={Count}: records_ms={RecordsMs}, descriptions_ms={DescriptionsMs}, severities_ms={SeveritiesMs}, references_ms={ReferencesMs}, affected_ms={AffectedMs}, flush_ms={FlushMs}.",
+                    canonicalized.Count, recordsMs, descriptionsMs, severitiesMs, referencesMs, affectedMs, flushMs);
+
+                return (canonicalized.Count, 0, succeededIds);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected && attempt == 1)
+            {
+                logger.LogWarning(ex, "Ecosystem advisory batch normalize deadlocked for {Count} records; retrying batch once.", canonicalized.Count);
+                await Task.Delay(500, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Ecosystem advisory batch normalize failed for {Count} records; falling back to per-record writes.", canonicalized.Count);
+                return await ProcessCanonicalizedIndividuallyAsync(connection, canonicalized, ct);
+            }
+        }
+
+        return await ProcessCanonicalizedIndividuallyAsync(connection, canonicalized, ct);
+    }
+
+    private async Task<(int Processed, int Failed, IReadOnlyList<Guid> SucceededRawIndexIds)> ProcessCanonicalizedIndividuallyAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<EcosystemCanonicalizedDraft> canonicalized,
+        CancellationToken ct)
+    {
+        var processed = 0;
+        var failed = 0;
+        var succeededIds = new List<Guid>();
+        var affectedVulnIds = new List<Guid>();
+
+        foreach (var item in canonicalized)
+        {
+            try
+            {
+                var draft = item.Draft;
+                var recordId = await UpsertRecordAsync(connection, item.VulnerabilityId, draft.SourceId, draft.RawIndexId, draft.SourceRecordId, draft.CanonicalDraft.Title, draft.CanonicalDraft.Description, "active", ct);
+                await UpsertIdentifiersAsync(connection, item.VulnerabilityId, draft.SourceId, draft.RawIndexId, draft.CanonicalDraft.Identifiers, ct);
+                await InsertDescriptionsAsync(connection, item.VulnerabilityId, recordId, draft.SourceId, draft.Descriptions, ct);
+                await InsertSeverityScoresAsync(connection, item.VulnerabilityId, recordId, draft.SourceId, draft.RawIndexId, draft.Severities, ct);
+                await InsertReferencesAsync(connection, item.VulnerabilityId, recordId, draft.SourceId, draft.References, ct);
+                await InsertAffectedFactsAsync(connection, item.VulnerabilityId, recordId, draft.SourceId, draft.RawIndexId, draft.AffectedFacts, ct);
+                if (draft.AffectedFacts.Count > 0) affectedVulnIds.Add(item.VulnerabilityId);
+                succeededIds.Add(draft.RawIndexId);
                 processed++;
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed to normalize ecosystem advisory {AdvisoryId} from raw {RawIndexId}", row.AdvisoryId, row.RawIndexId);
+                logger.LogWarning(ex, "Failed to write ecosystem advisory {SourceRecordId} from raw {RawIndexId}", item.Draft.SourceRecordId, item.Draft.RawIndexId);
                 failed++;
             }
         }
 
         await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
-        await MarkNormalizedBatchAsync(connection, succeededIds, ct);
-
-        return new NormalizeBatchResult(sourceCode ?? SourceCode, processed, failed);
+        return (processed, failed, succeededIds);
     }
 
     private static string ExtractTitle(JsonNode? payload, bool isCsaf, string fallback)
@@ -247,6 +397,18 @@ public sealed class EcosystemAdvisoryNormalizer(IEnumerable<IAffectedComponentHo
         if (lower.Contains("suse") || lower.Contains("opensuse") || lower.Contains("sles")) return "rpm";
         return "rpm";
     }
+
+    private sealed record EcosystemNormalizationDraft(
+        Guid RawIndexId,
+        string SourceRecordId,
+        Guid SourceId,
+        VulnerabilityCanonicalDraft CanonicalDraft,
+        IReadOnlyList<DescriptionDraft> Descriptions,
+        IReadOnlyList<SeverityScoreDraft> Severities,
+        IReadOnlyList<ReferenceDraft> References,
+        IReadOnlyList<AffectedFactDraft> AffectedFacts);
+
+    private sealed record EcosystemCanonicalizedDraft(EcosystemNormalizationDraft Draft, Guid VulnerabilityId);
 
     private sealed record Row(Guid RawIndexId, string Provider, string? Ecosystem, string AdvisoryId, string[] Identifiers, string? PackageName, string? Purl, string VulnerableRanges, string? SeverityLabel, DateTimeOffset? PublishedAt, DateTimeOffset? ModifiedAt, string ReferencesJson, string Payload, Guid SourceId);
 }
