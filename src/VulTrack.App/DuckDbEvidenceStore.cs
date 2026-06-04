@@ -146,24 +146,8 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
         return await ReadRowsAsync(command, ct);
     }
-
-    public async Task<IReadOnlyList<Dictionary<string, object?>>> QueryReferencesAsync(string vulnerabilityKey, int limit = 160, CancellationToken ct = default)
-    {
-        if (!Enabled) return Array.Empty<Dictionary<string, object?>>();
-        ct.ThrowIfCancellationRequested();
-        await InitializeAsync(ct);
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText = $"""
-            select source_code, url, ref_type
-            from evidence_references
-            where vulnerability_key = $1
-            order by source_code nulls last, url
-            limit {limit}
-            """;
-        command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
-        return await ReadRowsAsync(command, ct);
-    }
+}
+}
 
     public async Task<IReadOnlyList<Dictionary<string, object?>>> QuerySeverityScoresAsync(string vulnerabilityKey, int limit = 40, CancellationToken ct = default)
     {
@@ -374,7 +358,10 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         "affected_facts",
         "severity_scores",
         "evidence_references",
-        "weaknesses"
+        "weaknesses",
+        "cpe_entries",
+        "exploits",
+        "threat_scores"
     ];
 
     private static readonly string[] SchemaStatements =
@@ -433,6 +420,98 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
           weakness_id varchar,
           description varchar
         )
+        """,
+        """
+        create table if not exists cpe_entries (
+          source_code varchar,
+          raw_index_id varchar,
+          cpe23_uri varchar,
+          vendor varchar,
+          product varchar,
+          version varchar,
+          part varchar,
+          target_sw varchar,
+          deprecated boolean
+        )
+        """,
+        """
+        create table if not exists exploits (
+          source_code varchar,
+          raw_index_id varchar,
+          source_key varchar,
+          identifiers varchar,
+          title varchar,
+          source_url varchar,
+          artifact_type varchar,
+          exploit_type varchar,
+          maturity varchar,
+          verification_status varchar,
+          published_at varchar,
+          modified_at varchar
+        )
+        """,
+        """
+        create table if not exists threat_scores (
+          source_code varchar,
+          raw_index_id varchar,
+          vulnerability_key varchar,
+          score_type varchar,
+          score double,
+          percentile double,
+          observed_at varchar
+        )
         """
     ];
-}
+
+    public async Task<IReadOnlyList<Dictionary<string, object?>>> QueryCpeEntriesAsync(string vendor, string product, int limit = 50, CancellationToken ct = default)
+    {
+        if (!Enabled) return Array.Empty<Dictionary<string, object?>>();
+        ct.ThrowIfCancellationRequested();
+        await InitializeAsync(ct);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            select source_code, cpe23_uri, vendor, product, version, part, target_sw, deprecated
+            from cpe_entries
+            where vendor like '%' || $1 || '%' or product like '%' || $2 || '%'
+            limit {limit}
+            """;
+        command.Parameters.Add(new DuckDBParameter(vendor ?? ""));
+        command.Parameters.Add(new DuckDBParameter(product ?? ""));
+        return await ReadRowsAsync(command, ct);
+    }
+
+    public async Task<IReadOnlyList<Dictionary<string, object?>>> QueryExploitsAsync(string vulnerabilityKey, int limit = 40, CancellationToken ct = default)
+    {
+        if (!Enabled) return Array.Empty<Dictionary<string, object?>>();
+        ct.ThrowIfCancellationRequested();
+        await InitializeAsync(ct);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            select source_code, source_key, title, source_url, artifact_type,
+                   exploit_type, maturity, verification_status, published_at, modified_at
+            from exploits
+            where identifiers like '%' || $1 || '%'
+            limit {limit}
+            """;
+        command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
+        return await ReadRowsAsync(command, ct);
+    }
+
+    public async Task<IReadOnlyList<Dictionary<string, object?>>> QueryThreatScoresAsync(string vulnerabilityKey, int limit = 20, CancellationToken ct = default)
+    {
+        if (!Enabled) return Array.Empty<Dictionary<string, object?>>();
+        ct.ThrowIfCancellationRequested();
+        await InitializeAsync(ct);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            select source_code, score_type, score, percentile, observed_at
+            from threat_scores
+            where vulnerability_key = $1
+            limit {limit}
+            """;
+        command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
+        return await ReadRowsAsync(command, ct);
+    }

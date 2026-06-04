@@ -32,8 +32,25 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         "osv",
         "ubuntu-osv",
         "android-osv",
+        "google-osv",
         "ghsa",
-        "nvd-cve"
+        "nvd-cve",
+        "nvd-cpe",
+        "suse-csaf",
+        "alpine-secdb",
+        "redhat-csaf",
+        "nuget-advisory",
+        "npm-advisory",
+        "pypi-advisory",
+        "go-advisory",
+        "cargo-advisory",
+        "first-epss",
+        "cisa-kev",
+        "exploitdb",
+        "poc-in-github",
+        "nuclei-templates",
+        "metasploit",
+        "cnnvd"
     ];
 
     public async Task<DuckDbEvidenceNormalizeResult> NormalizeAsync(DuckDbEvidenceNormalizeRequest request, CancellationToken ct)
@@ -56,8 +73,25 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 "osv" => await LoadOsvAsync("osv", "stg_osv_vulnerabilities", limit, ct),
                 "ubuntu-osv" => await LoadOsvAsync("ubuntu-osv", "stg_ubuntu_osv", limit, ct),
                 "android-osv" => await LoadOsvAsync("android-osv", "stg_android_osv", limit, ct),
+                "google-osv" => await LoadOsvAsync("google-osv", "stg_osv_vulnerabilities", limit, ct),
                 "ghsa" => await LoadGhsaAsync(limit, ct),
                 "nvd-cve" => await LoadNvdAsync(limit, ct),
+                "nvd-cpe" => await LoadCpeAsync(limit, ct),
+                "suse-csaf" => await LoadCsafAsync("suse-csaf", limit, ct),
+                "alpine-secdb" => await LoadAlpineAsync(limit, ct),
+                "redhat-csaf" => await LoadCsafAsync("redhat-csaf", limit, ct),
+                "nuget-advisory" => await LoadExternalAdvisoryAsync("nuget-advisory", limit, ct),
+                "npm-advisory" => await LoadExternalAdvisoryAsync("npm-advisory", limit, ct),
+                "pypi-advisory" => await LoadExternalAdvisoryAsync("pypi-advisory", limit, ct),
+                "go-advisory" => await LoadEcosystemAsync("go-advisory", limit, ct),
+                "cargo-advisory" => await LoadEcosystemAsync("cargo-advisory", limit, ct),
+                "first-epss" => await LoadThreatIntelAsync("first-epss", limit, ct),
+                "cisa-kev" => await LoadThreatIntelAsync("cisa-kev", limit, ct),
+                "exploitdb" => await LoadThreatIntelAsync("exploitdb", limit, ct),
+                "poc-in-github" => await LoadExploitAsync("poc-in-github", limit, ct),
+                "nuclei-templates" => await LoadExploitAsync("nuclei-templates", limit, ct),
+                "metasploit" => await LoadExploitAsync("metasploit", limit, ct),
+                "cnnvd" => await LoadCnnvdAsync(limit, ct),
                 _ => []
             };
             await store.ReplaceRecordsAsync(records, ct);
@@ -502,4 +536,412 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
 
     private static DuckDbEvidenceRecord EmptyRecord(string sourceCode, Guid rawIndexId, string vulnerabilityKey, string sourceRecordId) =>
         new(sourceCode, rawIndexId, vulnerabilityKey, sourceRecordId, [], [], [], []);
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCpeAsync(int limit, CancellationToken ct)
+    {
+        // CPE data goes to a separate DuckDB table, return empty evidence records for stats tracking
+        await using var command = db.CreateCommand("select raw_index_id, cpe23_uri, vendor, product, version, part, target_sw, deprecated from stg_nvd_cpe_dictionary limit $1");
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var count = 0;
+        var rows = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(string.Join(",", [
+                SqlValue("nvd-cpe"),
+                SqlValue(reader.GetGuid(0).ToString("D")),
+                SqlValue(reader.GetString(1)),
+                SqlValue(reader.IsDBNull(2) ? null : reader.GetString(2)),
+                SqlValue(reader.IsDBNull(3) ? null : reader.GetString(3)),
+                SqlValue(reader.IsDBNull(4) ? null : reader.GetString(4)),
+                SqlValue(reader.IsDBNull(5) ? null : reader.GetString(5)),
+                SqlValue(reader.IsDBNull(6) ? null : reader.GetString(6)),
+                reader.IsDBNull(7) ? "null" : reader.GetBoolean(7).ToString().ToLowerInvariant()
+            ]));
+            count++;
+        }
+        if (count > 0)
+        {
+            var tempFile = Path.GetTempFileName() + ".csv";
+            await File.WriteAllLinesAsync(tempFile, rows, ct);
+            try
+            {
+                using var conn = new DuckDB.NET.Data.DuckDBConnection($"Data Source={store.DatabasePath}");
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"copy cpe_entries (source_code, raw_index_id, cpe23_uri, vendor, product, version, part, target_sw, deprecated) from '{tempFile}' (header false, delim ',', quote '\"', escape '\"', null 'null')";
+                cmd.ExecuteNonQuery();
+            }
+            finally { try { File.Delete(tempFile); } catch { } }
+        }
+        return [new DuckDbEvidenceRecord("nvd-cpe", Guid.Empty, "nvd-cpe", "nvd-cpe", [], [], [], [])];
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCsafAsync(string sourceCode, int limit, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand("""
+            select r.id, r.external_key, r.payload::text, s.code
+            from source_raw_index r
+            join sources s on s.id = r.source_id
+            where s.code = $1 and r.normalize_status in ('pending', 'succeeded')
+            limit $2
+            """);
+        command.Parameters.AddWithValue(sourceCode);
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var records = new List<DuckDbEvidenceRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawId = reader.GetGuid(0);
+            var key = reader.GetString(1);
+            var payload = JsonNode.Parse(reader.GetString(2));
+            var cves = payload?["cves"]?.AsArray() ?? [];
+            foreach (var cveNode in cves)
+            {
+                var cve = cveNode?.GetValue<string>();
+                if (string.IsNullOrWhiteSpace(cve)) continue;
+                records.Add(EmptyRecord(sourceCode, rawId, cve, key) with
+                {
+                    AffectedFacts = ExtractCsafFacts(payload, cve).ToList(),
+                    References = ExtractCsafReferences(payload).ToList()
+                });
+            }
+        }
+        return records;
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadAlpineAsync(int limit, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand("select raw_index_id, cve_id, package_name, version, fixed_version, release from stg_alpine_secdb limit $1");
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var records = new List<DuckDbEvidenceRecord>();
+        var seen = new Dictionary<string, List<DuckDbAffectedFact>>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawId = reader.GetGuid(0);
+            var cve = reader.GetString(1);
+            var pkg = reader.GetString(2);
+            var ver = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var fixedVer = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var release = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var cveKey = $"CVE-{cve}";
+            var range = fixedVer is not null ? $"< {fixedVer}" : (ver is not null ? $"= {ver}" : null);
+            if (!seen.TryGetValue(cveKey, out var facts)) { facts = []; seen[cveKey] = facts; }
+            facts.Add(new DuckDbAffectedFact("package", $"alpine:{release ?? "edge"}", pkg, ToPurl("alpine", pkg), null, range, "SEMVER", true));
+        }
+        foreach (var (cveKey, facts) in seen)
+            records.Add(new DuckDbEvidenceRecord("alpine-secdb", Guid.Empty, cveKey, cveKey, facts, [], [], []));
+        return records;
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadExternalAdvisoryAsync(string sourceCode, int limit, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand("""
+            select raw_index_id, advisory_id, identifiers, title, summary, description, severity_label,
+                   references_json::text, affected_products::text, payload::text
+            from stg_external_advisories where provider = $1 limit $2
+            """);
+        command.Parameters.AddWithValue(sourceCode);
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var records = new List<DuckDbEvidenceRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawId = reader.GetGuid(0);
+            var advisoryId = reader.GetString(1);
+            var identifiers = reader.IsDBNull(2) ? [] : reader.GetFieldValue<string[]>(2);
+            var title = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var desc = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var sevLabel = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var refs = reader.IsDBNull(7) ? null : JsonNode.Parse(reader.GetString(7));
+            var affectedJson = reader.IsDBNull(8) ? null : reader.GetString(8);
+            var key = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? advisoryId;
+            var facts = new List<DuckDbAffectedFact>();
+            if (affectedJson is not null)
+            {
+                try
+                {
+                    var products = JsonNode.Parse(affectedJson)?.AsArray() ?? [];
+                    foreach (var p in products)
+                    {
+                        var pkgName = p?["name"]?.GetValue<string>();
+                        var pkgVer = p?["version"]?.GetValue<string>();
+                        var eco = sourceCode switch { "npm-advisory" => "npm", "pypi-advisory" => "pypi", "nuget-advisory" => "nuget", _ => sourceCode };
+                        if (!string.IsNullOrWhiteSpace(pkgName))
+                            facts.Add(new DuckDbAffectedFact("package", eco, pkgName, ToPurl(eco, pkgName), null, pkgVer is not null ? $"<= {pkgVer}" : null, "SEMVER", true));
+                    }
+                }
+                catch { }
+            }
+            records.Add(new DuckDbEvidenceRecord(sourceCode, rawId, key, advisoryId, facts,
+                sevLabel is not null ? [new DuckDbSeverityScore(sourceCode, null, null, null, null, sevLabel)] : [],
+                ExtractReferences(refs).ToList(), []));
+        }
+        return records;
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadEcosystemAsync(string sourceCode, int limit, CancellationToken ct)
+    {
+        var eco = sourceCode switch { "go-advisory" => "go", "cargo-advisory" => "cargo", _ => sourceCode };
+        await using var command = db.CreateCommand("""
+            select raw_index_id, advisory_id, identifiers, ecosystem, package_name, purl, version_range_raw, range_type, payload::text
+            from stg_ecosystem_advisories where provider = $1 limit $2
+            """);
+        command.Parameters.AddWithValue(sourceCode);
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var records = new List<DuckDbEvidenceRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawId = reader.GetGuid(0);
+            var advisoryId = reader.GetString(1);
+            var identifiers = reader.IsDBNull(2) ? [] : reader.GetFieldValue<string[]>(2);
+            var ecosystem = reader.IsDBNull(3) ? eco : reader.GetString(3);
+            var pkgName = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var purl = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var range = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var rangeType = reader.IsDBNull(7) ? null : reader.GetString(7);
+            var key = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? advisoryId;
+            records.Add(EmptyRecord(sourceCode, rawId, key, advisoryId) with
+            {
+                AffectedFacts = pkgName is not null ? [new DuckDbAffectedFact("package", ecosystem, pkgName, purl, null, range, rangeType, true)] : []
+            });
+        }
+        return records;
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadThreatIntelAsync(string sourceCode, int limit, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand("""
+            select raw_index_id, identifier, epss_score, epss_percentile, observed_at
+            from stg_threat_intel_records where provider = $1 limit $2
+            """);
+        command.Parameters.AddWithValue(sourceCode);
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var records = new List<DuckDbEvidenceRecord>();
+        var rows = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawId = reader.GetGuid(0);
+            var identifier = reader.GetString(1);
+            var epss = reader.IsDBNull(2) ? (double?)null : (double)reader.GetDecimal(2);
+            var pct = reader.IsDBNull(3) ? (double?)null : (double)reader.GetDecimal(3);
+            var observed = reader.IsDBNull(4) ? (string?)null : reader.GetDateTime(4).ToString("O");
+            if (epss.HasValue || pct.HasValue)
+            {
+                rows.Add(string.Join(",", [
+                    SqlValue(sourceCode), SqlValue(rawId.ToString("D")), SqlValue(identifier),
+                    SqlValue("epss"), epss?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null",
+                    pct?.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? "null", SqlValue(observed)
+                ]));
+            }
+            records.Add(EmptyRecord(sourceCode, rawId, identifier, identifier) with
+            {
+                SeverityScores = epss.HasValue ? [new DuckDbSeverityScore("epss", "1.0", null, null, (decimal?)epss, null)] : []
+            });
+        }
+        if (rows.Count > 0)
+        {
+            var tempFile = Path.GetTempFileName() + ".csv";
+            await File.WriteAllLinesAsync(tempFile, rows, ct);
+            try
+            {
+                using var conn = new DuckDB.NET.Data.DuckDBConnection($"Data Source={store.DatabasePath}");
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"copy threat_scores (source_code, raw_index_id, vulnerability_key, score_type, score, percentile, observed_at) from '{tempFile}' (header false, delim ',', quote '\"', escape '\"', null 'null')";
+                cmd.ExecuteNonQuery();
+            }
+            finally { try { File.Delete(tempFile); } catch { } }
+        }
+        return records;
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadExploitAsync(string sourceCode, int limit, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand("""
+            select raw_index_id, source_key, identifiers, title, source_url, artifact_type, exploit_type,
+                   maturity, verification_status, published_at, modified_at
+            from stg_exploit_pocs where provider = $1 limit $2
+            """);
+        command.Parameters.AddWithValue(sourceCode);
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var rows = new List<string>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawId = reader.GetGuid(0);
+            var sourceKey = reader.GetString(1);
+            var identifiers = reader.IsDBNull(2) ? "[]" : System.Text.Json.JsonSerializer.Serialize(reader.GetFieldValue<string[]>(2));
+            rows.Add(string.Join(",", [
+                SqlValue(sourceCode), SqlValue(rawId.ToString("D")), SqlValue(sourceKey), SqlValue(identifiers),
+                SqlValue(reader.IsDBNull(3) ? null : reader.GetString(3)),
+                SqlValue(reader.IsDBNull(4) ? null : reader.GetString(4)),
+                SqlValue(reader.IsDBNull(5) ? null : reader.GetString(5)),
+                SqlValue(reader.IsDBNull(6) ? null : reader.GetString(6)),
+                SqlValue(reader.IsDBNull(7) ? null : reader.GetString(7)),
+                SqlValue(reader.IsDBNull(8) ? null : reader.GetString(8)),
+                reader.IsDBNull(9) ? "null" : SqlValue(reader.GetDateTime(9).ToString("O")),
+                reader.IsDBNull(10) ? "null" : SqlValue(reader.GetDateTime(10).ToString("O"))
+            ]));
+        }
+        if (rows.Count > 0)
+        {
+            var tempFile = Path.GetTempFileName() + ".csv";
+            await File.WriteAllLinesAsync(tempFile, rows, ct);
+            try
+            {
+                using var conn = new DuckDB.NET.Data.DuckDBConnection($"Data Source={store.DatabasePath}");
+                conn.Open();
+                using var cmd = conn.CreateCommand();
+                cmd.CommandText = $"copy exploits (source_code, raw_index_id, source_key, identifiers, title, source_url, artifact_type, exploit_type, maturity, verification_status, published_at, modified_at) from '{tempFile}' (header false, delim ',', quote '\"', escape '\"', null 'null')";
+                cmd.ExecuteNonQuery();
+            }
+            finally { try { File.Delete(tempFile); } catch { } }
+        }
+        return [new DuckDbEvidenceRecord(sourceCode, Guid.Empty, sourceCode, sourceCode, [], [], [], [])];
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCnnvdAsync(int limit, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand("""
+            select r.id, r.external_key, r.payload::text
+            from source_raw_index r
+            join sources s on s.id = r.source_id
+            where s.code = 'cnnvd' and r.normalize_status = 'succeeded'
+            limit $1
+            """);
+        command.Parameters.AddWithValue(limit);
+        command.CommandTimeout = 300;
+        var records = new List<DuckDbEvidenceRecord>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawId = reader.GetGuid(0);
+            var key = reader.GetString(1);
+            var payload = reader.IsDBNull(2) ? null : JsonNode.Parse(reader.GetString(2));
+            var cve = payload?["cveId"]?.GetValue<string>() ?? key;
+            var title = payload?["vulName"]?.GetValue<string>();
+            var desc = payload?["vulDesc"]?.GetValue<string>();
+            var sev = payload?["severity"]?.GetValue<string>();
+            var affected = payload?["affected"]?.AsArray() ?? [];
+            var facts = new List<DuckDbAffectedFact>();
+            foreach (var a in affected)
+            {
+                var name = a?["product"]?.GetValue<string>() ?? a?["vendor"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(name))
+                    facts.Add(new DuckDbAffectedFact("package", null, name, null, null, null, null, true));
+            }
+            records.Add(EmptyRecord("cnnvd", rawId, cve, key) with
+            {
+                AffectedFacts = facts,
+                SeverityScores = sev is not null ? [new DuckDbSeverityScore("cnnvd", null, null, null, null, sev)] : []
+            });
+        }
+        return records;
+    }
+
+    private static IEnumerable<DuckDbAffectedFact> ExtractGhsaFacts(JsonNode? payload)
+    {
+        if (payload is null) yield break;
+        var affected = payload["affected"]?.AsArray() ?? [];
+        foreach (var item in affected)
+        {
+            var pkg = item?["package"];
+            var eco = pkg?["ecosystem"]?.GetValue<string>();
+            var name = pkg?["name"]?.GetValue<string>();
+            var purl = pkg?["purl"]?.GetValue<string>() ?? ToPurl(eco, name);
+            var ranges = item?["ranges"]?.AsArray() ?? [];
+            foreach (var range in ranges)
+            {
+                var events = range?["events"]?.AsArray();
+                var introduced = events?.FirstOrDefault(x => x?["introduced"] is not null)?["introduced"]?.GetValue<string>();
+                var fixedVer = events?.FirstOrDefault(x => x?["fixed"] is not null)?["fixed"]?.GetValue<string>();
+                var rawRange = fixedVer is not null ? (introduced is not null ? $">= {introduced}, < {fixedVer}" : $"< {fixedVer}") : null;
+                if (!string.IsNullOrWhiteSpace(name))
+                    yield return new DuckDbAffectedFact("package", eco, name, purl, null, rawRange, range?["type"]?.GetValue<string>(), true);
+            }
+        }
+    }
+
+    private static IEnumerable<DuckDbSeverityScore> ExtractGhsaSeverity(JsonNode? cvss)
+    {
+        if (cvss is null) yield break;
+        var score = cvss["score"]?.GetValue<decimal>();
+        var vector = cvss["vectorString"]?.GetValue<string>();
+        var sev = cvss["severity"]?.GetValue<string>();
+        var version = cvss["version"]?.GetValue<string>();
+        yield return new DuckDbSeverityScore("CVSS", version, null, vector, score, sev);
+    }
+
+    private static IEnumerable<DuckDbWeakness> ExtractGhsaWeaknesses(JsonNode? cwes)
+    {
+        if (cwes is null) yield break;
+        foreach (var cwe in cwes.AsArray())
+        {
+            var id = cwe?["cweId"]?.GetValue<string>();
+            yield return new DuckDbWeakness("CWE", id, cwe?["name"]?.GetValue<string>());
+        }
+    }
+
+    private static IEnumerable<DuckDbReference> ExtractReferences(JsonNode? references)
+    {
+        if (references is null) yield break;
+        foreach (var refNode in references.AsArray())
+        {
+            if (refNode is JsonValue val && val.TryGetValue<string>(out var urlStr) && !string.IsNullOrWhiteSpace(urlStr))
+                yield return new DuckDbReference(urlStr, null, []);
+            else
+            {
+                var url = refNode?["url"]?.GetValue<string>();
+                if (!string.IsNullOrWhiteSpace(url))
+                    yield return new DuckDbReference(url, refNode?["type"]?.GetValue<string>(), []);
+            }
+        }
+    }
+
+    private static IEnumerable<DuckDbAffectedFact> ExtractCsafFacts(JsonNode? payload, string cve)
+    {
+        if (payload is null) yield break;
+        var products = payload["products"]?.AsArray() ?? [];
+        foreach (var p in products)
+        {
+            var name = p?["name"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            var eco = p?["type"]?.GetValue<string>() ?? p?["ecosystem"]?.GetValue<string>();
+            var cpe = p?["cpe"]?.GetValue<string>();
+            var vers = p?["versions"]?.AsArray();
+            if (vers is not null)
+            {
+                foreach (var v in vers)
+                    yield return new DuckDbAffectedFact("package", eco, name, null, cpe, v?.GetValue<string>(), "SEMVER", true);
+            }
+            else
+                yield return new DuckDbAffectedFact("package", eco, name, null, cpe, null, null, true);
+        }
+    }
+
+    private static IEnumerable<DuckDbReference> ExtractCsafReferences(JsonNode? payload)
+    {
+        if (payload is null) yield break;
+        var refs = payload["references"]?.AsArray() ?? [];
+        foreach (var r in refs)
+        {
+            var url = r?["url"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(url))
+                yield return new DuckDbReference(url, r?["category"]?.GetValue<string>(), []);
+        }
+    }
+
+    private static string SqlValue(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? "null" : $"\"{value.Replace("\"", "\"\"")}\"";
 }

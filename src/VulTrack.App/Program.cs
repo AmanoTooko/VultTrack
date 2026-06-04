@@ -721,7 +721,7 @@ app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, Can
     });
 });
 
-app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvidenceStore duckDb, Guid id, CancellationToken ct) =>
+app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvidenceStore duckDb, string? source, Guid id, CancellationToken ct) =>
 {
     await using var cmd = db.CreateCommand("""
         select v.id, v.primary_identifier, coalesce(preferred_title.value, v.title), coalesce(preferred_description.value, v.description),
@@ -837,6 +837,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
     var sourceUrls = BuildSourceUrls(vulnerability.primaryIdentifier, vulnerability.aliases);
 
     var queryId = actualId;
+    var useDuckDb = source == "duckdb" || (duckDb.Enabled && source != "pgsql");
 
     return ApiResult.Ok(new
     {
@@ -864,7 +865,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
                      ecosystem nulls last, display_name
             limit 60
             """, queryId, ct),
-        affectedExpressions = duckDb.Enabled
+        affectedExpressions = useDuckDb
             ? (await duckDb.QueryAffectedFactsAsync(vulnerability.primaryIdentifier, 250, ct))
             : await QueryRowsAsync(db, """
             select s.code, f.fact_type, f.ecosystem, f.package_name, f.purl,
@@ -899,7 +900,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
                      s.code nulls last
             limit 16
             """, queryId, ct),
-        severities = duckDb.Enabled
+        severities = useDuckDb
             ? (await duckDb.QuerySeverityScoresAsync(vulnerability.primaryIdentifier, 20, ct))
             : await QueryRowsAsync(db, """
             select s.code, scoring_system, scoring_version, score_type, vector_string,
@@ -911,7 +912,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
                      is_selected desc, score desc nulls last
             limit 20
             """, queryId, ct),
-        references = duckDb.Enabled
+        references = useDuckDb
             ? (await duckDb.QueryReferencesAsync(vulnerability.primaryIdentifier, 160, ct))
             : await QueryRowsAsync(db, """
             with ranked as (
