@@ -137,13 +137,13 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             select source_code, fact_type, ecosystem, package_name,
                    purl, cpe23_uri, version_range_raw, range_type, vulnerable
             from affected_facts
-            where upper(vulnerability_key) = upper($1)
+            where vulnerability_key = $1
             order by case when cpe23_uri is not null then 0 else 1 end,
                      case when purl is not null then 0 else 1 end,
                      source_code nulls last, package_name nulls last
             limit {limit}
             """;
-        command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
+        command.Parameters.Add(new DuckDBParameter(NormalizeKey(vulnerabilityKey)));
         return await ReadRowsAsync(command, ct);
     }
 
@@ -157,11 +157,11 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         command.CommandText = $"""
             select source_code, url, ref_type
             from evidence_references
-            where upper(vulnerability_key) = upper($1)
+            where vulnerability_key = $1
             order by source_code nulls last, url
             limit {limit}
             """;
-        command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
+        command.Parameters.Add(new DuckDBParameter(NormalizeKey(vulnerabilityKey)));
         return await ReadRowsAsync(command, ct);
     }
 
@@ -176,11 +176,11 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             select source_code, scoring_system, scoring_version, score_type,
                    vector_string, score, severity_label
             from severity_scores
-            where upper(vulnerability_key) = upper($1)
+            where vulnerability_key = $1
             order by score desc nulls last
             limit {limit}
             """;
-        command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
+        command.Parameters.Add(new DuckDBParameter(NormalizeKey(vulnerabilityKey)));
         return await ReadRowsAsync(command, ct);
     }
 
@@ -196,19 +196,19 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
               select vulnerability_key, source_code, fact_type, ecosystem, package_name,
                      purl, cpe23_uri, version_range_raw, range_type, vulnerable,
                      row_number() over (
-                       partition by upper(vulnerability_key)
+                       partition by vulnerability_key
                        order by case when cpe23_uri is not null then 0 else 1 end,
                                 case when purl is not null then 0 else 1 end,
                                 source_code nulls last, package_name nulls last
                      ) as rn
               from affected_facts
-              where upper(vulnerability_key) in ({KeyList(vulnerabilityKeys)})
+              where vulnerability_key in ({KeyList(vulnerabilityKeys)})
             )
             select vulnerability_key, source_code, fact_type, ecosystem, package_name,
                    purl, cpe23_uri, version_range_raw, range_type, vulnerable
             from ranked
             where rn <= {Math.Clamp(limitPerKey, 1, 1000)}
-            order by upper(vulnerability_key), rn
+            order by vulnerability_key, rn
             """;
         return GroupRowsByKey(await ReadRowsAsync(command, ct), "vulnerability_key");
     }
@@ -224,16 +224,16 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             with ranked as (
               select vulnerability_key, source_code, url, ref_type,
                      row_number() over (
-                       partition by upper(vulnerability_key)
+                       partition by vulnerability_key
                        order by source_code nulls last, url
                      ) as rn
               from evidence_references
-              where upper(vulnerability_key) in ({KeyList(vulnerabilityKeys)})
+              where vulnerability_key in ({KeyList(vulnerabilityKeys)})
             )
             select vulnerability_key, source_code, url, ref_type
             from ranked
             where rn <= {Math.Clamp(limitPerKey, 1, 1000)}
-            order by upper(vulnerability_key), rn
+            order by vulnerability_key, rn
             """;
         return GroupRowsByKey(await ReadRowsAsync(command, ct), "vulnerability_key");
     }
@@ -250,17 +250,17 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
               select vulnerability_key, source_code, scoring_system, scoring_version, score_type,
                      vector_string, score, severity_label,
                      row_number() over (
-                       partition by upper(vulnerability_key)
+                       partition by vulnerability_key
                        order by score desc nulls last
                      ) as rn
               from severity_scores
-              where upper(vulnerability_key) in ({KeyList(vulnerabilityKeys)})
+              where vulnerability_key in ({KeyList(vulnerabilityKeys)})
             )
             select vulnerability_key, source_code, scoring_system, scoring_version, score_type,
                    vector_string, score, severity_label
             from ranked
             where rn <= {Math.Clamp(limitPerKey, 1, 200)}
-            order by upper(vulnerability_key), rn
+            order by vulnerability_key, rn
             """;
         return GroupRowsByKey(await ReadRowsAsync(command, ct), "vulnerability_key");
     }
@@ -313,7 +313,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             .Select(fact => CsvRow(
                 record.SourceCode,
                 record.RawIndexId.ToString("D"),
-                record.VulnerabilityKey,
+                NormalizeKey(record.VulnerabilityKey),
                 record.SourceRecordId,
                 fact.FactType,
                 fact.Ecosystem,
@@ -338,7 +338,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         var rows = records.SelectMany(record => record.SeverityScores.Select(score => CsvRow(
             record.SourceCode,
             record.RawIndexId.ToString("D"),
-            record.VulnerabilityKey,
+            NormalizeKey(record.VulnerabilityKey),
             record.SourceRecordId,
             score.ScoringSystem,
             score.ScoringVersion,
@@ -361,7 +361,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             .Select(reference => CsvRow(
                 record.SourceCode,
                 record.RawIndexId.ToString("D"),
-                record.VulnerabilityKey,
+                NormalizeKey(record.VulnerabilityKey),
                 record.SourceRecordId,
                 reference.Url,
                 reference.Url.ToLowerInvariant(),
@@ -381,7 +381,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             .Select(weakness => CsvRow(
                 record.SourceCode,
                 record.RawIndexId.ToString("D"),
-                record.VulnerabilityKey,
+                NormalizeKey(record.VulnerabilityKey),
                 record.SourceRecordId,
                 weakness.WeaknessType,
                 weakness.WeaknessId,
@@ -445,8 +445,10 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
     private static string KeyList(IEnumerable<string> keys) =>
         string.Join(", ", keys
             .Where(key => !string.IsNullOrWhiteSpace(key))
-            .Select(key => $"'{key.Replace("'", "''").ToUpperInvariant()}'")
+            .Select(key => $"'{NormalizeKey(key).Replace("'", "''")}'")
             .Distinct(StringComparer.Ordinal));
+
+    private static string NormalizeKey(string key) => Identifier.Normalize(key);
 
     private static string CsvRow(params string?[] values) =>
         string.Join(",", values.Select(CsvValue));
@@ -590,6 +592,21 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
           percentile double,
           observed_at varchar
         )
+        """,
+        """
+        create index if not exists ix_duck_affected_facts_vulnerability_key on affected_facts(vulnerability_key)
+        """,
+        """
+        create index if not exists ix_duck_severity_scores_vulnerability_key on severity_scores(vulnerability_key)
+        """,
+        """
+        create index if not exists ix_duck_evidence_references_vulnerability_key on evidence_references(vulnerability_key)
+        """,
+        """
+        create index if not exists ix_duck_weaknesses_vulnerability_key on weaknesses(vulnerability_key)
+        """,
+        """
+        create index if not exists ix_duck_threat_scores_vulnerability_key on threat_scores(vulnerability_key)
         """
     ];
 
@@ -625,7 +642,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             where identifiers like '%' || $1 || '%'
             limit {limit}
             """;
-        command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
+        command.Parameters.Add(new DuckDBParameter(NormalizeKey(vulnerabilityKey)));
         return await ReadRowsAsync(command, ct);
     }
 
@@ -642,7 +659,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             where vulnerability_key = $1
             limit {limit}
             """;
-        command.Parameters.Add(new DuckDBParameter(vulnerabilityKey));
+        command.Parameters.Add(new DuckDBParameter(NormalizeKey(vulnerabilityKey)));
         return await ReadRowsAsync(command, ct);
     }
 }
