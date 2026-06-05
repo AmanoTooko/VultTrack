@@ -7,11 +7,13 @@ namespace VulTrack.App;
 public sealed class SourceScheduler(
     NpgsqlDataSource db,
     IRawNormalizationService normalizer,
+    DuckDbAffectedComponentProjector affectedComponentProjector,
     VulnerabilityDetailSnapshotBuilder detailSnapshotBuilder,
     IOptions<VulTrackSchedulerOptions> options,
     ILogger<SourceScheduler> logger) : BackgroundService
 {
     private VulTrackSchedulerOptions Options => options.Value;
+    private DateTimeOffset _lastDuckDbAffectedQueueRun = DateTimeOffset.MinValue;
     private DateTimeOffset _lastDetailSnapshotQueueRun = DateTimeOffset.MinValue;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -57,6 +59,7 @@ public sealed class SourceScheduler(
                 var allSources = await LoadAllSourcesAsync(ct);
                 await RunNormalizeSourcesAsync(allSources, limit, parallelism, "normalize cycle", ct);
 
+                await RunDuckDbAffectedComponentQueueAsync(ct);
                 await RunDetailSnapshotQueueAsync(ct);
             }
             catch (Exception ex)
@@ -104,6 +107,7 @@ public sealed class SourceScheduler(
         var allSources = await LoadAllSourcesAsync(ct);
         await RunNormalizeSourcesAsync(allSources, limit, parallelism, "scheduled normalization", ct);
 
+        await RunDuckDbAffectedComponentQueueAsync(ct);
         await RunDetailSnapshotQueueAsync(ct);
 
         var dueSources = await LoadDueSourcesAsync(ct);
@@ -212,6 +216,48 @@ public sealed class SourceScheduler(
         catch (Exception ex)
         {
             logger.LogError(ex, "Detail snapshot queue refresh failed; continuing scheduler cycle.");
+        }
+    }
+
+    private async Task RunDuckDbAffectedComponentQueueAsync(CancellationToken ct)
+    {
+        if (!EnvBool("SCHEDULER_DUCKDB_AFFECTED_QUEUE_ENABLED", Options.DuckDbAffectedQueueEnabled))
+        {
+            return;
+        }
+
+        var intervalSeconds = EnvInt("SCHEDULER_DUCKDB_AFFECTED_QUEUE_INTERVAL_SECONDS", Options.DuckDbAffectedQueueIntervalSeconds, 0);
+        var now = DateTimeOffset.UtcNow;
+        if (intervalSeconds > 0 && now - _lastDuckDbAffectedQueueRun < TimeSpan.FromSeconds(intervalSeconds))
+        {
+            return;
+        }
+
+        _lastDuckDbAffectedQueueRun = now;
+        var request = new DuckDbAffectedComponentQueueRequest(
+            Limit: EnvInt("SCHEDULER_DUCKDB_AFFECTED_QUEUE_LIMIT", Options.DuckDbAffectedQueueLimit, 1),
+            BatchSize: EnvInt("SCHEDULER_DUCKDB_AFFECTED_QUEUE_BATCH_SIZE", Options.DuckDbAffectedQueueBatchSize, 1));
+
+        try
+        {
+            var result = await affectedComponentProjector.ProcessQueueAsync(request, ct);
+            if (result.selected > 0 || result.processedRows > 0)
+            {
+                logger.LogInformation(
+                    "DuckDB affected component queue: selected={Selected}, processed_vulnerabilities={ProcessedVulnerabilities}, rows={Rows}, elapsed_seconds={ElapsedSeconds:F1}",
+                    result.selected,
+                    result.processedVulnerabilities,
+                    result.processedRows,
+                    result.elapsedSeconds);
+            }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "DuckDB affected component queue refresh failed; continuing scheduler cycle.");
         }
     }
 
@@ -501,4 +547,8 @@ public sealed class VulTrackSchedulerOptions
     public int DetailSnapshotQueueLimit { get; init; } = 500;
     public int DetailSnapshotQueueConcurrency { get; init; } = 4;
     public int DetailSnapshotGzipLevel { get; init; } = 6;
+    public bool DuckDbAffectedQueueEnabled { get; init; } = true;
+    public int DuckDbAffectedQueueIntervalSeconds { get; init; } = 60;
+    public int DuckDbAffectedQueueLimit { get; init; } = 5000;
+    public int DuckDbAffectedQueueBatchSize { get; init; } = 1000;
 }

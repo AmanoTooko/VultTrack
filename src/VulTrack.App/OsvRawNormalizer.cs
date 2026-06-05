@@ -108,7 +108,7 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                 try
                 {
                     var payload = JsonNode.Parse(row.Payload);
-                    var identifiers = IdentifiersFrom([row.OsvId], row.Aliases);
+                    var identifiers = OsvIdentifierExtractor.Extract(row.OsvId, row.Aliases, payload);
                     var primary = identifiers.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? row.OsvId;
                     var title = payload?["summary"]?.GetValue<string>();
                     var description = payload?["details"]?.GetValue<string>() ?? title;
@@ -313,11 +313,11 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
                     rawRange = $">= {introduced}";
                 else
                     rawRange = range?.ToJsonString();
-                yield return new AffectedFactDraft("package", ecosystem, name, purl, rawRange, range?["type"]?.GetValue<string>(), affected?.ToJsonString() ?? "{}");
+                yield return new AffectedFactDraft("package", ecosystem, name, purl, rawRange, range?["type"]?.GetValue<string>(), "{}");
             }
             if (affected?["ranges"] is null && !string.IsNullOrWhiteSpace(name))
             {
-                yield return new AffectedFactDraft("package", ecosystem, name, purl, null, null, affected?.ToJsonString() ?? "{}");
+                yield return new AffectedFactDraft("package", ecosystem, name, purl, null, null, "{}");
             }
         }
     }

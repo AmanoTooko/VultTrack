@@ -175,7 +175,7 @@ public static class SbomEndpoints
         return ApiResult.Ok(new { sbom, components = comps, vulnerabilities = vulns });
     }
 
-    private static async Task<IResult> Match(NpgsqlDataSource db, SbomMatchRequest req, CancellationToken ct)
+    private static async Task<IResult> Match(NpgsqlDataSource db, DuckDbEvidenceStore duckDb, SbomMatchRequest req, CancellationToken ct)
     {
         var m = 0;
         await using var conn = await db.OpenConnectionAsync(ct);
@@ -209,170 +209,30 @@ public static class SbomEndpoints
             await reset.ExecuteNonQueryAsync(ct);
         }
 
-        await using (var temp = new NpgsqlCommand("""
-            create temp table temp_sbom_match_components (
-              component_id uuid primary key,
-              purl text,
-              purl_decoded text,
-              purl_without_version text,
-              name text,
-              version text,
-              ecosystem text,
-              mapped_ecosystem text,
-              cpe23_uri text,
-              cpe_prefix text,
-              cpe_product text,
-              source_package_name text,
-              source_package_version text
-            ) on commit drop
-            """, conn))
-        {
-            await temp.ExecuteNonQueryAsync(ct);
-        }
+        if (!duckDb.Enabled)
+            return ApiResult.Error("DUCKDB_DISABLED", "SBOM matching requires DuckDB affected component projection.");
 
-        foreach (var chunk in comps.Chunk(400))
+        var matchComponents = comps.Select(component =>
         {
-            var p = 1;
-            var values = new List<string>();
-            var parameters = new List<object>();
-            foreach (var (cid, purl, name, ver, eco, _, _, cpe23Uri, sourcePackageName, sourcePackageVersion) in chunk)
-            {
-                var purlDec = string.IsNullOrWhiteSpace(purl) ? null : Uri.UnescapeDataString(purl);
-                var pwv = purlDec is null ? null : StripVersion(purlDec) ?? purlDec;
-                var meco = MapEcosystem(eco);
-                var cpePrefix = CpeProductPrefix(cpe23Uri);
-                var cpeProduct = ParseCpe(cpe23Uri)?.Product;
-                values.Add($"(${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++})");
-                parameters.Add(cid);
-                parameters.Add((object?)purl ?? DBNull.Value);
-                parameters.Add((object?)purlDec ?? DBNull.Value);
-                parameters.Add((object?)pwv ?? DBNull.Value);
-                parameters.Add((object?)name ?? DBNull.Value);
-                parameters.Add((object?)ver ?? DBNull.Value);
-                parameters.Add((object?)eco ?? DBNull.Value);
-                parameters.Add((object?)meco ?? DBNull.Value);
-                parameters.Add((object?)cpe23Uri ?? DBNull.Value);
-                parameters.Add((object?)cpePrefix ?? DBNull.Value);
-                parameters.Add((object?)cpeProduct ?? DBNull.Value);
-                parameters.Add((object?)sourcePackageName ?? DBNull.Value);
-                parameters.Add((object?)sourcePackageVersion ?? DBNull.Value);
-            }
-            await using var insertTemp = new NpgsqlCommand($"""
-                insert into temp_sbom_match_components (
-                  component_id, purl, purl_decoded, purl_without_version, name, version,
-                  ecosystem, mapped_ecosystem, cpe23_uri, cpe_prefix, cpe_product,
-                  source_package_name, source_package_version
-                ) values {string.Join(",", values)}
-                """, conn);
-            foreach (var parameter in parameters) insertTemp.Parameters.AddWithValue(parameter);
-            await insertTemp.ExecuteNonQueryAsync(ct);
-        }
-
-        await using (var analyzeTemp = new NpgsqlCommand("analyze temp_sbom_match_components", conn))
-        {
-            await analyzeTemp.ExecuteNonQueryAsync(ct);
-        }
-
-        var matches = new List<SbomCandidateMatch>();
-        await using (var sq = new NpgsqlCommand("""
-            with candidates as (
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 1 as match_priority, 'cpe-exact' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.cpe23_uri is not null and c.primary_cpe23_uri = t.cpe23_uri
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 2 as match_priority, 'purl' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.purl_without_version is not null
-               and (c.primary_purl = t.purl_without_version or c.primary_purl = t.purl_decoded)
-               and (
-                 t.mapped_ecosystem is null
-                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
-                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
-               )
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 3 as match_priority, 'source-package' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.source_package_name is not null
-               and lower(c.package_name)=lower(t.source_package_name)
-               and (
-                 t.mapped_ecosystem is null
-                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
-                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
-               )
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 4 as match_priority, 'name' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.purl_without_version is null
-               and t.cpe23_uri is null
-               and t.source_package_name is null
-               and t.name is not null
-               and lower(c.display_name)=lower(t.name)
-               and (
-                 t.mapped_ecosystem is null
-                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
-                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
-               )
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 5 as match_priority, 'package' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.purl_without_version is null
-               and t.cpe23_uri is null
-               and t.source_package_name is null
-               and t.name is not null
-               and lower(c.package_name)=lower(t.name)
-               and (
-                 t.mapped_ecosystem is null
-                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
-                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
-               )
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 6 as match_priority, 'cpe-product' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.cpe_prefix is not null and c.primary_cpe23_uri like t.cpe_prefix || '%'
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 7 as match_priority, 'cpe-product' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.cpe_product is not null
-               and lower(c.package_name)=lower(t.cpe_product)
-               and lower(coalesce(c.ecosystem,''))='cpe'
-            )
-            select distinct on (c.component_id, c.vulnerability_id)
-                   c.component_id, c.purl, c.component_version, c.component_cpe, c.source_package_version,
-                   c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, c.match_basis
-            from candidates c
-            order by c.component_id, c.vulnerability_id, c.match_priority,
-              case when c.normalized_range is not null and c.normalized_range <> '' and c.normalized_range ~ '^[<>]=?' then 0 else 1 end
-            """, conn))
-        {
-            await using var sr = await sq.ExecuteReaderAsync(ct);
-            while (await sr.ReadAsync(ct))
-                matches.Add(new SbomCandidateMatch(
-                    sr.GetGuid(0),
-                    sr.IsDBNull(1) ? null : sr.GetString(1),
-                    sr.IsDBNull(2) ? null : sr.GetString(2),
-                    sr.IsDBNull(3) ? null : sr.GetString(3),
-                    sr.IsDBNull(4) ? null : sr.GetString(4),
-                    sr.GetGuid(5),
-                    sr.IsDBNull(6) ? null : sr.GetString(6),
-                    sr.IsDBNull(7) ? null : sr.GetString(7),
-                    sr.IsDBNull(8) ? null : sr.GetString(8),
-                    sr.IsDBNull(9) ? null : sr.GetString(9),
-                    sr.IsDBNull(10) ? null : sr.GetString(10)));
-        }
+            var purlDec = string.IsNullOrWhiteSpace(component.Purl) ? null : Uri.UnescapeDataString(component.Purl);
+            var pwv = purlDec is null ? null : StripVersion(purlDec) ?? purlDec;
+            var meco = MapEcosystem(component.Eco);
+            return new DuckDbSbomMatchComponent(
+                component.Id,
+                component.Purl,
+                purlDec,
+                pwv,
+                component.Name,
+                component.Version,
+                component.Eco,
+                meco,
+                component.Cpe23Uri,
+                CpeProductPrefix(component.Cpe23Uri),
+                ParseCpe(component.Cpe23Uri)?.Product,
+                component.SourcePackageName,
+                component.SourcePackageVersion);
+        }).ToList();
+        var matches = await duckDb.QuerySbomCandidateMatchesAsync(matchComponents, ct);
 
         var matched = matches
             .Select(item =>
@@ -381,6 +241,7 @@ public static class SbomEndpoints
                     ? item.SourcePackageVersion ?? item.ComponentVersion
                     : item.ComponentVersion;
                 var versionMatched = ResolveSbomVersionMatch(matchedVersion, item.Range, item.Ecosystem, item.ComponentCpe, item.MatchedCpe, item.Basis);
+                var possible = versionMatched != true && IsPossibleSbomMatch(matchedVersion, item.Range, item.Basis);
                 return new
                 {
                     item.ComponentId,
@@ -389,12 +250,12 @@ public static class SbomEndpoints
                     item.DisplayName,
                     item.Ecosystem,
                     item.Range,
-                    item.Basis,
+                    Basis = possible ? $"possible-{item.Basis}" : item.Basis,
                     MatchedVersion = matchedVersion,
-                    VersionMatched = versionMatched
+                    VersionMatched = possible ? (bool?)null : versionMatched
                 };
             })
-            .Where(item => item.VersionMatched == true)
+            .Where(item => item.VersionMatched == true || item.Basis?.StartsWith("possible-", StringComparison.OrdinalIgnoreCase) == true)
             .ToList();
 
         foreach (var chunk in matched.Chunk(1000))
@@ -411,7 +272,7 @@ public static class SbomEndpoints
                 parameters.Add((object?)item.DisplayName ?? DBNull.Value);
                 parameters.Add((object?)item.Ecosystem ?? DBNull.Value);
                 parameters.Add((object?)item.Range ?? DBNull.Value);
-                parameters.Add(item.VersionMatched.GetValueOrDefault());
+                parameters.Add((object?)item.VersionMatched ?? DBNull.Value);
                 parameters.Add((object?)item.Basis ?? DBNull.Value);
                 parameters.Add((object?)item.MatchedVersion ?? DBNull.Value);
             }
@@ -773,6 +634,16 @@ public static class SbomEndpoints
         if (string.Equals(basis, "cpe-exact", StringComparison.OrdinalIgnoreCase)) return true;
         if (matched.Version is "*" or "-" or null) return true;
         return string.Equals(component.Version, matched.Version, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsPossibleSbomMatch(string? version, string? range, string? basis)
+    {
+        if (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(range)) return false;
+        if (!EcosystemVersionComparer.IsCommitLikeVersion(version)) return false;
+        return basis is not null && (
+            basis.Equals("purl", StringComparison.OrdinalIgnoreCase) ||
+            basis.Equals("source-package", StringComparison.OrdinalIgnoreCase) ||
+            basis.Equals("cpe-exact", StringComparison.OrdinalIgnoreCase));
     }
 
     private static string? CpeProductPrefix(string? cpe)

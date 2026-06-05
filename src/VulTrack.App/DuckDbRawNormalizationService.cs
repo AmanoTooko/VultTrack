@@ -4,6 +4,7 @@ namespace VulTrack.App;
 
 public sealed class DuckDbRawNormalizationService(
     NpgsqlDataSource db,
+    RawNormalizationService postgresNormalizer,
     DuckDbEvidenceNormalizer normalizer,
     IConfiguration configuration,
     ILogger<DuckDbRawNormalizationService> logger) : IRawNormalizationService
@@ -24,19 +25,24 @@ public sealed class DuckDbRawNormalizationService(
     public async Task<NormalizeBatchResult> ProcessSourcePendingAsync(string sourceCode, int limit, CancellationToken ct)
     {
         await using var connection = await db.OpenConnectionAsync(ct);
-        if (!await TryAcquireSourceNormalizeLockAsync(connection, sourceCode, ct))
-        {
-            logger.LogInformation("DuckDB normalizer {SourceCode} is already running; skipping overlapping request.", sourceCode);
+        var rawIndexIds = await LoadPendingRawIdsAsync(connection, sourceCode, limit, ct);
+        if (rawIndexIds.Length == 0)
             return new NormalizeBatchResult(sourceCode, 0, 0);
+
+        var pgResult = await postgresNormalizer.ProcessSourcePendingAsync(sourceCode, limit, ct);
+        if (pgResult.Processed <= 0)
+            return pgResult;
+
+        var inlineLimit = DuckDbInlineLimit();
+        if (inlineLimit <= 0 || rawIndexIds.Length >= inlineLimit)
+        {
+            logger.LogInformation("Skipping inline DuckDB evidence normalization for {SourceCode}: raw_ids={RawIds} exceeds inline_limit={InlineLimit}. Run source-level DuckDB rebuild after bulk PostgreSQL normalization.",
+                sourceCode, rawIndexIds.Length, inlineLimit);
+            return pgResult;
         }
 
         try
         {
-            await SupersedeOlderPendingRawAsync(connection, sourceCode, ct);
-            var rawIndexIds = await LoadPendingRawIdsAsync(connection, sourceCode, limit, ct);
-            if (rawIndexIds.Length == 0)
-                return new NormalizeBatchResult(sourceCode, 0, 0);
-
             var request = new DuckDbEvidenceNormalizeRequest(
                 sourceCode,
                 Math.Min(DuckDbLimit(limit), rawIndexIds.Length),
@@ -45,20 +51,14 @@ public sealed class DuckDbRawNormalizationService(
                 RawIndexIds: rawIndexIds);
             var result = await normalizer.NormalizeAsync(request, ct);
             var source = result.sources.FirstOrDefault(x => string.Equals(x.sourceCode, sourceCode, StringComparison.OrdinalIgnoreCase));
-            if (source is null)
-                return new NormalizeBatchResult(sourceCode, 0, 1);
-
-            await MarkPendingSucceededAsync(connection, rawIndexIds, ct);
-            return new NormalizeBatchResult(sourceCode, rawIndexIds.Length, 0);
+            return source is null
+                ? new NormalizeBatchResult(sourceCode, pgResult.Processed, pgResult.Failed + 1)
+                : new NormalizeBatchResult(sourceCode, pgResult.Processed, pgResult.Failed);
         }
         catch (Exception ex)
         {
-            logger.LogError(ex, "DuckDB normalizer {SourceCode} failed.", sourceCode);
-            return new NormalizeBatchResult(sourceCode, 0, 1);
-        }
-        finally
-        {
-            await ReleaseSourceNormalizeLockAsync(connection, sourceCode, CancellationToken.None);
+            logger.LogError(ex, "DuckDB evidence projection failed after PostgreSQL normalization for {SourceCode}.", sourceCode);
+            return new NormalizeBatchResult(sourceCode, pgResult.Processed, pgResult.Failed + 1);
         }
     }
 
@@ -102,6 +102,15 @@ public sealed class DuckDbRawNormalizationService(
             : 10_000;
     }
 
+    private int DuckDbInlineLimit()
+    {
+        var configured = Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_INLINE_NORMALIZE_LIMIT")
+            ?? configuration["VulTrack:DuckDb:InlineNormalizeLimit"];
+        return int.TryParse(configured, out var value) && value >= 0
+            ? Math.Min(value, 100_000)
+            : 0;
+    }
+
     private static async Task<HashSet<string>> LoadEnabledAutomaticSourceCodesAsync(NpgsqlConnection connection, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand("""
@@ -121,64 +130,4 @@ public sealed class DuckDbRawNormalizationService(
         return codes;
     }
 
-    private static async Task<bool> TryAcquireSourceNormalizeLockAsync(NpgsqlConnection connection, string sourceCode, CancellationToken ct)
-    {
-        await using var cmd = new NpgsqlCommand("select pg_try_advisory_lock(hashtext($1), 0)", connection);
-        cmd.Parameters.AddWithValue($"normalize:{sourceCode.ToLowerInvariant()}");
-        return (bool)(await cmd.ExecuteScalarAsync(ct) ?? false);
-    }
-
-    private static async Task ReleaseSourceNormalizeLockAsync(NpgsqlConnection connection, string sourceCode, CancellationToken ct)
-    {
-        await using var cmd = new NpgsqlCommand("select pg_advisory_unlock(hashtext($1), 0)", connection);
-        cmd.Parameters.AddWithValue($"normalize:{sourceCode.ToLowerInvariant()}");
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
-
-    private async Task SupersedeOlderPendingRawAsync(NpgsqlConnection connection, string? sourceCode, CancellationToken ct)
-    {
-        await using var cmd = new NpgsqlCommand("""
-            with ranked as (
-              select r.id,
-                     row_number() over (
-                       partition by r.source_id, r.external_key
-                       order by
-                         case when r.status = 'priority' then 0 else 1 end,
-                         r.source_modified_at desc nulls last,
-                         r.updated_at desc,
-                         r.created_at desc,
-                         r.id desc
-                     ) as rank
-              from source_raw_index r
-              join sources s on s.id = r.source_id
-              where r.normalize_status in ('pending', 'failed')
-                and ($1::text is null or s.code = $1)
-            )
-            update source_raw_index r
-            set normalize_status = 'superseded',
-                updated_at = now()
-            from ranked
-            where r.id = ranked.id
-              and ranked.rank > 1
-            """, connection);
-        cmd.CommandTimeout = 300;
-        cmd.Parameters.AddWithValue((object?)sourceCode ?? DBNull.Value);
-        var superseded = await cmd.ExecuteNonQueryAsync(ct);
-        if (superseded > 0)
-            logger.LogInformation("Marked {Count} older raw snapshots as superseded for {SourceCode}.", superseded, sourceCode ?? "all sources");
-    }
-
-    private static async Task MarkPendingSucceededAsync(NpgsqlConnection connection, Guid[] rawIndexIds, CancellationToken ct)
-    {
-        await using var cmd = new NpgsqlCommand("""
-            update source_raw_index
-            set normalize_status = 'succeeded',
-                updated_at = now()
-            where id = any($1)
-              and normalize_status in ('pending', 'failed')
-            """, connection);
-        cmd.CommandTimeout = 300;
-        cmd.Parameters.AddWithValue(rawIndexIds);
-        await cmd.ExecuteNonQueryAsync(ct);
-    }
 }

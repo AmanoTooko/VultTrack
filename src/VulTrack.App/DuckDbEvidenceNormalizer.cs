@@ -251,8 +251,8 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             var rawIndexId = reader.GetGuid(0);
             var osvId = reader.GetString(1);
             var aliases = reader.GetFieldValue<string[]>(2);
-            var key = PreferredIdentifier(osvId, aliases);
             var payload = JsonNode.Parse(reader.GetString(3));
+            var key = OsvIdentifierExtractor.Preferred(osvId, aliases, payload);
             records.Add(EmptyRecord(sourceCode, rawIndexId, key, osvId) with
             {
                 AffectedFacts = ExtractOsvFacts(payload?["affected"]).ToList(),
@@ -749,17 +749,6 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 > 0m => "LOW",
                 _ => "NONE"
             };
-
-    private static string PreferredIdentifier(string fallback, IEnumerable<string> aliases) =>
-        aliases.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase))
-        ?? ExtractCveIdentifier(fallback)
-        ?? fallback;
-
-    private static string? ExtractCveIdentifier(string value)
-    {
-        var match = System.Text.RegularExpressions.Regex.Match(value, @"CVE-\d{4}-\d{4,}", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        return match.Success ? match.Value.ToUpperInvariant() : null;
-    }
 
     private static bool IsDebianVulnerabilityIdentifier(string value) =>
         value.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)

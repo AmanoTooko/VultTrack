@@ -43,6 +43,21 @@ public sealed record DuckDbAffectedComponentRebuildRequest(
     int BatchSize = 100000,
     int Limit = 0);
 
+public sealed record DuckDbAffectedComponentQueueRequest(
+    int Limit = 5000,
+    int BatchSize = 1000);
+
+public sealed record DuckDbAffectedComponentQueueResult(
+    bool ok,
+    int limit,
+    int batchSize,
+    long selected,
+    long processedRows,
+    long processedVulnerabilities,
+    long duckDbAffectedComponents,
+    double elapsedSeconds,
+    double rowsPerSecond);
+
 public sealed record AiSummaryRequest(
     Guid Id,
     bool Force = false);

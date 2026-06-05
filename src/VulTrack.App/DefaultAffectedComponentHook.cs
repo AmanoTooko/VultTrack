@@ -3,13 +3,19 @@ using NpgsqlTypes;
 
 namespace VulTrack.App;
 
-public sealed class DefaultAffectedComponentHook(DuckDbEvidenceStore duckDb) : IBatchAffectedComponentHook
+public sealed class DefaultAffectedComponentHook(DuckDbEvidenceStore duckDb, ILogger<DefaultAffectedComponentHook> logger) : IBatchAffectedComponentHook
 {
+    private bool UseDuckDbProjectionOnly =>
+        duckDb.Enabled &&
+        !string.Equals(Environment.GetEnvironmentVariable("VULTRACK_AFFECTED_COMPONENTS_BACKEND"), "pgsql", StringComparison.OrdinalIgnoreCase);
+
     public Task OnAffectedFactsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid vulnerabilityRecordId, IReadOnlyList<AffectedFactDraft> facts, CancellationToken ct) =>
         OnAffectedFactsBatchAsync(connection, [new AffectedFactBatchItem(vulnerabilityId, vulnerabilityRecordId, Guid.Empty, Guid.Empty, facts)], ct);
 
     public async Task OnAffectedFactsBatchAsync(NpgsqlConnection connection, IReadOnlyList<AffectedFactBatchItem> items, CancellationToken ct)
     {
+        if (UseDuckDbProjectionOnly) return;
+
         var projections = items
             .SelectMany(item => item.Facts.Select(fact => new
             {
@@ -101,6 +107,24 @@ public sealed class DefaultAffectedComponentHook(DuckDbEvidenceStore duckDb) : I
         if (vulnerabilityIds.Count == 0) return;
         foreach (var batch in vulnerabilityIds.Distinct().Chunk(500))
         {
+            if (UseDuckDbProjectionOnly)
+            {
+                await UpdateVulnerabilitySummariesFromFactsAsync(connection, batch, ct);
+                var inlineLimit = DuckDbProjectionInlineLimit();
+                if (inlineLimit > 0 && batch.Length < inlineLimit)
+                {
+                    try
+                    {
+                        await SyncDuckDbAffectedComponentsFromFactsAsync(connection, batch, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogWarning(ex, "Skipping inline DuckDB affected component sync for {Count} vulnerabilities after projection sync failed.", batch.Length);
+                    }
+                }
+                continue;
+            }
+
             await using var cmd = new NpgsqlCommand("""
                 update vulnerabilities
                 set affected_component_count = coalesce(t.cnt, 0),
@@ -170,8 +194,110 @@ public sealed class DefaultAffectedComponentHook(DuckDbEvidenceStore duckDb) : I
         await duckDb.ReplaceAffectedComponentsAsync(vulnerabilityIds, rows, ct);
     }
 
+    private async Task SyncDuckDbAffectedComponentsFromFactsAsync(NpgsqlConnection connection, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)
+    {
+        if (!duckDb.Enabled || vulnerabilityIds.Count == 0) return;
+
+        var rows = new List<DuckDbAffectedComponentProjection>();
+        await using (var cmd = new NpgsqlCommand("""
+            with projected as (
+              select vulnerability_id, component_id, ecosystem, package_name,
+                     coalesce(nullif(package_name, ''), nullif(purl, ''), nullif(cpe23_uri, '')) as display_name,
+                     purl as primary_purl,
+                     cpe23_uri as primary_cpe23_uri,
+                     version_range_raw as normalized_range,
+                     range_type,
+                     source_confidence
+              from vulnerability_affected_facts
+              where vulnerability_id = any($1)
+                and coalesce(vulnerable, true)
+                and coalesce(nullif(package_name, ''), nullif(purl, ''), nullif(cpe23_uri, '')) is not null
+            )
+            select vulnerability_id, component_id, ecosystem, package_name, display_name,
+                   primary_purl, primary_cpe23_uri, normalized_range, range_type,
+                   max(source_confidence) as confidence, count(*)::integer as evidence_count
+            from projected
+            group by vulnerability_id, component_id, ecosystem, package_name, display_name,
+                     primary_purl, primary_cpe23_uri, normalized_range, range_type
+            order by vulnerability_id, ecosystem nulls last, display_name
+            """, connection))
+        {
+            cmd.CommandTimeout = 300;
+            cmd.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add(new DuckDbAffectedComponentProjection(
+                    Guid.NewGuid(),
+                    reader.GetGuid(0),
+                    reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.GetString(4),
+                    reader.IsDBNull(5) ? null : reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.GetDecimal(9),
+                    reader.GetInt32(10),
+                    "candidate"));
+            }
+        }
+
+        await duckDb.ReplaceAffectedComponentsAsync(vulnerabilityIds, rows, ct);
+    }
+
+    private static async Task UpdateVulnerabilitySummariesFromFactsAsync(NpgsqlConnection connection, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("""
+            with ids as (
+              select unnest($1::uuid[]) as vulnerability_id
+            ),
+            projected as (
+              select f.vulnerability_id, f.ecosystem,
+                     coalesce(nullif(f.package_name, ''), nullif(f.purl, ''), nullif(f.cpe23_uri, '')) as display_name
+              from vulnerability_affected_facts f
+              join ids on ids.vulnerability_id = f.vulnerability_id
+              where coalesce(f.vulnerable, true)
+                and coalesce(nullif(f.package_name, ''), nullif(f.purl, ''), nullif(f.cpe23_uri, '')) is not null
+            ),
+            summary as (
+              select vulnerability_id,
+                     count(*)::int as cnt,
+                     array_agg(distinct ecosystem) filter (where ecosystem is not null) as ecos,
+                     array_agg(distinct display_name) as names
+              from projected
+              group by vulnerability_id
+            )
+            update vulnerabilities v
+            set affected_component_count = coalesce(summary.cnt, 0),
+                affected_ecosystems = coalesce(summary.ecos, '{}'),
+                affected_component_names = coalesce(summary.names, '{}'),
+                search_text = to_tsvector('simple',
+                    coalesce(v.primary_identifier,'') || ' ' ||
+                    coalesce(v.title,'') || ' ' ||
+                    coalesce(v.description,'') || ' ' ||
+                    coalesce(replace(array_to_string(coalesce(summary.names, '{}'), ' '), '/', ' '), '')),
+                updated_at = now()
+            from ids
+            left join summary on summary.vulnerability_id = ids.vulnerability_id
+            where v.id = ids.vulnerability_id
+            """, connection);
+        cmd.CommandTimeout = 300;
+        cmd.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
     private static Task WriteNullableTextAsync(NpgsqlBinaryImporter writer, string? value, CancellationToken ct) =>
         string.IsNullOrWhiteSpace(value)
             ? writer.WriteNullAsync(ct)
             : writer.WriteAsync(value, NpgsqlDbType.Text, ct);
+
+    private static int DuckDbProjectionInlineLimit()
+    {
+        var configured = Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_AFFECTED_INLINE_LIMIT");
+        return int.TryParse(configured, out var value) && value >= 0
+            ? Math.Min(value, 100_000)
+            : 0;
+    }
 }

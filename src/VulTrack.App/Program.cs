@@ -25,6 +25,7 @@ builder.Services.AddSingleton<IRawNormalizer, ExploitPocRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ExternalAdvisoryRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, DistroRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ComponentCatalogNormalizer>();
+builder.Services.AddSingleton<RawNormalizationService>();
 var normalizerBackend = Environment.GetEnvironmentVariable("VULTRACK_NORMALIZER_BACKEND")
     ?? builder.Configuration["VulTrack:NormalizerBackend"]
     ?? "postgres";
@@ -446,6 +447,12 @@ app.MapPost("/api/v1/admin.duckdbAffectedComponents.rebuild", async (HttpContext
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     return ApiResult.Ok(await projector.RebuildAsync(request, ct));
+});
+
+app.MapPost("/api/v1/admin.duckdbAffectedComponents.processQueue", async (HttpContext context, AdminAuthService auth, DuckDbAffectedComponentProjector projector, DuckDbAffectedComponentQueueRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await projector.ProcessQueueAsync(request, ct));
 });
 
 app.MapPost("/api/v1/admin.detailSnapshot.rebuild", async (HttpContext context, AdminAuthService auth, VulnerabilityDetailSnapshotBuilder builder, DetailSnapshotBuildRequest request, CancellationToken ct) =>
@@ -902,18 +909,20 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
             limit 50
             """, queryId, ct),
         records = await QueryRecordsGroupedAsync(db, queryId, ct),
-        affectedComponents = await QueryRowsAsync(db, """
-            select ecosystem, package_name, display_name,
-                   left(coalesce(primary_purl,''), 80) as primary_purl,
-                   left(coalesce(primary_cpe23_uri,''), 80) as primary_cpe23_uri,
-                   normalized_range, range_type, confidence, evidence_count, resolution_status
-            from vulnerability_affected_components
-            where vulnerability_id = $1
-            order by CASE WHEN range_type IN ('ECOSYSTEM','semver','vendor') THEN 0 ELSE 1 END,
-                     CASE WHEN normalized_range IS NOT NULL AND normalized_range <> '' THEN 0 ELSE 1 END,
-                     ecosystem nulls last, display_name
-            limit 60
-            """, queryId, ct),
+        affectedComponents = useDuckDb
+            ? await duckDb.QueryAffectedComponentsAsync(queryId, 60, ct)
+            : await QueryRowsAsync(db, """
+                select ecosystem, package_name, display_name,
+                       left(coalesce(primary_purl,''), 80) as primary_purl,
+                       left(coalesce(primary_cpe23_uri,''), 80) as primary_cpe23_uri,
+                       normalized_range, range_type, confidence, evidence_count, resolution_status
+                from vulnerability_affected_components
+                where vulnerability_id = $1
+                order by CASE WHEN range_type IN ('ECOSYSTEM','semver','vendor') THEN 0 ELSE 1 END,
+                         CASE WHEN normalized_range IS NOT NULL AND normalized_range <> '' THEN 0 ELSE 1 END,
+                         ecosystem nulls last, display_name
+                limit 60
+                """, queryId, ct),
         affectedExpressions = useDuckDb
             ? (await duckDb.QueryAffectedFactsAsync(vulnerability.primaryIdentifier, 250, ct))
             : await QueryRowsAsync(db, """
@@ -1430,6 +1439,7 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_descriptions_source_fk on vulnerability_descriptions(source_id)",
         "create index if not exists ix_identifier_edges_source_fk on vulnerability_identifier_edges(source_id)",
         "create index if not exists ix_identifier_index_source_fk on vulnerability_identifier_index(source_id)",
+        "create index if not exists ix_identifier_groups_canonical_fk on vulnerability_identifier_groups(canonical_vulnerability_id) where canonical_vulnerability_id is not null",
         """
         create table if not exists ai_vulnerability_summaries (
           vulnerability_id uuid not null references vulnerabilities(id) on delete cascade,
@@ -1581,6 +1591,13 @@ static async Task EnsureDetailSnapshotQueueAsync(NpgsqlDataSource db)
         """,
         "create index if not exists ix_detail_snapshot_queue_queued_at on vulnerability_detail_snapshot_queue(queued_at, vulnerability_id)",
         """
+        create table if not exists duckdb_affected_component_queue (
+          vulnerability_id uuid primary key,
+          queued_at timestamptz not null default now()
+        )
+        """,
+        "create index if not exists ix_duckdb_affected_component_queue_queued_at on duckdb_affected_component_queue(queued_at, vulnerability_id)",
+        """
         create or replace function queue_vulnerability_detail_snapshot_id()
         returns trigger
         language plpgsql
@@ -1629,6 +1646,30 @@ static async Task EnsureDetailSnapshotQueueAsync(NpgsqlDataSource db)
         $$;
         """,
         """
+        create or replace function queue_duckdb_affected_component_projection()
+        returns trigger
+        language plpgsql
+        as $$
+        declare
+          target_id uuid;
+        begin
+          if tg_op = 'DELETE' then
+            target_id := old.vulnerability_id;
+          else
+            target_id := new.vulnerability_id;
+          end if;
+
+          if target_id is not null then
+            insert into duckdb_affected_component_queue(vulnerability_id, queued_at)
+            values (target_id, now())
+            on conflict (vulnerability_id) do update set queued_at = excluded.queued_at;
+          end if;
+
+          return coalesce(new, old);
+        end;
+        $$;
+        """,
+        """
         create or replace function queue_vulnerability_detail_snapshot_canonical_id()
         returns trigger
         language plpgsql
@@ -1666,11 +1707,24 @@ static async Task EnsureDetailSnapshotQueueAsync(NpgsqlDataSource db)
         """,
         DetailSnapshotQueueTrigger("vulnerability_records"),
         DetailSnapshotQueueTrigger("vulnerability_affected_components"),
+        DetailSnapshotQueueTrigger("vulnerability_affected_facts"),
         DetailSnapshotQueueTrigger("vulnerability_descriptions"),
         DetailSnapshotQueueTrigger("vulnerability_weaknesses"),
         DetailSnapshotQueueTrigger("vulnerability_exploits"),
         DetailSnapshotQueueTrigger("vulnerability_references"),
         DetailSnapshotQueueTrigger("vulnerability_severity_scores"),
+        """
+        do $$
+        begin
+          if to_regclass('public.vulnerability_affected_facts') is not null then
+            drop trigger if exists trg_duckdb_affected_component_queue on vulnerability_affected_facts;
+            create trigger trg_duckdb_affected_component_queue
+            after insert or update or delete on vulnerability_affected_facts
+            for each row execute function queue_duckdb_affected_component_projection();
+          end if;
+        end;
+        $$;
+        """,
         """
         do $$
         begin
