@@ -38,6 +38,7 @@ builder.Services.AddSingleton<SourceScheduler>();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<DuckDbEvidenceStore>();
 builder.Services.AddSingleton<DuckDbEvidenceNormalizer>();
+builder.Services.AddSingleton<DuckDbAffectedComponentProjector>();
 builder.Services.AddSingleton<VulnerabilityDetailService>();
 builder.Services.AddSingleton<VulnerabilityDetailSnapshotStore>();
 builder.Services.AddSingleton<VulnerabilityDetailSnapshotBuilder>();
@@ -439,6 +440,12 @@ app.MapGet("/api/v1/admin.duckdbEvidence.stats", async (HttpContext context, Adm
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     return ApiResult.Ok(await store.StatsAsync(ct));
+});
+
+app.MapPost("/api/v1/admin.duckdbAffectedComponents.rebuild", async (HttpContext context, AdminAuthService auth, DuckDbAffectedComponentProjector projector, DuckDbAffectedComponentRebuildRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await projector.RebuildAsync(request, ct));
 });
 
 app.MapPost("/api/v1/admin.detailSnapshot.rebuild", async (HttpContext context, AdminAuthService auth, VulnerabilityDetailSnapshotBuilder builder, DetailSnapshotBuildRequest request, CancellationToken ct) =>

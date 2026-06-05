@@ -38,6 +38,11 @@ public sealed record DetailSnapshotBuildRequest(
     int Concurrency = 4,
     int GzipLevel = 6);
 
+public sealed record DuckDbAffectedComponentRebuildRequest(
+    bool Reset = true,
+    int BatchSize = 100000,
+    int Limit = 0);
+
 public sealed record AiSummaryRequest(
     Guid Id,
     bool Force = false);

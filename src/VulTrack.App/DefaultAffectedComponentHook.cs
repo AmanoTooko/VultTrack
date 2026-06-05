@@ -3,7 +3,7 @@ using NpgsqlTypes;
 
 namespace VulTrack.App;
 
-public sealed class DefaultAffectedComponentHook : IBatchAffectedComponentHook
+public sealed class DefaultAffectedComponentHook(DuckDbEvidenceStore duckDb) : IBatchAffectedComponentHook
 {
     public Task OnAffectedFactsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid vulnerabilityRecordId, IReadOnlyList<AffectedFactDraft> facts, CancellationToken ct) =>
         OnAffectedFactsBatchAsync(connection, [new AffectedFactBatchItem(vulnerabilityId, vulnerabilityRecordId, Guid.Empty, Guid.Empty, facts)], ct);
@@ -126,7 +126,48 @@ public sealed class DefaultAffectedComponentHook : IBatchAffectedComponentHook
             cmd.CommandTimeout = 300;
             cmd.Parameters.AddWithValue(batch);
             await cmd.ExecuteNonQueryAsync(ct);
+
+            await SyncDuckDbAffectedComponentsAsync(connection, batch, ct);
         }
+    }
+
+    private async Task SyncDuckDbAffectedComponentsAsync(NpgsqlConnection connection, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)
+    {
+        if (!duckDb.Enabled || vulnerabilityIds.Count == 0) return;
+
+        var rows = new List<DuckDbAffectedComponentProjection>();
+        await using (var cmd = new NpgsqlCommand("""
+            select id, vulnerability_id, component_id, ecosystem, package_name, display_name,
+                   primary_purl, primary_cpe23_uri, normalized_range, range_type,
+                   confidence, evidence_count, resolution_status
+            from vulnerability_affected_components
+            where vulnerability_id = any($1)
+            order by vulnerability_id, ecosystem nulls last, display_name, id
+            """, connection))
+        {
+            cmd.CommandTimeout = 300;
+            cmd.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                rows.Add(new DuckDbAffectedComponentProjection(
+                    reader.GetGuid(0),
+                    reader.GetGuid(1),
+                    reader.IsDBNull(2) ? null : reader.GetGuid(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.IsDBNull(4) ? null : reader.GetString(4),
+                    reader.GetString(5),
+                    reader.IsDBNull(6) ? null : reader.GetString(6),
+                    reader.IsDBNull(7) ? null : reader.GetString(7),
+                    reader.IsDBNull(8) ? null : reader.GetString(8),
+                    reader.IsDBNull(9) ? null : reader.GetString(9),
+                    reader.GetDecimal(10),
+                    reader.GetInt32(11),
+                    reader.GetString(12)));
+            }
+        }
+
+        await duckDb.ReplaceAffectedComponentsAsync(vulnerabilityIds, rows, ct);
     }
 
     private static Task WriteNullableTextAsync(NpgsqlBinaryImporter writer, string? value, CancellationToken ct) =>

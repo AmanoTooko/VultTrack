@@ -40,16 +40,34 @@ public sealed record DuckDbEvidenceRecord(
     IReadOnlyList<DuckDbReference> References,
     IReadOnlyList<DuckDbWeakness> Weaknesses);
 
+public sealed record DuckDbAffectedComponentProjection(
+    Guid Id,
+    Guid VulnerabilityId,
+    Guid? ComponentId,
+    string? Ecosystem,
+    string? PackageName,
+    string DisplayName,
+    string? PrimaryPurl,
+    string? PrimaryCpe23Uri,
+    string? NormalizedRange,
+    string? RangeType,
+    decimal Confidence,
+    int EvidenceCount,
+    string ResolutionStatus);
+
 public sealed record DuckDbEvidenceStats(
     string path,
     long fileBytes,
     long affectedFacts,
+    long affectedComponents,
     long severityScores,
     long references,
     long weaknesses);
 
 public sealed class DuckDbEvidenceStore(IConfiguration configuration)
 {
+    private readonly SemaphoreSlim _writeLock = new(1, 1);
+
     public string DatabasePath { get; } = ResolvePath(configuration);
 
     public bool Enabled { get; } =
@@ -69,12 +87,20 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
     public Task ResetAsync(CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
-        using var connection = OpenConnection();
-        foreach (var statement in SchemaStatements)
-            Execute(connection, statement);
-        foreach (var table in ResetTables)
-            Execute(connection, $"delete from {table}");
-        return Task.CompletedTask;
+        _writeLock.Wait(ct);
+        try
+        {
+            using var connection = OpenConnection();
+            foreach (var statement in SchemaStatements)
+                Execute(connection, statement);
+            foreach (var table in ResetTables)
+                Execute(connection, $"delete from {table}");
+            return Task.CompletedTask;
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
     }
 
     public async Task ReplaceRecordsAsync(IReadOnlyList<DuckDbEvidenceRecord> records, CancellationToken ct)
@@ -82,30 +108,147 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         if (records.Count == 0) return;
         await InitializeAsync(ct);
 
-        using var connection = OpenConnection();
-        Execute(connection, "begin transaction");
+        await _writeLock.WaitAsync(ct);
         try
         {
-            var sourceCode = records[0].SourceCode;
-            var rawIds = records.Select(x => x.RawIndexId.ToString("D")).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-            foreach (var batch in rawIds.Chunk(1000))
+            using var connection = OpenConnection();
+            Execute(connection, "begin transaction");
+            try
             {
-                var idList = string.Join(",", batch.Select(SqlValue));
-                foreach (var table in RecordEvidenceTables)
-                    Execute(connection, $"delete from {table} where source_code = {SqlValue(sourceCode)} and raw_index_id in ({idList})");
+                var sourceCode = records[0].SourceCode;
+                var rawIds = records.Select(x => x.RawIndexId.ToString("D")).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                foreach (var batch in rawIds.Chunk(1000))
+                {
+                    var idList = string.Join(",", batch.Select(SqlValue));
+                    foreach (var table in RecordEvidenceTables)
+                        Execute(connection, $"delete from {table} where source_code = {SqlValue(sourceCode)} and raw_index_id in ({idList})");
+                }
+
+                await CopyAffectedFactsAsync(connection, records, ct);
+                await CopySeverityScoresAsync(connection, records, ct);
+                await CopyReferencesAsync(connection, records, ct);
+                await CopyWeaknessesAsync(connection, records, ct);
+
+                Execute(connection, "commit");
             }
-
-            await CopyAffectedFactsAsync(connection, records, ct);
-            await CopySeverityScoresAsync(connection, records, ct);
-            await CopyReferencesAsync(connection, records, ct);
-            await CopyWeaknessesAsync(connection, records, ct);
-
-            Execute(connection, "commit");
+            catch
+            {
+                Execute(connection, "rollback");
+                throw;
+            }
         }
-        catch
+        finally
         {
-            Execute(connection, "rollback");
-            throw;
+            _writeLock.Release();
+        }
+    }
+
+    public async Task ResetAffectedComponentsAsync(CancellationToken ct)
+    {
+        if (!Enabled) return;
+        await InitializeAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            using var connection = OpenConnection();
+            Execute(connection, "delete from affected_components");
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    public async Task PrepareAffectedComponentsBulkLoadAsync(CancellationToken ct)
+    {
+        if (!Enabled) return;
+        await InitializeAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            using var connection = OpenConnection();
+            foreach (var statement in AffectedComponentDropIndexStatements)
+                Execute(connection, statement);
+            Execute(connection, "delete from affected_components");
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    public async Task FinalizeAffectedComponentsBulkLoadAsync(CancellationToken ct)
+    {
+        if (!Enabled) return;
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            using var connection = OpenConnection();
+            foreach (var statement in AffectedComponentIndexStatements)
+                Execute(connection, statement);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    public async Task AppendAffectedComponentsAsync(IReadOnlyList<DuckDbAffectedComponentProjection> rows, CancellationToken ct)
+    {
+        if (!Enabled || rows.Count == 0) return;
+        await InitializeAsync(ct);
+        await AppendAffectedComponentsWithoutInitializeAsync(rows, ct);
+    }
+
+    public async Task AppendAffectedComponentsBulkAsync(IReadOnlyList<DuckDbAffectedComponentProjection> rows, CancellationToken ct)
+    {
+        if (!Enabled || rows.Count == 0) return;
+        await AppendAffectedComponentsWithoutInitializeAsync(rows, ct);
+    }
+
+    private async Task AppendAffectedComponentsWithoutInitializeAsync(IReadOnlyList<DuckDbAffectedComponentProjection> rows, CancellationToken ct)
+    {
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            using var connection = OpenConnection();
+            await CopyAffectedComponentsAsync(connection, rows, ct);
+        }
+        finally
+        {
+            _writeLock.Release();
+        }
+    }
+
+    public async Task ReplaceAffectedComponentsAsync(IReadOnlyCollection<Guid> vulnerabilityIds, IReadOnlyList<DuckDbAffectedComponentProjection> rows, CancellationToken ct)
+    {
+        if (!Enabled || vulnerabilityIds.Count == 0) return;
+        await InitializeAsync(ct);
+        await _writeLock.WaitAsync(ct);
+        try
+        {
+            using var connection = OpenConnection();
+            Execute(connection, "begin transaction");
+            try
+            {
+                foreach (var batch in vulnerabilityIds.Distinct().Chunk(1000))
+                {
+                    var idList = string.Join(",", batch.Select(id => SqlValue(id.ToString("D"))));
+                    Execute(connection, $"delete from affected_components where vulnerability_id in ({idList})");
+                }
+
+                await CopyAffectedComponentsAsync(connection, rows, ct);
+                Execute(connection, "commit");
+            }
+            catch
+            {
+                Execute(connection, "rollback");
+                throw;
+            }
+        }
+        finally
+        {
+            _writeLock.Release();
         }
     }
 
@@ -121,6 +264,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             DatabasePath,
             file.Exists ? file.Length : 0,
             Count(connection, "affected_facts"),
+            Count(connection, "affected_components"),
             Count(connection, "severity_scores"),
             Count(connection, "evidence_references"),
             Count(connection, "weaknesses")));
@@ -392,6 +536,35 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             """, rows, ct);
     }
 
+    private async Task CopyAffectedComponentsAsync(DuckDBConnection connection, IReadOnlyList<DuckDbAffectedComponentProjection> rows, CancellationToken ct)
+    {
+        var csvRows = rows.Select(row => CsvRow(
+            row.Id.ToString("D"),
+            row.VulnerabilityId.ToString("D"),
+            row.ComponentId?.ToString("D"),
+            row.Ecosystem,
+            row.Ecosystem?.ToLowerInvariant(),
+            row.PackageName,
+            row.PackageName?.ToLowerInvariant(),
+            row.DisplayName,
+            row.DisplayName.ToLowerInvariant(),
+            row.PrimaryPurl,
+            PurlWithoutVersion(row.PrimaryPurl),
+            row.PrimaryCpe23Uri,
+            row.NormalizedRange,
+            row.RangeType,
+            row.Confidence.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            row.EvidenceCount.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            row.ResolutionStatus));
+
+        await CopyRowsAsync(connection, "affected_components", """
+            id, vulnerability_id, component_id, ecosystem, ecosystem_lower,
+            package_name, package_name_lower, display_name, display_name_lower,
+            primary_purl, purl_without_version, primary_cpe23_uri, normalized_range,
+            range_type, confidence, evidence_count, resolution_status
+            """, csvRows, ct);
+    }
+
     private async Task CopyRowsAsync(DuckDBConnection connection, string tableName, string columns, IEnumerable<string> rows, CancellationToken ct)
     {
         var tempDir = Path.Combine(Path.GetDirectoryName(DatabasePath)!, "tmp");
@@ -517,6 +690,27 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         )
         """,
         """
+        create table if not exists affected_components (
+          id varchar,
+          vulnerability_id varchar,
+          component_id varchar,
+          ecosystem varchar,
+          ecosystem_lower varchar,
+          package_name varchar,
+          package_name_lower varchar,
+          display_name varchar,
+          display_name_lower varchar,
+          primary_purl varchar,
+          purl_without_version varchar,
+          primary_cpe23_uri varchar,
+          normalized_range varchar,
+          range_type varchar,
+          confidence double,
+          evidence_count integer,
+          resolution_status varchar
+        )
+        """,
+        """
         create table if not exists severity_scores (
           source_code varchar,
           raw_index_id varchar,
@@ -597,6 +791,21 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         create index if not exists ix_duck_affected_facts_vulnerability_key on affected_facts(vulnerability_key)
         """,
         """
+        create index if not exists ix_duck_affected_components_vulnerability_id on affected_components(vulnerability_id)
+        """,
+        """
+        create index if not exists ix_duck_affected_components_cpe on affected_components(primary_cpe23_uri)
+        """,
+        """
+        create index if not exists ix_duck_affected_components_purl on affected_components(primary_purl)
+        """,
+        """
+        create index if not exists ix_duck_affected_components_package_lower on affected_components(package_name_lower)
+        """,
+        """
+        create index if not exists ix_duck_affected_components_display_lower on affected_components(display_name_lower)
+        """,
+        """
         create index if not exists ix_duck_severity_scores_vulnerability_key on severity_scores(vulnerability_key)
         """,
         """
@@ -608,6 +817,24 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         """
         create index if not exists ix_duck_threat_scores_vulnerability_key on threat_scores(vulnerability_key)
         """
+    ];
+
+    private static readonly string[] AffectedComponentIndexStatements =
+    [
+        "create index if not exists ix_duck_affected_components_vulnerability_id on affected_components(vulnerability_id)",
+        "create index if not exists ix_duck_affected_components_cpe on affected_components(primary_cpe23_uri)",
+        "create index if not exists ix_duck_affected_components_purl on affected_components(primary_purl)",
+        "create index if not exists ix_duck_affected_components_package_lower on affected_components(package_name_lower)",
+        "create index if not exists ix_duck_affected_components_display_lower on affected_components(display_name_lower)"
+    ];
+
+    private static readonly string[] AffectedComponentDropIndexStatements =
+    [
+        "drop index if exists ix_duck_affected_components_vulnerability_id",
+        "drop index if exists ix_duck_affected_components_cpe",
+        "drop index if exists ix_duck_affected_components_purl",
+        "drop index if exists ix_duck_affected_components_package_lower",
+        "drop index if exists ix_duck_affected_components_display_lower"
     ];
 
     public async Task<IReadOnlyList<Dictionary<string, object?>>> QueryCpeEntriesAsync(string vendor, string product, int limit = 50, CancellationToken ct = default)
