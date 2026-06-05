@@ -184,6 +184,87 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         return await ReadRowsAsync(command, ct);
     }
 
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<Dictionary<string, object?>>>> QueryAffectedFactsManyAsync(IReadOnlyCollection<string> vulnerabilityKeys, int limitPerKey = 250, CancellationToken ct = default)
+    {
+        if (!Enabled || vulnerabilityKeys.Count == 0) return new Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
+        ct.ThrowIfCancellationRequested();
+        await InitializeAsync(ct);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            with ranked as (
+              select vulnerability_key, source_code, fact_type, ecosystem, package_name,
+                     purl, cpe23_uri, version_range_raw, range_type, vulnerable,
+                     row_number() over (
+                       partition by upper(vulnerability_key)
+                       order by case when cpe23_uri is not null then 0 else 1 end,
+                                case when purl is not null then 0 else 1 end,
+                                source_code nulls last, package_name nulls last
+                     ) as rn
+              from affected_facts
+              where upper(vulnerability_key) in ({KeyList(vulnerabilityKeys)})
+            )
+            select vulnerability_key, source_code, fact_type, ecosystem, package_name,
+                   purl, cpe23_uri, version_range_raw, range_type, vulnerable
+            from ranked
+            where rn <= {Math.Clamp(limitPerKey, 1, 1000)}
+            order by upper(vulnerability_key), rn
+            """;
+        return GroupRowsByKey(await ReadRowsAsync(command, ct), "vulnerability_key");
+    }
+
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<Dictionary<string, object?>>>> QueryReferencesManyAsync(IReadOnlyCollection<string> vulnerabilityKeys, int limitPerKey = 160, CancellationToken ct = default)
+    {
+        if (!Enabled || vulnerabilityKeys.Count == 0) return new Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
+        ct.ThrowIfCancellationRequested();
+        await InitializeAsync(ct);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            with ranked as (
+              select vulnerability_key, source_code, url, ref_type,
+                     row_number() over (
+                       partition by upper(vulnerability_key)
+                       order by source_code nulls last, url
+                     ) as rn
+              from evidence_references
+              where upper(vulnerability_key) in ({KeyList(vulnerabilityKeys)})
+            )
+            select vulnerability_key, source_code, url, ref_type
+            from ranked
+            where rn <= {Math.Clamp(limitPerKey, 1, 1000)}
+            order by upper(vulnerability_key), rn
+            """;
+        return GroupRowsByKey(await ReadRowsAsync(command, ct), "vulnerability_key");
+    }
+
+    public async Task<IReadOnlyDictionary<string, IReadOnlyList<Dictionary<string, object?>>>> QuerySeverityScoresManyAsync(IReadOnlyCollection<string> vulnerabilityKeys, int limitPerKey = 40, CancellationToken ct = default)
+    {
+        if (!Enabled || vulnerabilityKeys.Count == 0) return new Dictionary<string, IReadOnlyList<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
+        ct.ThrowIfCancellationRequested();
+        await InitializeAsync(ct);
+        using var connection = OpenConnection();
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            with ranked as (
+              select vulnerability_key, source_code, scoring_system, scoring_version, score_type,
+                     vector_string, score, severity_label,
+                     row_number() over (
+                       partition by upper(vulnerability_key)
+                       order by score desc nulls last
+                     ) as rn
+              from severity_scores
+              where upper(vulnerability_key) in ({KeyList(vulnerabilityKeys)})
+            )
+            select vulnerability_key, source_code, scoring_system, scoring_version, score_type,
+                   vector_string, score, severity_label
+            from ranked
+            where rn <= {Math.Clamp(limitPerKey, 1, 200)}
+            order by upper(vulnerability_key), rn
+            """;
+        return GroupRowsByKey(await ReadRowsAsync(command, ct), "vulnerability_key");
+    }
+
     private static async Task<IReadOnlyList<Dictionary<string, object?>>> ReadRowsAsync(DuckDBCommand command, CancellationToken ct)
     {
         var rows = new List<Dictionary<string, object?>>();
@@ -196,6 +277,25 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
             rows.Add(dict);
         }
         return rows;
+    }
+
+    private static IReadOnlyDictionary<string, IReadOnlyList<Dictionary<string, object?>>> GroupRowsByKey(IReadOnlyList<Dictionary<string, object?>> rows, string keyName)
+    {
+        var grouped = new Dictionary<string, List<Dictionary<string, object?>>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in rows)
+        {
+            if (!row.TryGetValue(keyName, out var keyValue) || string.IsNullOrWhiteSpace(keyValue?.ToString())) continue;
+            var key = keyValue.ToString()!;
+            row.Remove(keyName);
+            if (!grouped.TryGetValue(key, out var list))
+            {
+                list = [];
+                grouped[key] = list;
+            }
+            list.Add(row);
+        }
+
+        return grouped.ToDictionary(x => x.Key, x => (IReadOnlyList<Dictionary<string, object?>>)x.Value, StringComparer.OrdinalIgnoreCase);
     }
 
     private DuckDBConnection OpenConnection()
@@ -341,6 +441,12 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration)
         string.IsNullOrWhiteSpace(value)
             ? "null"
             : $"'{value.Replace("'", "''")}'";
+
+    private static string KeyList(IEnumerable<string> keys) =>
+        string.Join(", ", keys
+            .Where(key => !string.IsNullOrWhiteSpace(key))
+            .Select(key => $"'{key.Replace("'", "''").ToUpperInvariant()}'")
+            .Distinct(StringComparer.Ordinal));
 
     private static string CsvRow(params string?[] values) =>
         string.Join(",", values.Select(CsvValue));

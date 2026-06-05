@@ -14,6 +14,7 @@ const databaseUrl = process.env.DATABASE_URL ?? 'postgres://vultrack:vultrack@lo
 const outputDir = path.resolve(process.env.VULTRACK_DETAIL_SNAPSHOT_DIR ?? args.output ?? 'data/vulnerability-details');
 const concurrency = clamp(positiveInt(process.env.DETAIL_SNAPSHOT_CONCURRENCY ?? args.concurrency, 8), 1, 64);
 const gzipLevel = clamp(positiveInt(process.env.DETAIL_SNAPSHOT_GZIP_LEVEL ?? args.gzipLevel, 6), 1, 9);
+const fetchRetries = clamp(positiveInt(process.env.DETAIL_SNAPSHOT_FETCH_RETRIES ?? args.fetchRetries, 3), 0, 10);
 const globalLimit = args.limit == null ? null : positiveInt(args.limit, 0);
 const since = args.since ?? null;
 const explicitIds = (args.id ?? []).map((id) => normalizeUuid(id)).filter(Boolean);
@@ -40,6 +41,7 @@ try {
     totalSelected += rows.length;
     const shardFile = path.join(outputDir, 'shards', `${shard}.json.gz`);
     const shardDoc = await readShard(shardFile);
+    const startedAt = Date.now();
     const results = await mapLimit(rows, concurrency, async (row) => {
       const detail = await fetchDetail(row.id);
       return { row, detail };
@@ -59,7 +61,15 @@ try {
     });
 
     if (remaining !== null) remaining = Math.max(0, remaining - rows.length);
-    console.log(JSON.stringify({ event: 'detail_snapshot_shard_written', shard, selected: rows.length, totalWritten }));
+    const elapsedMs = Date.now() - startedAt;
+    console.log(JSON.stringify({
+      event: 'detail_snapshot_shard_written',
+      shard,
+      selected: rows.length,
+      totalWritten,
+      elapsedMs,
+      rowsPerSecond: elapsedMs > 0 ? rows.length / (elapsedMs / 1000) : rows.length
+    }));
   }
 
   await writeManifest({
@@ -157,13 +167,28 @@ async function loadExplicitRows() {
 async function fetchDetail(id) {
   const url = new URL('/api/v1/vulnerability.detail', apiBaseUrl);
   url.searchParams.set('id', id);
+  url.searchParams.set('source', 'duckdb');
   url.searchParams.set('snapshot', 'false');
-  const response = await fetch(url);
-  const body = await response.json().catch(() => null);
-  if (!response.ok || body?.ok === false) {
-    throw new Error(`detail fetch failed for ${id}: HTTP ${response.status} ${JSON.stringify(body)}`);
+  let lastError;
+  for (let attempt = 0; attempt <= fetchRetries; attempt++) {
+    try {
+      const response = await fetch(url);
+      const body = await response.json().catch(() => null);
+      if (!response.ok || body?.ok === false) {
+        throw new Error(`detail fetch failed for ${id}: HTTP ${response.status} ${JSON.stringify(body)}`);
+      }
+      return body.data;
+    } catch (error) {
+      lastError = error;
+      if (attempt < fetchRetries)
+        await delay(Math.min(5000, 250 * 2 ** attempt));
+    }
   }
-  return body.data;
+  throw lastError;
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function readShard(file) {
