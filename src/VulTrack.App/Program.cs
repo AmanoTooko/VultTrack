@@ -52,6 +52,7 @@ app.UseStaticFiles();
 app.MapGet("/", () => Results.Redirect("/index.html"));
 
 await EnsureRuntimeIndexesAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
+await EnsureDetailSnapshotQueueAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
 await BackfillCvssScoresAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
 
 app.MapGet("/api/v1/system.health", () => ApiResult.Ok(new
@@ -1560,6 +1561,141 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         await cmd.ExecuteNonQueryAsync();
     }
 }
+
+static async Task EnsureDetailSnapshotQueueAsync(NpgsqlDataSource db)
+{
+    foreach (var statement in new[]
+    {
+        """
+        create table if not exists vulnerability_detail_snapshot_queue (
+          vulnerability_id uuid primary key,
+          queued_at timestamptz not null default now()
+        )
+        """,
+        "create index if not exists ix_detail_snapshot_queue_queued_at on vulnerability_detail_snapshot_queue(queued_at, vulnerability_id)",
+        """
+        create or replace function queue_vulnerability_detail_snapshot_id()
+        returns trigger
+        language plpgsql
+        as $$
+        declare
+          target_id uuid;
+        begin
+          if tg_op = 'DELETE' then
+            target_id := old.id;
+          else
+            target_id := new.id;
+          end if;
+
+          if target_id is not null then
+            insert into vulnerability_detail_snapshot_queue(vulnerability_id, queued_at)
+            values (target_id, now())
+            on conflict (vulnerability_id) do update set queued_at = excluded.queued_at;
+          end if;
+
+          return coalesce(new, old);
+        end;
+        $$;
+        """,
+        """
+        create or replace function queue_vulnerability_detail_snapshot_vulnerability_id()
+        returns trigger
+        language plpgsql
+        as $$
+        declare
+          target_id uuid;
+        begin
+          if tg_op = 'DELETE' then
+            target_id := old.vulnerability_id;
+          else
+            target_id := new.vulnerability_id;
+          end if;
+
+          if target_id is not null then
+            insert into vulnerability_detail_snapshot_queue(vulnerability_id, queued_at)
+            values (target_id, now())
+            on conflict (vulnerability_id) do update set queued_at = excluded.queued_at;
+          end if;
+
+          return coalesce(new, old);
+        end;
+        $$;
+        """,
+        """
+        create or replace function queue_vulnerability_detail_snapshot_canonical_id()
+        returns trigger
+        language plpgsql
+        as $$
+        declare
+          target_id uuid;
+        begin
+          if tg_op = 'DELETE' then
+            target_id := old.canonical_vulnerability_id;
+          else
+            target_id := new.canonical_vulnerability_id;
+          end if;
+
+          if target_id is not null then
+            insert into vulnerability_detail_snapshot_queue(vulnerability_id, queued_at)
+            values (target_id, now())
+            on conflict (vulnerability_id) do update set queued_at = excluded.queued_at;
+          end if;
+
+          return coalesce(new, old);
+        end;
+        $$;
+        """,
+        """
+        do $$
+        begin
+          if to_regclass('public.vulnerabilities') is not null then
+            drop trigger if exists trg_detail_snapshot_queue_vulnerabilities on vulnerabilities;
+            create trigger trg_detail_snapshot_queue_vulnerabilities
+            after insert or update or delete on vulnerabilities
+            for each row execute function queue_vulnerability_detail_snapshot_id();
+          end if;
+        end;
+        $$;
+        """,
+        DetailSnapshotQueueTrigger("vulnerability_records"),
+        DetailSnapshotQueueTrigger("vulnerability_affected_components"),
+        DetailSnapshotQueueTrigger("vulnerability_descriptions"),
+        DetailSnapshotQueueTrigger("vulnerability_weaknesses"),
+        DetailSnapshotQueueTrigger("vulnerability_exploits"),
+        DetailSnapshotQueueTrigger("vulnerability_references"),
+        DetailSnapshotQueueTrigger("vulnerability_severity_scores"),
+        """
+        do $$
+        begin
+          if to_regclass('public.vulnerability_identifier_index') is not null then
+            drop trigger if exists trg_detail_snapshot_queue_vulnerability_identifier_index on vulnerability_identifier_index;
+            create trigger trg_detail_snapshot_queue_vulnerability_identifier_index
+            after insert or update or delete on vulnerability_identifier_index
+            for each row execute function queue_vulnerability_detail_snapshot_canonical_id();
+          end if;
+        end;
+        $$;
+        """
+    })
+    {
+        await using var cmd = db.CreateCommand(statement);
+        await cmd.ExecuteNonQueryAsync();
+    }
+}
+
+static string DetailSnapshotQueueTrigger(string tableName) =>
+    $"""
+    do $$
+    begin
+      if to_regclass('public.{tableName}') is not null then
+        drop trigger if exists trg_detail_snapshot_queue_{tableName} on {tableName};
+        create trigger trg_detail_snapshot_queue_{tableName}
+        after insert or update or delete on {tableName}
+        for each row execute function queue_vulnerability_detail_snapshot_vulnerability_id();
+      end if;
+    end;
+    $$;
+    """;
 
 static async Task BackfillCvssScoresAsync(NpgsqlDataSource db)
 {
