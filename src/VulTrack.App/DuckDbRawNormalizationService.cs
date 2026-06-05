@@ -33,18 +33,23 @@ public sealed class DuckDbRawNormalizationService(
         try
         {
             await SupersedeOlderPendingRawAsync(connection, sourceCode, ct);
-            var request = new DuckDbEvidenceNormalizeRequest(
-                sourceCode,
-                DuckDbLimit(limit),
-                Reset: false,
-                BatchSize: DuckDbBatchSize());
-            var result = await normalizer.NormalizeAsync(request, ct);
-            var source = result.sources.FirstOrDefault(x => string.Equals(x.sourceCode, sourceCode, StringComparison.OrdinalIgnoreCase));
-            if (source is null || source.records == 0)
+            var rawIndexIds = await LoadPendingRawIdsAsync(connection, sourceCode, limit, ct);
+            if (rawIndexIds.Length == 0)
                 return new NormalizeBatchResult(sourceCode, 0, 0);
 
-            await MarkPendingSucceededAsync(connection, sourceCode, ct);
-            return new NormalizeBatchResult(sourceCode, source.records, 0);
+            var request = new DuckDbEvidenceNormalizeRequest(
+                sourceCode,
+                Math.Min(DuckDbLimit(limit), rawIndexIds.Length),
+                Reset: false,
+                BatchSize: DuckDbBatchSize(),
+                RawIndexIds: rawIndexIds);
+            var result = await normalizer.NormalizeAsync(request, ct);
+            var source = result.sources.FirstOrDefault(x => string.Equals(x.sourceCode, sourceCode, StringComparison.OrdinalIgnoreCase));
+            if (source is null)
+                return new NormalizeBatchResult(sourceCode, 0, 1);
+
+            await MarkPendingSucceededAsync(connection, rawIndexIds, ct);
+            return new NormalizeBatchResult(sourceCode, rawIndexIds.Length, 0);
         }
         catch (Exception ex)
         {
@@ -55,6 +60,28 @@ public sealed class DuckDbRawNormalizationService(
         {
             await ReleaseSourceNormalizeLockAsync(connection, sourceCode, CancellationToken.None);
         }
+    }
+
+    private static async Task<Guid[]> LoadPendingRawIdsAsync(NpgsqlConnection connection, string sourceCode, int limit, CancellationToken ct)
+    {
+        await using var cmd = new NpgsqlCommand("""
+            select r.id
+            from source_raw_index r
+            join sources s on s.id = r.source_id
+            where s.code = $1
+              and r.normalize_status in ('pending', 'failed')
+            order by r.updated_at, r.id
+            limit $2
+            """, connection);
+        cmd.CommandTimeout = 300;
+        cmd.Parameters.AddWithValue(sourceCode);
+        cmd.Parameters.AddWithValue(Math.Max(1, limit));
+
+        var ids = new List<Guid>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            ids.Add(reader.GetGuid(0));
+        return ids.ToArray();
     }
 
     private int DuckDbLimit(int schedulerLimit)
@@ -141,19 +168,17 @@ public sealed class DuckDbRawNormalizationService(
             logger.LogInformation("Marked {Count} older raw snapshots as superseded for {SourceCode}.", superseded, sourceCode ?? "all sources");
     }
 
-    private static async Task MarkPendingSucceededAsync(NpgsqlConnection connection, string sourceCode, CancellationToken ct)
+    private static async Task MarkPendingSucceededAsync(NpgsqlConnection connection, Guid[] rawIndexIds, CancellationToken ct)
     {
         await using var cmd = new NpgsqlCommand("""
-            update source_raw_index r
+            update source_raw_index
             set normalize_status = 'succeeded',
                 updated_at = now()
-            from sources s
-            where s.id = r.source_id
-              and s.code = $1
-              and r.normalize_status in ('pending', 'failed')
+            where id = any($1)
+              and normalize_status in ('pending', 'failed')
             """, connection);
         cmd.CommandTimeout = 300;
-        cmd.Parameters.AddWithValue(sourceCode);
+        cmd.Parameters.AddWithValue(rawIndexIds);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Npgsql;
 using VulTrack.App;
@@ -463,6 +464,15 @@ app.MapPost("/api/v1/admin.vulnerability.aiSummary", async (HttpContext context,
         : ApiResult.Ok(result);
 });
 
+app.MapGet("/api/v1/admin.vulnerability.aiSummaryInput", async (HttpContext context, AdminAuthService auth, AiVulnerabilitySummaryService summaries, Guid id, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var result = await summaries.GetInputAsync(id, ct);
+    return result is null
+        ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString())
+        : ApiResult.Ok(result);
+});
+
 app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, VulnerabilitySearchRequest request, CancellationToken ct) =>
 {
     var rows = new List<object>();
@@ -745,8 +755,15 @@ app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, Can
     });
 });
 
-app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvidenceStore duckDb, string? source, Guid id, CancellationToken ct) =>
+app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvidenceStore duckDb, VulnerabilityDetailSnapshotStore snapshots, string? source, bool? snapshot, Guid id, CancellationToken ct) =>
 {
+    if (snapshot != false && !string.Equals(source, "pgsql", StringComparison.OrdinalIgnoreCase))
+    {
+        var snapshotDetail = await snapshots.TryGetAsync(id, ct);
+        if (snapshotDetail is JsonElement detail)
+            return ApiResult.Ok(detail);
+    }
+
     await using var cmd = db.CreateCommand("""
         select v.id, v.primary_identifier, coalesce(preferred_title.value, v.title), coalesce(preferred_description.value, v.description),
                v.status, v.severity_label, v.max_cvss_score, v.max_cvss_version, v.max_cvss_vector,

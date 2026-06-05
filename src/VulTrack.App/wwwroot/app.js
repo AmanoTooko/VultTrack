@@ -830,7 +830,7 @@ async function loadVulnerabilityDetail(id, options = {}) {
   showDetailPane();
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading</h2></div>';
   try {
-    const data = await api(`/api/v1/vulnerability.detail?id=${encodeURIComponent(id)}`);
+    const data = await api(`/api/v1/vulnerability.detail?id=${encodeURIComponent(id)}&source=duckdb`);
     renderDetail(data);
     if (options.updateRoute !== false) {
       updateRoute(cveRoute(displayIdentifier(data.vulnerability) || options.identifier || id));
@@ -1204,34 +1204,11 @@ function renderAiSummary(section, vulnerabilityId, result) {
   if (!status || !output) return;
 
   if (result.summary) {
-    const s = result.summary;
     status.textContent = `${result.cached ? 'Loaded from cache' : 'Generated'} with ${result.model}; evidence ${String(result.evidenceHash || '').slice(0, 12)}.`;
     output.innerHTML = `
-      <div class="ai-summary-main">
-        <div class="analysis-field wide">
-          <span>Executive summary</span>
-          <p>${escapeHtml(s.executiveSummary || 'No summary text returned.')}</p>
-        </div>
-        <div class="analysis-field">
-          <span>Exploitability</span>
-          <p><strong>${escapeHtml(s.exploitabilityAssessment?.level || 'unknown')}</strong> ${escapeHtml(s.exploitabilityAssessment?.rationale || '')}</p>
-        </div>
-        <div class="analysis-field">
-          <span>Remediation</span>
-          <p><strong>${escapeHtml(s.remediation?.priority || 'track')}</strong> ${escapeHtml((s.remediation?.recommendedActions || []).slice(0, 3).join(' '))}</p>
-        </div>
-        <div class="analysis-field">
-          <span>TARA draft</span>
-          <p>${escapeHtml(s.tara?.riskRationale || s.tara?.threatScenario || 'unknown')}</p>
-        </div>
-        <div class="analysis-field">
-          <span>ISO 21434</span>
-          <p>${escapeHtml((s.iso21434?.workProducts || []).slice(0, 3).join(' / ') || s.iso21434?.cybersecurityGoal || 'unknown')}</p>
-        </div>
+      <div class="ai-json-card">
+        ${renderAiJson(result.summary)}
       </div>
-      ${renderAiList('Signals', s.exploitabilityAssessment?.signals)}
-      ${renderAiList('Missing evidence', s.missingEvidence)}
-      ${renderAiList('Citations', s.citations)}
     `;
     return;
   }
@@ -1262,15 +1239,49 @@ function renderAiSummary(section, vulnerabilityId, result) {
   });
 }
 
-function renderAiList(title, values) {
-  const items = (values || []).filter(Boolean).slice(0, 8);
-  if (!items.length) return '';
+function renderAiJson(value, depth = 0, key = null) {
+  const label = key ? `<span class="ai-json-key">${escapeHtml(formatJsonKey(key))}</span>` : '';
+  if (Array.isArray(value)) {
+    if (!value.length) return `${label}<span class="muted">[]</span>`;
+    return `
+      ${label}
+      <ul class="ai-json-list">
+        ${value.map(item => `<li>${renderAiJson(item, depth + 1)}</li>`).join('')}
+      </ul>
+    `;
+  }
+
+  if (value && typeof value === 'object') {
+    const entries = Object.entries(value).filter(([, item]) => item !== undefined);
+    if (!entries.length) return `${label}<span class="muted">{}</span>`;
+    const body = entries.map(([childKey, item]) => `
+      <div class="ai-json-row">
+        ${renderAiJson(item, depth + 1, childKey)}
+      </div>
+    `).join('');
+    if (key && depth > 0) {
+      return `
+        <details class="ai-json-object" open>
+          <summary>${escapeHtml(formatJsonKey(key))}</summary>
+          ${body}
+        </details>
+      `;
+    }
+    return `<div class="ai-json-object">${label}${body}</div>`;
+  }
+
   return `
-    <div class="ai-list">
-      <span>${escapeHtml(title)}</span>
-      <ul>${items.map(item => `<li>${escapeHtml(String(item))}</li>`).join('')}</ul>
-    </div>
+    ${label}
+    <span class="ai-json-value">${escapeHtml(value == null || value === '' ? 'unknown' : String(value))}</span>
   `;
+}
+
+function formatJsonKey(value) {
+  return String(value)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replaceAll('_', ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
 function renderExploitSignals(exploits) {

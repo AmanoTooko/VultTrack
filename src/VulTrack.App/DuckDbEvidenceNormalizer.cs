@@ -8,7 +8,8 @@ public sealed record DuckDbEvidenceNormalizeRequest(
     string? SourceCode,
     int Limit = 1000,
     bool Reset = false,
-    int BatchSize = 10000);
+    int BatchSize = 10000,
+    Guid[]? RawIndexIds = null);
 
 public sealed record DuckDbEvidenceSourceResult(
     string sourceCode,
@@ -64,7 +65,12 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         if (request.Reset) await store.ResetAsync(ct);
         else await store.InitializeAsync(ct);
 
+        var rawIndexIds = request.RawIndexIds is { Length: > 0 }
+            ? request.RawIndexIds.Distinct().ToArray()
+            : null;
         var limit = Math.Clamp(request.Limit <= 0 ? 5000000 : request.Limit, 1, 5000000);
+        if (rawIndexIds is { Length: > 0 })
+            limit = Math.Min(limit, rawIndexIds.Length);
         var batchSize = Math.Clamp(request.BatchSize <= 0 ? 10000 : request.BatchSize, 1, limit);
         var sourceCodes = string.IsNullOrWhiteSpace(request.SourceCode)
             ? DefaultSources
@@ -81,7 +87,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             var weaknesses = 0;
             if (sourceCode.Equals("nvd-cpe", StringComparison.OrdinalIgnoreCase))
             {
-                recordsRead = await RebuildCpeEntriesAsync(limit, ct);
+                recordsRead = await RebuildCpeEntriesAsync(limit, rawIndexIds, ct);
                 watch.Stop();
                 var cpeResult = new DuckDbEvidenceSourceResult(sourceCode, recordsRead, 0, 0, 0, 0, watch.ElapsedMilliseconds);
                 results.Add(cpeResult);
@@ -93,7 +99,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             for (var offset = 0; offset < limit; offset += batchSize)
             {
                 var take = Math.Min(batchSize, limit - offset);
-                var records = await LoadSourceAsync(sourceCode, take, offset, ct);
+                var records = await LoadSourceAsync(sourceCode, take, offset, rawIndexIds, ct);
                 if (records.Count == 0) break;
                 await store.ReplaceRecordsAsync(records, ct);
                 recordsRead += records.Count;
@@ -119,46 +125,58 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return new DuckDbEvidenceNormalizeResult(true, store.DatabasePath, results, await store.StatsAsync(ct));
     }
 
-    private Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadSourceAsync(string sourceCode, int limit, int offset, CancellationToken ct) =>
+    private Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadSourceAsync(string sourceCode, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct) =>
         sourceCode.ToLowerInvariant() switch
         {
-            "debian-security-tracker" => LoadDebianAsync(limit, offset, ct),
-            "osv" => LoadOsvAsync("osv", "stg_osv_vulnerabilities", limit, offset, ct),
-            "ubuntu-osv" => LoadOsvAsync("ubuntu-osv", "stg_ubuntu_osv", limit, offset, ct),
-            "android-osv" => LoadOsvAsync("android-osv", "stg_android_osv", limit, offset, ct),
-            "google-osv" => LoadGoogleOsvAsync(limit, offset, ct),
-            "ghsa" => LoadGhsaAsync("ghsa", limit, offset, ct),
-            "maven-osv" => LoadOsvAsync("maven-osv", "stg_osv_vulnerabilities", limit, offset, ct),
-            "maven-advisory" => LoadEcosystemAsync("maven-advisory", "osv-maven-query", limit, offset, ct),
-            "cve-list-v5" => LoadCveListAsync(limit, offset, ct),
-            "nvd-cve" => LoadNvdAsync(limit, offset, ct),
-            "suse-csaf" => LoadCsafAsync("suse-csaf", limit, offset, ct),
-            "alpine-secdb" => LoadAlpineAsync(limit, offset, ct),
-            "redhat-csaf" => LoadCsafAsync("redhat-csaf", limit, offset, ct),
-            "nuget-advisory" => LoadEcosystemAsync("nuget-advisory", "nuget-vulnerability-info", limit, offset, ct),
-            "npm-advisory" => LoadNpmAdvisoryAsync("npm-advisory", limit, offset, ct),
-            "npm-audit" => LoadNpmAdvisoryAsync("npm-audit", limit, offset, ct),
-            "pypi-advisory" => LoadPypiAdvisoryAsync(limit, offset, ct),
-            "go-advisory" => LoadOsvAsync("go-advisory", "stg_osv_vulnerabilities", limit, offset, ct),
-            "cargo-advisory" => LoadOsvAsync("cargo-advisory", "stg_osv_vulnerabilities", limit, offset, ct),
-            "first-epss" => LoadThreatIntelAsync("first-epss", limit, offset, ct),
-            "cisa-kev" => LoadThreatIntelAsync("cisa-kev", limit, offset, ct),
-            "exploitdb" => LoadExploitAsync("exploitdb", limit, offset, ct),
-            "poc-in-github" => LoadExploitAsync("poc-in-github", limit, offset, ct),
-            "nuclei-templates" => LoadExploitAsync("nuclei-templates", limit, offset, ct),
-            "metasploit" => LoadExploitAsync("metasploit", limit, offset, ct),
-            "trickest-cve" => LoadExploitAsync("trickest-cve", limit, offset, ct),
-            "cnnvd" => LoadCnnvdAsync(limit, offset, ct),
+            "debian-security-tracker" => LoadDebianAsync(limit, offset, rawIndexIds, ct),
+            "osv" => LoadOsvAsync("osv", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "ubuntu-osv" => LoadOsvAsync("ubuntu-osv", "stg_ubuntu_osv", limit, offset, rawIndexIds, ct),
+            "android-osv" => LoadOsvAsync("android-osv", "stg_android_osv", limit, offset, rawIndexIds, ct),
+            "google-osv" => LoadGoogleOsvAsync(limit, offset, rawIndexIds, ct),
+            "ghsa" => LoadGhsaAsync("ghsa", limit, offset, rawIndexIds, ct),
+            "maven-osv" => LoadOsvAsync("maven-osv", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "maven-advisory" => LoadEcosystemAsync("maven-advisory", "osv-maven-query", limit, offset, rawIndexIds, ct),
+            "cve-list-v5" => LoadCveListAsync(limit, offset, rawIndexIds, ct),
+            "nvd-cve" => LoadNvdAsync(limit, offset, rawIndexIds, ct),
+            "suse-csaf" => LoadCsafAsync("suse-csaf", limit, offset, rawIndexIds, ct),
+            "alpine-secdb" => LoadAlpineAsync(limit, offset, rawIndexIds, ct),
+            "redhat-csaf" => LoadCsafAsync("redhat-csaf", limit, offset, rawIndexIds, ct),
+            "nuget-advisory" => LoadEcosystemAsync("nuget-advisory", "nuget-vulnerability-info", limit, offset, rawIndexIds, ct),
+            "npm-advisory" => LoadNpmAdvisoryAsync("npm-advisory", limit, offset, rawIndexIds, ct),
+            "npm-audit" => LoadNpmAdvisoryAsync("npm-audit", limit, offset, rawIndexIds, ct),
+            "pypi-advisory" => LoadPypiAdvisoryAsync(limit, offset, rawIndexIds, ct),
+            "go-advisory" => LoadOsvAsync("go-advisory", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "cargo-advisory" => LoadOsvAsync("cargo-advisory", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "first-epss" => LoadThreatIntelAsync("first-epss", limit, offset, rawIndexIds, ct),
+            "cisa-kev" => LoadThreatIntelAsync("cisa-kev", limit, offset, rawIndexIds, ct),
+            "exploitdb" => LoadExploitAsync("exploitdb", limit, offset, rawIndexIds, ct),
+            "poc-in-github" => LoadExploitAsync("poc-in-github", limit, offset, rawIndexIds, ct),
+            "nuclei-templates" => LoadExploitAsync("nuclei-templates", limit, offset, rawIndexIds, ct),
+            "metasploit" => LoadExploitAsync("metasploit", limit, offset, rawIndexIds, ct),
+            "trickest-cve" => LoadExploitAsync("trickest-cve", limit, offset, rawIndexIds, ct),
+            "cnnvd" => LoadCnnvdAsync(limit, offset, rawIndexIds, ct),
             _ => Task.FromResult<IReadOnlyList<DuckDbEvidenceRecord>>([])
         };
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadDebianAsync(int limit, int offset, CancellationToken ct)
+    private static bool HasRawFilter(Guid[]? rawIndexIds) => rawIndexIds is { Length: > 0 };
+
+    private static string RawFilterSql(string column, int parameterIndex, Guid[]? rawIndexIds) =>
+        HasRawFilter(rawIndexIds) ? $" and {column} = any(${parameterIndex}::uuid[])" : "";
+
+    private static void AddRawFilterParameter(NpgsqlCommand command, Guid[]? rawIndexIds)
     {
-        await using var command = db.CreateCommand("""
+        if (HasRawFilter(rawIndexIds))
+            command.Parameters.AddWithValue(rawIndexIds!);
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadDebianAsync(int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
+    {
+        await using var command = db.CreateCommand($"""
             select raw_index_id, cve_id, packages::text
             from stg_debian_security_tracker s
             join source_raw_index r on r.id = s.raw_index_id
             where r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 3, rawIndexIds)}
             order by s.raw_index_id
             limit $1
             offset $2
@@ -166,6 +184,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.CommandTimeout = 300;
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -199,7 +218,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         }
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadOsvAsync(string sourceCode, string tableName, int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadOsvAsync(string sourceCode, string tableName, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
         await using var command = db.CreateCommand($"""
             with source_record_ids as (
@@ -209,6 +228,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
               join sources src on src.id = r.source_id
               where src.code = $1
                 and r.normalize_status <> 'superseded'
+                {RawFilterSql("s.raw_index_id", 4, rawIndexIds)}
               order by s.raw_index_id
               limit $2
               offset $3
@@ -222,6 +242,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.Parameters.AddWithValue(sourceCode);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
 
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -242,23 +263,23 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadGoogleOsvAsync(int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadGoogleOsvAsync(int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        var androidRows = await CountOsvRowsAsync("google-osv", "stg_android_osv", ct);
+        var androidRows = await CountOsvRowsAsync("google-osv", "stg_android_osv", rawIndexIds, ct);
         if (offset < androidRows)
         {
             var firstTake = Math.Min(limit, androidRows - offset);
-            var records = (await LoadOsvAsync("google-osv", "stg_android_osv", firstTake, offset, ct)).ToList();
+            var records = (await LoadOsvAsync("google-osv", "stg_android_osv", firstTake, offset, rawIndexIds, ct)).ToList();
             var remaining = limit - firstTake;
             if (remaining > 0)
-                records.AddRange(await LoadOsvAsync("google-osv", "stg_osv_vulnerabilities", remaining, 0, ct));
+                records.AddRange(await LoadOsvAsync("google-osv", "stg_osv_vulnerabilities", remaining, 0, rawIndexIds, ct));
             return records;
         }
 
-        return await LoadOsvAsync("google-osv", "stg_osv_vulnerabilities", limit, offset - androidRows, ct);
+        return await LoadOsvAsync("google-osv", "stg_osv_vulnerabilities", limit, offset - androidRows, rawIndexIds, ct);
     }
 
-    private async Task<int> CountOsvRowsAsync(string sourceCode, string tableName, CancellationToken ct)
+    private async Task<int> CountOsvRowsAsync(string sourceCode, string tableName, Guid[]? rawIndexIds, CancellationToken ct)
     {
         await using var command = db.CreateCommand($"""
             select count(*)::integer
@@ -267,15 +288,17 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             join sources src on src.id = r.source_id
             where src.code = $1
               and r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 2, rawIndexIds)}
             """);
         command.Parameters.AddWithValue(sourceCode);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         return (int)(await command.ExecuteScalarAsync(ct) ?? 0);
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadGhsaAsync(string sourceCode, int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadGhsaAsync(string sourceCode, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select s.raw_index_id, s.ghsa_id, s.cve_id, s.ecosystem, s.package_name, s.vulnerable_ranges::text,
                    cvss::text, cwes::text, references_json::text, payload::text
             from stg_ghsa_advisories s
@@ -283,6 +306,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             join sources src on src.id = r.source_id
             where src.code = $1
               and r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 4, rawIndexIds)}
             order by s.raw_index_id
             limit $2
             offset $3
@@ -291,6 +315,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.Parameters.AddWithValue(sourceCode);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
 
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -317,13 +342,14 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadNvdAsync(int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadNvdAsync(int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select raw_index_id, cve_id, configurations::text, metrics::text, weaknesses::text, references_json::text
             from stg_nvd_cves s
             join source_raw_index r on r.id = s.raw_index_id
             where r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 3, rawIndexIds)}
             order by s.raw_index_id
             limit $1
             offset $2
@@ -331,6 +357,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.CommandTimeout = 300;
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
 
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -349,13 +376,14 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCveListAsync(int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCveListAsync(int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select s.raw_index_id, s.cve_id, s.containers_cna::text
             from stg_cve_list_records s
             join source_raw_index r on r.id = s.raw_index_id
             where r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 3, rawIndexIds)}
             order by s.raw_index_id
             limit $1
             offset $2
@@ -363,6 +391,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.CommandTimeout = 300;
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
 
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -794,17 +823,19 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
     private static DuckDbEvidenceRecord EmptyRecord(string sourceCode, Guid rawIndexId, string vulnerabilityKey, string sourceRecordId) =>
         new(sourceCode, rawIndexId, vulnerabilityKey, sourceRecordId, [], [], [], []);
 
-    private async Task<int> RebuildCpeEntriesAsync(int limit, CancellationToken ct)
+    private async Task<int> RebuildCpeEntriesAsync(int limit, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select raw_index_id, cpe23_uri, vendor, product, version, part, target_sw, deprecated
             from stg_nvd_cpe_dictionary s
             join source_raw_index r on r.id = s.raw_index_id
             where r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 2, rawIndexIds)}
             order by s.raw_index_id
             limit $1
             """);
         command.Parameters.AddWithValue(limit);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 0;
         var count = 0;
         var tempDir = Path.Combine(Path.GetDirectoryName(store.DatabasePath)!, "tmp");
@@ -837,7 +868,10 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             ExecuteDuck(conn, "begin transaction");
             try
             {
-                ExecuteDuck(conn, "delete from cpe_entries where source_code = 'nvd-cpe'");
+                if (HasRawFilter(rawIndexIds))
+                    DeleteDuckRows(conn, "cpe_entries", "nvd-cpe", rawIndexIds!.Select(x => x.ToString("D")).ToList());
+                else
+                    ExecuteDuck(conn, "delete from cpe_entries where source_code = 'nvd-cpe'");
                 ExecuteDuck(conn, $"""
                     copy cpe_entries (source_code, raw_index_id, cpe23_uri, vendor, product, version, part, target_sw, deprecated)
                     from {DuckSqlString(tempFile)}
@@ -859,15 +893,16 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         }
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCsafAsync(string sourceCode, int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCsafAsync(string sourceCode, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
         var provider = sourceCode; // suse-csaf or redhat-csaf
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select raw_index_id, advisory_id, identifiers, payload::text
             from stg_ecosystem_advisories s
             join source_raw_index r on r.id = s.raw_index_id
             where provider = $1
               and r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 4, rawIndexIds)}
             order by s.raw_index_id
             limit $2
             offset $3
@@ -875,6 +910,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.Parameters.AddWithValue(provider);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -940,19 +976,21 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadAlpineAsync(int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadAlpineAsync(int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select raw_index_id, distro_release, package_name, identifiers, secfixes::text
             from stg_alpine_secdb s
             join source_raw_index r on r.id = s.raw_index_id
             where r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 3, rawIndexIds)}
             order by s.raw_index_id
             limit $1
             offset $2
             """);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -976,15 +1014,16 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadExternalAdvisoryAsync(string sourceCode, int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadExternalAdvisoryAsync(string sourceCode, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select raw_index_id, advisory_id, identifiers, title, summary, description, severity_label,
                    references_json::text, affected_products::text, payload::text
             from stg_external_advisories
             join source_raw_index r on r.id = raw_index_id
             where provider = $1
               and r.normalize_status <> 'superseded'
+              {RawFilterSql("raw_index_id", 4, rawIndexIds)}
             order by raw_index_id
             limit $2
             offset $3
@@ -992,6 +1031,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.Parameters.AddWithValue(sourceCode);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -1030,19 +1070,20 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadEcosystemAsync(string sourceCode, int limit, int offset, CancellationToken ct) =>
-        await LoadEcosystemAsync(sourceCode, sourceCode, limit, offset, ct);
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadEcosystemAsync(string sourceCode, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct) =>
+        await LoadEcosystemAsync(sourceCode, sourceCode, limit, offset, rawIndexIds, ct);
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadEcosystemAsync(string sourceCode, string provider, int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadEcosystemAsync(string sourceCode, string provider, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
         var eco = sourceCode switch { "go-advisory" => "go", "cargo-advisory" => "cargo", "nuget-advisory" => "nuget", _ => sourceCode };
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select raw_index_id, advisory_id, identifiers, ecosystem, package_name, purl,
                    vulnerable_ranges::text, severity_label, cvss::text, references_json::text, payload::text
             from stg_ecosystem_advisories s
             join source_raw_index r on r.id = s.raw_index_id
             where provider = $1
               and r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 4, rawIndexIds)}
             order by s.raw_index_id
             limit $2
             offset $3
@@ -1050,6 +1091,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.Parameters.AddWithValue(provider);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -1106,14 +1148,15 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             : (introduced is not null ? $">= {introduced}" : null);
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadThreatIntelAsync(string sourceCode, int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadThreatIntelAsync(string sourceCode, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select raw_index_id, identifier, epss_score, epss_percentile, observed_at
             from stg_threat_intel_records s
             join source_raw_index r on r.id = s.raw_index_id
             where provider = $1
               and r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 4, rawIndexIds)}
             order by s.raw_index_id
             limit $2
             offset $3
@@ -1121,6 +1164,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.Parameters.AddWithValue(sourceCode);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
         var rows = new List<string>();
@@ -1165,15 +1209,16 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadExploitAsync(string sourceCode, int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadExploitAsync(string sourceCode, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select s.raw_index_id, s.source_key, s.identifiers, s.title, s.source_url, s.artifact_type, s.exploit_type,
                    s.maturity, s.verification_status, s.published_at, s.modified_at
             from stg_exploit_pocs s
             join source_raw_index r on r.id = s.raw_index_id
             where provider = $1
               and r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 4, rawIndexIds)}
             order by s.raw_index_id
             limit $2
             offset $3
@@ -1181,6 +1226,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.Parameters.AddWithValue(sourceCode);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         var rows = new List<string>();
         var records = new List<DuckDbEvidenceRecord>();
@@ -1230,20 +1276,22 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCnnvdAsync(int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCnnvdAsync(int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select raw_index_id, advisory_id, identifiers, severity_label, references_json::text, payload::text
             from stg_external_advisories s
             join source_raw_index r on r.id = s.raw_index_id
             where provider = 'cnnvd'
               and r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 3, rawIndexIds)}
             order by s.raw_index_id
             limit $1
             offset $2
             """);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -1443,15 +1491,16 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         }
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadNpmAdvisoryAsync(string sourceCode, int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadNpmAdvisoryAsync(string sourceCode, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select s.raw_index_id, s.ghsa_id, s.cve_id, s.package_name, s.vulnerable_ranges::text, s.cvss::text, s.cwes::text
             from stg_npm_advisories s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
             where src.code = $1
               and r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 4, rawIndexIds)}
             order by s.raw_index_id
             limit $2
             offset $3
@@ -1459,6 +1508,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.Parameters.AddWithValue(sourceCode);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
@@ -1493,19 +1543,21 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadPypiAdvisoryAsync(int limit, int offset, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadPypiAdvisoryAsync(int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
-        await using var command = db.CreateCommand("""
+        await using var command = db.CreateCommand($"""
             select raw_index_id, pysec_id, aliases, package_name, affected::text, severity::text, references_json::text, payload::text
             from stg_pypi_advisories s
             join source_raw_index r on r.id = s.raw_index_id
             where r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 3, rawIndexIds)}
             order by s.raw_index_id
             limit $1
             offset $2
             """);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
+        AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
         var records = new List<DuckDbEvidenceRecord>();
         await using var reader = await command.ExecuteReaderAsync(ct);
