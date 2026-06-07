@@ -1268,6 +1268,11 @@ a.result-item {
   background: var(--accent-soft);
 }
 
+.detail-nav a.is-active {
+  color: #ffffff;
+  background: var(--accent);
+}
+
 .detail-two-column {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
@@ -1347,6 +1352,27 @@ a.result-item {
   margin-top: 10px;
 }
 
+.ai-status-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+  margin-top: 10px;
+  color: #3d4654;
+  font-size: 13px;
+}
+
+.ai-status-line span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.ai-status-line p {
+  margin: 0;
+}
+
 .ai-empty-actions {
   display: flex;
   flex-wrap: wrap;
@@ -1406,6 +1432,137 @@ a.result-item {
   color: #3d4654;
   font-size: 13px;
   line-height: 1.45;
+}
+
+.ai-risk-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.ai-risk-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.ai-risk-header.compact {
+  grid-template-columns: 1fr;
+}
+
+.ai-risk-header h4 {
+  margin: 3px 0 0;
+  color: #18202b;
+  font-size: 16px;
+  line-height: 1.45;
+  font-weight: 760;
+}
+
+.ai-risk-score {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 11px;
+  display: grid;
+  gap: 4px;
+  align-content: center;
+}
+
+.ai-risk-score span,
+.ai-risk-metric span,
+.ai-assessment-tab {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.ai-risk-score strong {
+  font-size: 18px;
+  line-height: 1.1;
+}
+
+.ai-risk-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.ai-risk-grid.three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.ai-risk-grid.two {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ai-assessment-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
+}
+
+.ai-assessment-tab {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.ai-assessment-tab.is-active {
+  color: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--accent) 42%, #ffffff);
+  background: color-mix(in srgb, var(--accent-soft) 78%, #ffffff);
+}
+
+.ai-assessment-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-evidence-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
+  color: #3d4654;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.ai-risk-metric p {
+  font-weight: 700;
+}
+
+.ai-risk-metric small {
+  color: #4b5563;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.risk-high strong,
+.risk-high p {
+  color: var(--risk);
+}
+
+.risk-medium strong,
+.risk-medium p {
+  color: #8a5a00;
+}
+
+.risk-low strong,
+.risk-low p {
+  color: #1f6f43;
+}
+
+.risk-none strong,
+.risk-none p,
+.risk-unknown strong,
+.risk-unknown p {
+  color: var(--muted);
 }
 
 .kv-grid {
@@ -2221,6 +2378,13 @@ a {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .ai-risk-header,
+  .ai-risk-grid,
+  .ai-risk-grid.three,
+  .ai-risk-grid.two {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .hero-facts {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -2413,6 +2577,13 @@ a {
 }
 
 @media (max-width: 560px) {
+  .ai-risk-header,
+  .ai-risk-grid,
+  .ai-risk-grid.three,
+  .ai-risk-grid.two {
+    grid-template-columns: 1fr;
+  }
+
   .header-inner {
     grid-template-columns: 1fr;
     min-height: 74px;

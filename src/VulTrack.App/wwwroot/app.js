@@ -340,8 +340,9 @@ function searchRoute(mode = state.mode) {
   return `/search?${params.toString()}`;
 }
 
-function cveRoute(identifier) {
-  return `/cve/${encodeURIComponent(identifier)}`;
+function cveRoute(identifier, sectionId = '') {
+  const hash = sectionId ? `#${encodeURIComponent(sectionId)}` : '';
+  return `/cve/${encodeURIComponent(identifier)}${hash}`;
 }
 
 function sbomRoute(id) {
@@ -349,7 +350,7 @@ function sbomRoute(id) {
 }
 
 function updateRoute(path, options = {}) {
-  const current = `${window.location.pathname}${window.location.search}`;
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
   if (current === path) return;
   window.history[options.replace ? 'replaceState' : 'pushState']({}, '', path);
 }
@@ -357,7 +358,8 @@ function updateRoute(path, options = {}) {
 function parseRoute() {
   const parts = window.location.pathname.split('/').filter(Boolean).map(part => decodeURIComponent(part));
   const params = new URLSearchParams(window.location.search);
-  if (parts[0] === 'cve' && parts[1]) return { mode: 'vulnerability', identifier: parts[1] };
+  const section = decodeURIComponent((window.location.hash || '').replace(/^#/, ''));
+  if (parts[0] === 'cve' && parts[1]) return { mode: 'vulnerability', identifier: parts[1], section };
   if (parts[0] === 'search') {
     const mode = params.get('type') === 'component' ? 'component' : 'vulnerability';
     return {
@@ -385,7 +387,7 @@ async function applyRoute() {
   activateMode(tab, { updateRoute: false, load: false });
   applySearchRouteState(route);
   if (route.identifier) {
-    await loadVulnerabilityByIdentifier(route.identifier);
+    await loadVulnerabilityByIdentifier(route.identifier, { section: route.section });
   } else if (route.mode === 'sbom') {
     await loadSbomList({ detailId: route.sbomId });
   } else if (route.mode === 'status') {
@@ -808,14 +810,14 @@ function bindVulnerabilityLinks(container) {
   });
 }
 
-async function loadVulnerabilityByIdentifier(identifier) {
+async function loadVulnerabilityByIdentifier(identifier, options = {}) {
   setDetailOnlyView(true);
   showDetailPane();
   el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading</h2></div>';
   try {
     const item = await api(`/api/v1/vulnerability.getByIdentifier?identifier=${encodeURIComponent(identifier)}`);
-    const data = await loadVulnerabilityDetail(item.id, { identifier: item.primaryIdentifier, updateRoute: false });
-    updateRoute(cveRoute(displayIdentifier(data?.vulnerability || item)), { replace: true });
+    const data = await loadVulnerabilityDetail(item.id, { identifier: item.primaryIdentifier, updateRoute: false, section: options.section });
+    updateRoute(cveRoute(displayIdentifier(data?.vulnerability || item), options.section), { replace: true });
   } catch (error) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Request failed</h2><p>${escapeHtml(error.message)}</p></div>`;
   }
@@ -833,9 +835,9 @@ async function loadVulnerabilityDetail(id, options = {}) {
     const data = await api(`/api/v1/vulnerability.detail?id=${encodeURIComponent(id)}&source=duckdb`);
     renderDetail(data);
     if (options.updateRoute !== false) {
-      updateRoute(cveRoute(displayIdentifier(data.vulnerability) || options.identifier || id));
+      updateRoute(cveRoute(displayIdentifier(data.vulnerability) || options.identifier || id, options.section));
     }
-    el.detailPane.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    scrollToDetailSection(options.section, { replaceRoute: false }) || el.detailPane.scrollIntoView({ block: 'start', behavior: 'smooth' });
     return data;
   } catch (error) {
     el.detailPane.innerHTML = `<div class="empty-state"><h2>Request failed</h2><p>${escapeHtml(error.message)}</p></div>`;
@@ -1152,35 +1154,18 @@ function renderDetailNav() {
   ];
   return `
     <nav class="detail-nav" aria-label="Detail sections">
-      ${items.map(([label, id]) => `<a href="#${id}">${escapeHtml(label)}</a>`).join('')}
+      ${items.map(([label, id]) => `<a href="#${id}" data-detail-section-link="${id}">${escapeHtml(label)}</a>`).join('')}
     </nav>
   `;
 }
 
-function renderAiAnalysisPlan(v, affected, refs, records) {
+function renderAiAnalysisPlan() {
   return `
     <div class="section-title-row">
       <h3 class="section-h">AI Analysis</h3>
-      <span class="badge">Cache first</span>
+      <span class="badge">Read only</span>
     </div>
-    <div class="ai-grid">
-      <div class="analysis-field">
-        <span>Status</span>
-        <p data-ai-summary-status>Checking cached summary.</p>
-      </div>
-      <div class="analysis-field">
-        <span>Affected systems</span>
-        <p>${fmt(affected.length)} current affected facts across ${fmt(new Set(affected.map(a => a.ecosystem || 'unknown')).size)} ecosystems.</p>
-      </div>
-      <div class="analysis-field">
-        <span>Exploitability signals</span>
-        <p>CVSS ${v.maxCvssScore ?? 'N/A'}, EPSS ${v.epssScore ? pct(v.epssScore) : 'not loaded'}, KEV ${v.kevDateAdded ? 'yes' : 'no'}.</p>
-      </div>
-      <div class="analysis-field">
-        <span>Evidence inputs</span>
-        <p>${fmt(records.length)} source records and ${fmt(refs.length)} references are available for the cached AI pipeline.</p>
-      </div>
-    </div>
+    <div class="ai-status-line"><span>Status</span><p data-ai-summary-status>Checking AI analysis.</p></div>
     <div class="ai-summary-output" data-ai-summary-output></div>
   `;
 }
@@ -1189,7 +1174,7 @@ async function loadAiSummary(vulnerabilityId) {
   const section = el.detailPane.querySelector('#ai-analysis');
   if (!section) return;
   try {
-    const summary = await api(`/api/v1/vulnerability.aiSummary?id=${encodeURIComponent(vulnerabilityId)}`);
+    const summary = await api(`/api/v1/vulnerability.aiAnalysis?id=${encodeURIComponent(vulnerabilityId)}`);
     if (state.selectedId !== vulnerabilityId) return;
     renderAiSummary(section, vulnerabilityId, summary);
   } catch (error) {
@@ -1203,17 +1188,29 @@ function renderAiSummary(section, vulnerabilityId, result) {
   const output = section.querySelector('[data-ai-summary-output]');
   if (!status || !output) return;
 
-  if (result.summary) {
-    status.textContent = `${result.cached ? 'Loaded from cache' : 'Generated'} with ${result.model}; evidence ${String(result.evidenceHash || '').slice(0, 12)}.`;
+  const analysis = result.analysis || result.summary;
+  if (analysis) {
+    status.textContent = `Analyzed with ${result.model || 'unknown model'}${result.updatedAt ? ` · ${dateTime(result.updatedAt)}` : ''}.`;
     output.innerHTML = `
-      <div class="ai-json-card">
-        ${renderAiJson(result.summary)}
-      </div>
+      ${renderAutomotiveAiAnalysis(analysis)}
     `;
+    bindAiAssessmentTabs(output);
+    keepCurrentDetailSectionAnchored();
     return;
   }
 
-  status.textContent = result.message || 'No cached AI summary exists for this evidence hash.';
+  if (result.status === 'not_analyzed' && result.configured === undefined) {
+    status.textContent = result.message || 'No AI analysis exists for this vulnerability.';
+    output.innerHTML = `
+      <div class="ai-empty-actions">
+        <span class="badge warn">not analyzed</span>
+      </div>
+    `;
+    keepCurrentDetailSectionAnchored();
+    return;
+  }
+
+  status.textContent = result.message || 'No AI analysis exists for this vulnerability.';
   output.innerHTML = `
     <div class="ai-empty-actions">
       <span class="badge ${result.configured ? 'low' : 'warn'}">${result.configured ? 'configured' : 'not configured'}</span>
@@ -1221,6 +1218,7 @@ function renderAiSummary(section, vulnerabilityId, result) {
       ${state.authenticated ? '<button class="tab" type="button" data-ai-generate>Generate</button>' : '<span class="muted">Admin login required to generate.</span>'}
     </div>
   `;
+  keepCurrentDetailSectionAnchored();
   section.querySelector('[data-ai-generate]')?.addEventListener('click', async (event) => {
     const button = event.currentTarget;
     button.disabled = true;
@@ -1237,6 +1235,299 @@ function renderAiSummary(section, vulnerabilityId, result) {
       button.textContent = 'Generate';
     }
   });
+}
+
+function renderAutomotiveAiAnalysis(analysis) {
+  if (analysis.ai_summary && (analysis.connected_vehicle_backend_impact || analysis.in_vehicle_ecu_impact)) {
+    return renderDualContextAiAnalysis(analysis);
+  }
+
+  const assessment = analysis.iso21434_assessment;
+  if (!analysis.executive_summary || !assessment) {
+    return `<div class="ai-json-card">${renderAiJson(analysis)}</div>`;
+  }
+
+  const feasibility = assessment.attack_feasibility || {};
+  const impact = assessment.impact_level || {};
+  const applicability = assessment.automotive_applicability || {};
+  const intel = analysis.threat_intelligence || {};
+  const risk = assessment.overall_risk_rating || 'Unknown';
+  const target = assessment.target_architecture || 'Automotive ECU';
+
+  return `
+    <div class="ai-risk-panel">
+      <div class="ai-risk-header">
+        <div>
+          <span class="eyebrow">AI Summary</span>
+          <h4>${escapeHtml(analysis.executive_summary)}</h4>
+        </div>
+        <div class="ai-risk-score ${riskClass(risk)}">
+          <span>Overall Risk</span>
+          <strong>${escapeHtml(risk)}</strong>
+        </div>
+      </div>
+
+      <div class="ai-risk-grid">
+        <div class="analysis-field">
+          <span>Target</span>
+          <p>${escapeHtml(target)}</p>
+        </div>
+        <div class="analysis-field">
+          <span>Automotive Use</span>
+          <p><strong>${escapeHtml(applicability.component_usage_likelihood || 'Unknown')}</strong>${applicability.rationale ? ` · ${escapeHtml(applicability.rationale)}` : ''}</p>
+        </div>
+        <div class="analysis-field">
+          <span>CVSS / EPSS</span>
+          <p>CVSS ${escapeHtml(displayUnknown(intel.cvss_score))} · EPSS ${escapeHtml(displayUnknown(intel.epss_percentile))}</p>
+        </div>
+        <div class="analysis-field">
+          <span>Public Exploit</span>
+          <p>${escapeHtml(displayUnknown(intel.public_exploit_available))}</p>
+        </div>
+      </div>
+
+      <div class="ai-assessment-tabs" role="tablist" aria-label="AI assessment sections">
+        <button class="ai-assessment-tab is-active" type="button" data-ai-tab="feasibility">Attack Feasibility</button>
+        <button class="ai-assessment-tab" type="button" data-ai-tab="impact">Impact</button>
+        <button class="ai-assessment-tab" type="button" data-ai-tab="overall">Overall</button>
+      </div>
+
+      <div class="ai-assessment-panel" data-ai-panel="feasibility">
+        <div class="ai-risk-grid three">
+          ${riskMetric('Distance', feasibility.distance)}
+          ${riskMetric('Expertise', feasibility.personnel_expertise)}
+          ${riskMetric('Equipment', feasibility.equipment_required)}
+        </div>
+        <div class="analysis-field wide">
+          <span>Feasibility Level</span>
+          <p><strong>${escapeHtml(displayUnknown(feasibility.feasibility_level))}</strong></p>
+        </div>
+      </div>
+
+      <div class="ai-assessment-panel" data-ai-panel="impact" hidden>
+        <div class="ai-risk-grid two">
+          ${riskMetric('Privacy', impact.privacy)}
+          ${riskMetric('Financial', impact.financial)}
+          ${riskMetric('Personal Safety', impact.personal_safety)}
+          ${riskMetric('Reputation', impact.reputation)}
+        </div>
+        <div class="analysis-field wide">
+          <span>Overall Impact</span>
+          <p><strong>${escapeHtml(displayUnknown(impact.overall_impact))}</strong></p>
+        </div>
+      </div>
+
+      <div class="ai-assessment-panel" data-ai-panel="overall" hidden>
+        <div class="ai-risk-grid two">
+          ${riskMetric('Risk Rating', risk)}
+          ${riskMetric('Applicability', applicability.component_usage_likelihood)}
+        </div>
+        <div class="analysis-field wide">
+          <span>Remediation Strategy</span>
+          <p>${escapeHtml(displayUnknown(analysis.remediation_strategy))}</p>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderDualContextAiAnalysis(analysis) {
+  const summary = analysis.ai_summary || {};
+  const backend = analysis.connected_vehicle_backend_impact || {};
+  const ecu = analysis.in_vehicle_ecu_impact || {};
+  const intel = analysis.threat_intelligence || {};
+
+  return `
+    <div class="ai-risk-panel">
+      <div class="ai-risk-header compact">
+        <div>
+          <span class="eyebrow">AI Summary</span>
+          <h4>${escapeHtml(displayUnknown(summary.description))}</h4>
+        </div>
+      </div>
+      ${Array.isArray(summary.key_evidence) && summary.key_evidence.length ? `
+        <ul class="ai-evidence-list">
+          ${summary.key_evidence.slice(0, 6).map(item => `<li>${escapeHtml(displayUnknown(item))}</li>`).join('')}
+        </ul>
+      ` : ''}
+
+      <div class="ai-assessment-tabs" role="tablist" aria-label="AI impact contexts">
+        <button class="ai-assessment-tab is-active" type="button" data-ai-tab="backend">Connected Backend</button>
+        <button class="ai-assessment-tab" type="button" data-ai-tab="ecu">Vehicle ECU</button>
+      </div>
+
+      <div class="ai-assessment-panel" data-ai-panel="backend">
+        ${renderBackendImpactPanel(backend, intel)}
+      </div>
+
+      <div class="ai-assessment-panel" data-ai-panel="ecu" hidden>
+        ${renderEcuImpactPanel(ecu, intel)}
+      </div>
+    </div>
+  `;
+}
+
+function renderBackendImpactPanel(backend, intel) {
+  const feasibility = backend.attack_feasibility || {};
+  const impact = backend.impact || {};
+  return `
+    <div class="ai-risk-grid">
+      ${riskMetric('Risk', backend.risk_rating)}
+      ${riskMetric('Applicability', backend.applicability)}
+      ${riskMetric('CVSS', intel.cvss_score)}
+      ${riskMetric('EPSS', intel.epss_percentile)}
+    </div>
+    <div class="analysis-field wide">
+      <span>Backend Summary</span>
+      <p>${escapeHtml(displayUnknown(backend.summary))}</p>
+    </div>
+    <div class="analysis-field wide">
+      <span>Attack Feasibility</span>
+      <p><strong>${escapeHtml(displayUnknown(feasibility.level))}</strong> · ${escapeHtml(displayUnknown(feasibility.summary))}</p>
+    </div>
+    <div class="ai-risk-grid three">
+      ${riskMetric('Distance', feasibility.distance)}
+      ${riskMetric('Expertise', feasibility.personnel_expertise)}
+      ${riskMetric('Equipment', feasibility.equipment_required)}
+    </div>
+    <div class="ai-risk-grid two">
+      ${riskMetric('Data Privacy', impact.data_privacy)}
+      ${riskMetric('Continuity', impact.service_continuity)}
+      ${riskMetric('Fleet Ops', impact.fleet_operations)}
+      ${riskMetric('Compliance', impact.reputation_compliance)}
+    </div>
+    <div class="analysis-field wide">
+      <span>Remediation</span>
+      <p>${escapeHtml(displayUnknown(backend.remediation_strategy))}</p>
+    </div>
+  `;
+}
+
+function renderEcuImpactPanel(ecu, intel) {
+  const applicability = ecu.automotive_applicability || {};
+  const feasibility = ecu.attack_feasibility || {};
+  const impact = ecu.impact_level || {};
+  const conditionalScenarios = Array.isArray(applicability.conditional_ecu_scenarios) ? applicability.conditional_ecu_scenarios.filter(Boolean) : [];
+  const missingEvidence = Array.isArray(applicability.missing_evidence) ? applicability.missing_evidence.filter(Boolean) : [];
+  return `
+    <div class="ai-risk-grid">
+      ${riskMetric('Risk', ecu.risk_rating)}
+      ${riskMetric('ECU Use', applicability.component_usage_likelihood)}
+      ${riskMetric('Assumption', applicability.deployment_assumption)}
+      ${riskMetric('CVSS', intel.cvss_score)}
+      ${riskMetric('Public Exploit', intel.public_exploit_available)}
+    </div>
+    <div class="analysis-field wide">
+      <span>Automotive Applicability</span>
+      <p>${escapeHtml(displayUnknown(applicability.rationale))}</p>
+    </div>
+    ${conditionalScenarios.length ? `
+      <div class="analysis-field wide">
+        <span>Conditional Scenarios</span>
+        <p>${conditionalScenarios.slice(0, 5).map(item => escapeHtml(displayUnknown(item))).join(' · ')}</p>
+      </div>
+    ` : ''}
+    ${missingEvidence.length ? `
+      <div class="analysis-field wide">
+        <span>Needed Evidence</span>
+        <p>${missingEvidence.slice(0, 6).map(item => escapeHtml(displayUnknown(item))).join(' · ')}</p>
+      </div>
+    ` : ''}
+    <div class="analysis-field wide">
+      <span>Attack Feasibility</span>
+      <p><strong>${escapeHtml(displayUnknown(feasibility.feasibility_level))}</strong> · ${escapeHtml(displayUnknown(feasibility.summary))}</p>
+    </div>
+    <div class="ai-risk-grid three">
+      ${riskMetric('Distance', feasibility.distance)}
+      ${riskMetric('Expertise', feasibility.personnel_expertise)}
+      ${riskMetric('Equipment', feasibility.equipment_required)}
+    </div>
+    <div class="ai-risk-grid two">
+      ${riskMetric('Privacy', impact.privacy)}
+      ${riskMetric('Financial', impact.financial)}
+      ${riskMetric('Safety', impact.personal_safety)}
+      ${riskMetric('Reputation', impact.reputation)}
+    </div>
+    <div class="analysis-field wide">
+      <span>Overall Impact</span>
+      <p><strong>${escapeHtml(displayUnknown(impact.overall_impact))}</strong></p>
+    </div>
+    <div class="analysis-field wide">
+      <span>Remediation</span>
+      <p>${escapeHtml(displayUnknown(ecu.remediation_strategy))}</p>
+    </div>
+  `;
+}
+
+function bindAiAssessmentTabs(root) {
+  root.querySelectorAll('[data-ai-tab]').forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const key = tab.getAttribute('data-ai-tab');
+      root.querySelectorAll('[data-ai-tab]').forEach((item) => item.classList.toggle('is-active', item === tab));
+      root.querySelectorAll('[data-ai-panel]').forEach((panel) => {
+        panel.hidden = panel.getAttribute('data-ai-panel') !== key;
+      });
+    });
+  });
+}
+
+function riskMetric(label, value) {
+  const text = metricLevel(value);
+  const rationale = metricRationale(value);
+  return `
+    <div class="analysis-field ai-risk-metric ${riskClass(text)}">
+      <span>${escapeHtml(label)}</span>
+      <p>${escapeHtml(text)}</p>
+      ${rationale ? `<small>${escapeHtml(rationale)}</small>` : ''}
+    </div>
+  `;
+}
+
+function metricLevel(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return displayUnknown(firstPresent(value, ['level', 'rating', 'severity', 'value', 'label', 'status', 'likelihood', 'overall']));
+  }
+  return displayUnknown(value);
+}
+
+function metricRationale(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const rationale = displayUnknown(firstPresent(value, ['rationale', 'reason', 'summary', 'description', 'details', 'evidence']));
+  return rationale === 'unknown' ? '' : rationale;
+}
+
+function displayUnknown(value) {
+  if (value === null || value === undefined || value === '') return 'unknown';
+  if (Array.isArray(value)) {
+    const items = value.map(item => displayUnknown(item)).filter(item => item !== 'unknown');
+    return items.length ? items.join(', ') : 'unknown';
+  }
+  if (typeof value === 'object') {
+    const preferred = firstPresent(value, ['level', 'rating', 'severity', 'value', 'label', 'title', 'summary', 'description', 'rationale', 'status', 'likelihood', 'overall']);
+    if (preferred !== undefined) return displayUnknown(preferred);
+    const entries = Object.entries(value)
+      .filter(([, item]) => item !== null && item !== undefined && item !== '')
+      .slice(0, 4)
+      .map(([key, item]) => `${formatJsonKey(key)}: ${displayUnknown(item)}`);
+    return entries.length ? entries.join(' · ') : 'unknown';
+  }
+  return String(value);
+}
+
+function firstPresent(object, keys) {
+  for (const key of keys) {
+    if (object && object[key] !== null && object[key] !== undefined && object[key] !== '') return object[key];
+  }
+  return undefined;
+}
+
+function riskClass(value) {
+  const normalized = String(value || '').toLowerCase();
+  if (normalized.includes('critical') || normalized.includes('high')) return 'risk-high';
+  if (normalized.includes('medium')) return 'risk-medium';
+  if (normalized.includes('low')) return 'risk-low';
+  if (normalized.includes('none')) return 'risk-none';
+  return 'risk-unknown';
 }
 
 function renderAiJson(value, depth = 0, key = null) {
@@ -1895,6 +2186,8 @@ function renderCvssSourceDetail(groupKey, score, index, active) {
 }
 
 function bindDetailInteractions(root) {
+  bindDetailNav(root);
+
   root.querySelectorAll('[data-cvss-tab]').forEach((tab) => {
     tab.addEventListener('click', () => {
       const key = tab.getAttribute('data-cvss-tab');
@@ -1935,6 +2228,55 @@ function bindDetailInteractions(root) {
       button.setAttribute('aria-expanded', String(!expanded));
       button.textContent = expanded ? button.dataset.expandLabel : button.dataset.collapseLabel;
     });
+  });
+}
+
+function bindDetailNav(root) {
+  const nav = root.querySelector('.detail-nav');
+  if (!nav) return;
+  nav.querySelectorAll('[data-detail-section-link]').forEach((link) => {
+    link.addEventListener('click', (event) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+      event.preventDefault();
+      scrollToDetailSection(link.dataset.detailSectionLink, { pushRoute: true, smooth: true });
+    });
+  });
+  setActiveDetailNavLink(currentDetailSectionFromHash());
+}
+
+function currentDetailSectionFromHash() {
+  return decodeURIComponent((window.location.hash || '').replace(/^#/, ''));
+}
+
+function scrollToDetailSection(sectionId, options = {}) {
+  if (!sectionId) return false;
+  const target = el.detailPane.querySelector(`#${CSS.escape(sectionId)}`);
+  if (!target) return false;
+  if (options.pushRoute) updateCurrentCveSection(sectionId);
+  setActiveDetailNavLink(sectionId);
+  target.scrollIntoView({ block: 'start', behavior: options.smooth === false ? 'auto' : 'smooth' });
+  return true;
+}
+
+function keepCurrentDetailSectionAnchored() {
+  const sectionId = currentDetailSectionFromHash();
+  if (!sectionId) return;
+  requestAnimationFrame(() => scrollToDetailSection(sectionId, { smooth: false }));
+}
+
+function updateCurrentCveSection(sectionId) {
+  const parts = window.location.pathname.split('/').filter(Boolean).map(part => decodeURIComponent(part));
+  if (parts[0] !== 'cve' || !parts[1]) return;
+  updateRoute(cveRoute(parts[1], sectionId));
+}
+
+function setActiveDetailNavLink(sectionId) {
+  const nav = el.detailPane.querySelector('.detail-nav');
+  if (!nav) return;
+  nav.querySelectorAll('[data-detail-section-link]').forEach((link) => {
+    const active = Boolean(sectionId) && link.dataset.detailSectionLink === sectionId;
+    link.classList.toggle('is-active', active);
+    if (active) link.scrollIntoView({ block: 'nearest', inline: 'center' });
   });
 }
 
@@ -2376,6 +2718,11 @@ async function bootstrap() {
 
 bootstrap();
 window.addEventListener('popstate', applyRoute);
+window.addEventListener('hashchange', () => {
+  if (window.location.pathname.split('/').filter(Boolean)[0] === 'cve') {
+    keepCurrentDetailSectionAnchored();
+  }
+});
 
 // ===== SBOM Management =====
 
