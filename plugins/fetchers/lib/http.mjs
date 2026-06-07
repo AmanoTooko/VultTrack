@@ -45,20 +45,46 @@ export async function fetchText(url, options = {}) {
 
 async function fetchWithTimeout(url, options = {}) {
   const timeoutMs = getIntEnv('FETCHER_TIMEOUT_MS', 120000);
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, {
-      ...options,
-      signal: controller.signal,
-      headers: {
-        ...COMMON_HEADERS,
-        ...(options.headers ?? {})
+  const retries = Math.max(0, getIntEnv('FETCHER_HTTP_RETRIES', 3));
+  const baseDelayMs = Math.max(100, getIntEnv('FETCHER_HTTP_RETRY_BASE_MS', 1000));
+  const method = String(options.method ?? 'GET').toUpperCase();
+  const retryableMethod = method === 'GET' || method === 'HEAD';
+
+  for (let attempt = 0; ; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+        headers: {
+          ...COMMON_HEADERS,
+          ...(options.headers ?? {})
+        }
+      });
+      if (!retryableMethod || attempt >= retries || (response.status !== 429 && response.status < 500)) {
+        return response;
       }
-    });
-  } finally {
-    clearTimeout(timer);
+
+      const retryAfter = Number.parseInt(response.headers.get('retry-after') ?? '', 10);
+      await response.body?.cancel().catch(() => {});
+      await delay(Number.isFinite(retryAfter) ? retryAfter * 1000 : retryDelay(baseDelayMs, attempt));
+    } catch (error) {
+      if (!retryableMethod || attempt >= retries) throw error;
+      await delay(retryDelay(baseDelayMs, attempt));
+    } finally {
+      clearTimeout(timer);
+    }
   }
+}
+
+function retryDelay(baseDelayMs, attempt) {
+  const exponential = Math.min(30000, baseDelayMs * (2 ** attempt));
+  return exponential + Math.floor(Math.random() * Math.min(500, baseDelayMs));
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export function authHeaders() {

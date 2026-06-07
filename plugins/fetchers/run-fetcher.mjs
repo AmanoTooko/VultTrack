@@ -23,7 +23,8 @@ if (mod.sourceCode !== source || typeof mod.run !== 'function') {
 
 await withClient(async (client) => {
   const sourceRow = await getSource(client, source);
-  const run = await startRun(client, sourceRow.id, 'manual');
+  const trigger = process.env.FETCHER_TRIGGER || 'manual';
+  const run = await startRun(client, sourceRow.id, trigger);
   const ctx = { source: sourceRow, run };
   try {
     const result = await mod.run(client, ctx);

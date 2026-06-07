@@ -2,6 +2,7 @@ import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
 import { upsertNpmAdvisory } from '../lib/staging.mjs';
+import { validGithubToken } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'npm-advisory';
 
@@ -35,7 +36,7 @@ export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
   const checkpoint = ctx.source.checkpoint_json ?? {};
   const updatedSince = checkpoint.updatedSince ?? null;
-  const githubToken = process.env.GITHUB_TOKEN;
+  const githubToken = validGithubToken(process.env.GITHUB_TOKEN);
 
   let nextUrl = `https://api.github.com/advisories?per_page=100&type=reviewed&ecosystem=npm&sort=updated&direction=desc`;
   let count = 0;

@@ -2,6 +2,7 @@ import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
 import { upsertGhsa } from '../lib/staging.mjs';
+import { validGithubToken } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'ghsa';
 
@@ -33,7 +34,7 @@ async function fetchGhsaPage(url, githubToken) {
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
-  const githubToken = process.env.GITHUB_TOKEN;
+  const githubToken = validGithubToken(process.env.GITHUB_TOKEN);
 
   // Checkpoint: use updatedSince for incremental sync
   const checkpoint = ctx.source.checkpoint_json ?? {};
