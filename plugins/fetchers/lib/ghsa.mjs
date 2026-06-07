@@ -1,5 +1,6 @@
 import { sha256, stableJson } from './hash.mjs';
 import { writeRecord } from './db.mjs';
+import { validGithubToken } from './exploit-utils.mjs';
 
 const BROWSER_UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36';
@@ -31,7 +32,7 @@ export async function fetchGhsaPage(url, githubToken) {
 export function makeGhsaEcosystemFetcher(sourceCode, ecosystem, upsertFn) {
   return async function run(client, ctx) {
     const max = parseInt(process.env.FETCHER_MAX_RECORDS) || Number.MAX_SAFE_INTEGER;
-    const githubToken = process.env.GITHUB_TOKEN;
+    const githubToken = validGithubToken(process.env.GITHUB_TOKEN);
 
     const checkpoint = ctx.source.checkpoint_json ?? {};
     const updatedSince = checkpoint.updatedSince ?? null;
