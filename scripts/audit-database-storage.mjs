@@ -21,6 +21,7 @@ try {
            pg_size_pretty(pg_total_relation_size(s.relid)) total_size,
            pg_size_pretty(pg_relation_size(s.relid)) heap_size,
            pg_size_pretty(pg_indexes_size(s.relid)) index_size,
+           pg_size_pretty(pg_total_relation_size(s.relid) - pg_relation_size(s.relid) - pg_indexes_size(s.relid)) toast_size,
            s.n_live_tup::bigint live_rows,
            s.n_dead_tup::bigint dead_rows,
            s.seq_scan::bigint,
@@ -98,6 +99,9 @@ try {
     !index.index_name.endsWith('_pkey')
   );
   const detailSnapshots = await directorySummary(detailSnapshotDir);
+  const stagingPayloadTables = tables.rows
+    .filter(row => row.table_name.startsWith('stg_') && row.toast_size !== '0 bytes')
+    .slice(0, 20);
 
   console.log(JSON.stringify({
     generatedAt: new Date().toISOString(),
@@ -108,6 +112,7 @@ try {
     detailSnapshots,
     residualTables: residualTables.rows.map(row => row.table_name),
     missingForeignKeyIndexes: missingForeignKeyIndexes.rows,
+    stagingPayloadTables,
     largestTables: tables.rows,
     candidateUnusedIndexes,
     largestIndexes: indexes.rows
