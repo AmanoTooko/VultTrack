@@ -14,8 +14,10 @@ VulTrack is a vulnerability intelligence pipeline for collecting raw advisories,
 
 ```bash
 cp .env.example .env
-docker compose up -d postgres adminer api frontend
+npm run start:local
 ```
+
+On macOS, double-click `VulTrack.command` from Finder for the same local start flow.
 
 Open:
 
@@ -35,6 +37,12 @@ Run fetchers:
 ```bash
 npm run fetch -- --source nvd-cve
 npm run fetch:all:smoke
+```
+
+Monitor services, fetchers, pending normalization, storage mode, snapshots, and largest PostgreSQL tables:
+
+```bash
+npm run status
 ```
 
 Run normalization:
