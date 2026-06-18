@@ -43,7 +43,7 @@ export async function run(client, ctx) {
 }
 ```
 
-3. 用 `writeRecord(client, ctx, record)` 写 raw object 和 `source_raw_index`。
+3. 用 `writeRecord(client, ctx, record)` 写 raw object 和 `source_raw_index`。默认 raw object 存到 PostgreSQL `source_objects.compressed_content`；只有显式设置 `RAW_OBJECT_STORE=filesystem` 时才会写入 `RAW_OBJECT_PATH`。
 4. 在 `lib/staging.mjs` 增加或复用 staging upsert helper。
 5. 在 `db/init/001_schema.sql` seed `sources` 行，并为新 staging 表补 `create table if not exists`。
 6. 运行：
@@ -68,6 +68,7 @@ npm run fetch -- --source nvd-cve
 
 ```bash
 FETCHER_TIMEOUT_MS=600000
+RAW_OBJECT_STORE=pgsql
 NVD_API_KEY=...
 GITHUB_TOKEN=...
 OSS_INDEX_USERNAME=...

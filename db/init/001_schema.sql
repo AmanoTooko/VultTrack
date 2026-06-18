@@ -62,6 +62,7 @@ create table if not exists source_objects (
   sha256 text not null,
   size_bytes bigint not null,
   compressed_size_bytes bigint not null,
+  compressed_content bytea,
   schema_hint text,
   fetched_at timestamptz not null default now(),
   retention_class text not null default 'hot',
@@ -89,6 +90,13 @@ create table if not exists source_raw_index (
   normalize_status text not null default 'pending',
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
+);
+
+create table if not exists staging_payload_compactions (
+  table_name text not null,
+  raw_index_id uuid not null,
+  compacted_at timestamptz not null default now(),
+  primary key (table_name, raw_index_id)
 );
 
 create unique index if not exists ux_raw_source_external_hash
@@ -562,6 +570,23 @@ create table if not exists ai_vulnerability_summaries (
 create index if not exists ix_ai_summaries_vuln_latest
   on ai_vulnerability_summaries(vulnerability_id, updated_at desc);
 
+create table if not exists ai_vulnerability_analyses (
+  vulnerability_id uuid primary key references vulnerabilities(id) on delete cascade,
+  model text not null,
+  prompt_version text not null,
+  evidence_hash text not null,
+  analysis_json jsonb not null,
+  input_json jsonb not null,
+  input_chars integer not null default 0,
+  output_chars integer not null default 0,
+  source_url text,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+
+create index if not exists ix_ai_analyses_updated
+  on ai_vulnerability_analyses(updated_at desc);
+
 create table if not exists components (
   id uuid primary key default gen_random_uuid(),
   component_key text not null unique,
@@ -765,6 +790,7 @@ create index if not exists ix_vuln_affected_names on vulnerabilities using gin(a
 create index if not exists ix_vuln_title_trgm on vulnerabilities using gin(title gin_trgm_ops);
 create index if not exists ix_vuln_primary_identifier_trgm on vulnerabilities using gin(primary_identifier gin_trgm_ops);
 create index if not exists ix_vuln_modified on vulnerabilities(modified_at desc nulls last);
+create index if not exists ix_vulnerabilities_updated_id on vulnerabilities(updated_at desc, id desc);
 create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last);
 create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last);
 create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier);

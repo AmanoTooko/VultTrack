@@ -33,7 +33,6 @@ services:
       VULTRACK_SCHEDULER_ENABLED: "false"
     volumes:
       - .:/workspace
-      - benchmark-raw:/workspace/data/raw-objects
     ports:
       - "5199:8080"
     depends_on:
@@ -42,4 +41,3 @@ services:
 
 volumes:
   benchmark-pgdata:
-  benchmark-raw:

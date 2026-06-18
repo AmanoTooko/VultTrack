@@ -6,6 +6,7 @@ public sealed class DuckDbRawNormalizationService(
     NpgsqlDataSource db,
     RawNormalizationService postgresNormalizer,
     DuckDbEvidenceNormalizer normalizer,
+    StagingPayloadCompactor payloadCompactor,
     IConfiguration configuration,
     ILogger<DuckDbRawNormalizationService> logger) : IRawNormalizationService
 {
@@ -34,7 +35,7 @@ public sealed class DuckDbRawNormalizationService(
             return pgResult;
 
         var inlineLimit = DuckDbInlineLimit();
-        if (inlineLimit <= 0 || rawIndexIds.Length >= inlineLimit)
+        if (inlineLimit <= 0 || rawIndexIds.Length > inlineLimit)
         {
             logger.LogInformation("Skipping inline DuckDB evidence normalization for {SourceCode}: raw_ids={RawIds} exceeds inline_limit={InlineLimit}. Run source-level DuckDB rebuild after bulk PostgreSQL normalization.",
                 sourceCode, rawIndexIds.Length, inlineLimit);
@@ -51,6 +52,10 @@ public sealed class DuckDbRawNormalizationService(
                 RawIndexIds: rawIndexIds);
             var result = await normalizer.NormalizeAsync(request, ct);
             var source = result.sources.FirstOrDefault(x => string.Equals(x.sourceCode, sourceCode, StringComparison.OrdinalIgnoreCase));
+            if (source is not null)
+            {
+                await payloadCompactor.CompactAsync(rawIndexIds, ct);
+            }
             return source is null
                 ? new NormalizeBatchResult(sourceCode, pgResult.Processed, pgResult.Failed + 1)
                 : new NormalizeBatchResult(sourceCode, pgResult.Processed, pgResult.Failed);

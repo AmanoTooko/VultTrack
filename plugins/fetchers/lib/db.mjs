@@ -7,6 +7,7 @@ import { getEnv, getRootPath } from './env.mjs';
 import { sha256, stableJson } from './hash.mjs';
 
 const gzip = promisify(zlib.gzip);
+let sourceObjectStorageSchemaEnsured = false;
 
 export function createPool() {
   return new pg.Pool({
@@ -73,22 +74,33 @@ export async function writeRecord(client, ctx, record) {
   const compressed = await gzip(json);
   const contentHash = sha256(json);
   const recordHash = record.recordHash ?? contentHash;
-  const dir = getRootPath(getEnv('RAW_OBJECT_PATH', './data/raw-objects'), ctx.source.code, new Date().toISOString().slice(0, 10));
-  await fs.mkdir(dir, { recursive: true });
-  const file = path.join(dir, `${record.externalKey.replaceAll('/', '_')}-${recordHash.slice(0, 12)}.json.gz`);
-  await fs.writeFile(file, compressed);
-  const objectUri = `file://${file}`;
+  const stored = await storeRawObject(client, ctx, {
+    compressed,
+    contentHash,
+    externalKey: record.externalKey,
+    suffix: `${recordHash.slice(0, 12)}.json.gz`
+  });
 
   const objectResult = await client.query(
     `insert into source_objects
-       (source_id, sync_run_id, object_uri, content_type, compression, sha256, size_bytes, compressed_size_bytes, schema_hint)
-     values ($1,$2,$3,'application/json','gzip',$4,$5,$6,$7)
+       (source_id, sync_run_id, object_uri, content_type, compression, sha256, size_bytes, compressed_size_bytes, schema_hint, compressed_content)
+     values ($1,$2,$3,'application/json','gzip',$4,$5,$6,$7,$8)
      on conflict (source_id, sha256) do update set
        object_uri = excluded.object_uri,
        sync_run_id = excluded.sync_run_id,
+       compressed_content = coalesce(excluded.compressed_content, source_objects.compressed_content),
        fetched_at = now()
      returning id`,
-    [ctx.source.id, ctx.run.id, objectUri, contentHash, json.length, compressed.length, record.schemaHint ?? ctx.source.code]
+    [
+      ctx.source.id,
+      ctx.run.id,
+      stored.objectUri,
+      contentHash,
+      json.length,
+      compressed.length,
+      record.schemaHint ?? ctx.source.code,
+      stored.compressedContent
+    ]
   );
   const objectId = objectResult.rows[0].id;
 
@@ -126,40 +138,36 @@ export async function writeArtifact(client, ctx, artifact) {
     : Buffer.from(String(artifact.body ?? ''), artifact.encoding ?? 'utf8');
   const compressed = await gzip(body);
   const contentHash = sha256(body);
-  const dir = getRootPath(
-    getEnv('RAW_OBJECT_PATH', './data/raw-objects'),
-    ctx.source.code,
-    'artifacts',
-    new Date().toISOString().slice(0, 10)
-  );
-  await fs.mkdir(dir, { recursive: true });
-  const safeName = String(artifact.externalKey ?? artifact.filename ?? contentHash)
-    .replaceAll('/', '_')
-    .replaceAll('\\', '_')
-    .slice(0, 160);
   const extension = artifact.compressedExtension ?? '.gz';
-  const file = path.join(dir, `${safeName}-${contentHash.slice(0, 12)}${extension}`);
-  await fs.writeFile(file, compressed);
+  const stored = await storeRawObject(client, ctx, {
+    compressed,
+    contentHash,
+    externalKey: artifact.externalKey ?? artifact.filename ?? contentHash,
+    suffix: `${contentHash.slice(0, 12)}${extension}`,
+    artifact: true
+  });
 
   const result = await client.query(
     `insert into source_objects
-       (source_id, sync_run_id, object_uri, content_type, compression, sha256, size_bytes, compressed_size_bytes, schema_hint, retention_class)
-     values ($1,$2,$3,$4,'gzip',$5,$6,$7,$8,$9)
+       (source_id, sync_run_id, object_uri, content_type, compression, sha256, size_bytes, compressed_size_bytes, schema_hint, retention_class, compressed_content)
+     values ($1,$2,$3,$4,'gzip',$5,$6,$7,$8,$9,$10)
      on conflict (source_id, sha256) do update set
        object_uri = excluded.object_uri,
        sync_run_id = excluded.sync_run_id,
+       compressed_content = coalesce(excluded.compressed_content, source_objects.compressed_content),
        fetched_at = now()
      returning id`,
     [
       ctx.source.id,
       ctx.run.id,
-      `file://${file}`,
+      stored.objectUri,
       artifact.contentType ?? 'application/octet-stream',
       contentHash,
       body.length,
       compressed.length,
       artifact.schemaHint ?? `${ctx.source.code}-artifact`,
-      artifact.retentionClass ?? 'hot'
+      artifact.retentionClass ?? 'hot',
+      stored.compressedContent
     ]
   );
 
@@ -168,8 +176,60 @@ export async function writeArtifact(client, ctx, artifact) {
     sha256: contentHash,
     sizeBytes: body.length,
     compressedSizeBytes: compressed.length,
-    objectUri: `file://${file}`
+    objectUri: stored.objectUri
   };
+}
+
+export async function ensureSourceObjectStorageSchema(client) {
+  if (sourceObjectStorageSchemaEnsured) return;
+  const existing = await client.query(
+    `select 1
+     from information_schema.columns
+     where table_schema = 'public'
+       and table_name = 'source_objects'
+       and column_name = 'compressed_content'
+     limit 1`
+  );
+  if (!existing.rowCount) {
+    await client.query(`
+      alter table source_objects
+        add column compressed_content bytea
+    `);
+  }
+  sourceObjectStorageSchemaEnsured = true;
+}
+
+async function storeRawObject(client, ctx, { compressed, contentHash, externalKey, suffix, artifact = false }) {
+  await ensureSourceObjectStorageSchema(client);
+  const store = getRawObjectStore();
+  if (store === 'filesystem' || store === 'dual') {
+    const dir = artifact
+      ? getRootPath(getEnv('RAW_OBJECT_PATH', './data/raw-objects'), ctx.source.code, 'artifacts', new Date().toISOString().slice(0, 10))
+      : getRootPath(getEnv('RAW_OBJECT_PATH', './data/raw-objects'), ctx.source.code, new Date().toISOString().slice(0, 10));
+    await fs.mkdir(dir, { recursive: true });
+    const safeName = String(externalKey ?? contentHash)
+      .replaceAll('/', '_')
+      .replaceAll('\\', '_')
+      .slice(0, 160);
+    const file = path.join(dir, `${safeName}-${suffix}`);
+    await fs.writeFile(file, compressed);
+    return {
+      objectUri: `file://${file}`,
+      compressedContent: store === 'dual' ? compressed : null
+    };
+  }
+
+  return {
+    objectUri: `pg://source_objects/${ctx.source.code}/${contentHash}`,
+    compressedContent: compressed
+  };
+}
+
+function getRawObjectStore() {
+  const value = getEnv('RAW_OBJECT_STORE', getEnv('RAW_OBJECT_STORAGE', 'pgsql')).toLowerCase();
+  if (value === 'postgres') return 'pgsql';
+  if (['pgsql', 'filesystem', 'dual'].includes(value)) return value;
+  throw new Error(`Unsupported RAW_OBJECT_STORE: ${value}`);
 }
 
 export async function saveCheckpoint(client, sourceId, checkpoint) {
@@ -294,6 +354,7 @@ async function walkDir(dir, files, max) {
 }
 
 export async function recordError(client, ctx, stage, error, externalKey = null) {
+  const cause = error.cause;
   await client.query(
     `insert into source_task_errors
        (sync_run_id, source_id, stage, external_key, error_code, error_message, error_detail)
@@ -305,7 +366,19 @@ export async function recordError(client, ctx, stage, error, externalKey = null)
       externalKey,
       error.code ?? error.name ?? 'ERROR',
       error.message ?? String(error),
-      { stack: error.stack ?? null }
+      {
+        stack: error.stack ?? null,
+        cause: cause
+          ? {
+              name: cause.name ?? null,
+              message: cause.message ?? null,
+              code: cause.code ?? null,
+              errno: cause.errno ?? null,
+              syscall: cause.syscall ?? null,
+              hostname: cause.hostname ?? null
+            }
+          : null
+      }
     ]
   );
 }
