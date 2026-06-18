@@ -1,6 +1,9 @@
 .env
 ssh-key-*.key
 data/
+exports/
+logs/
+WSL/
 pgdata/
 node_modules/
 plugins/fetchers/node_modules/

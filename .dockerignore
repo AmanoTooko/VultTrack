@@ -1,0 +1,17 @@
+.git
+.DS_Store
+.env
+.env.*
+!.env.example
+node_modules
+pgdata
+data
+exports
+logs
+WSL
+bin
+obj
+**/bin
+**/obj
+*.dump
+*.log
