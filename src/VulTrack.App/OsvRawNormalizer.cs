@@ -252,6 +252,8 @@ public sealed class OsvRawNormalizer(IEnumerable<IAffectedComponentHook> affecte
         catch (Exception ex)
         {
             logger.LogWarning(ex, "OSV batch normalize failed for {Count} records; falling back to per-record writes.", canonicalized.Count);
+            if (connection.FullState != System.Data.ConnectionState.Open)
+                throw;
             return await ProcessCanonicalizedIndividuallyAsync(connection, canonicalized, ct);
         }
         }

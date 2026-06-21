@@ -701,6 +701,7 @@ public abstract class NormalizerBase(
                version_range_raw, range_type, vulnerable)
             from stdin (format binary)
             """, ct);
+        writer.Timeout = TimeSpan.FromMinutes(5);
 
         foreach (var row in rows)
         {

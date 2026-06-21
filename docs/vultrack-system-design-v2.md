@@ -43,7 +43,7 @@ VulTrack 要解决四个核心问题:
 单服务运行方式:
 
 - 默认只有一个 `vultrack-app` 服务进程，内部模块包括 API、Scheduler、Worker、PluginRunner、Normalizer、Matcher。
-- 后台任务使用进程内 bounded channel + Redis 队列/锁，限制并发，避免同步任务拖垮 API。
+- 后台任务使用 PostgreSQL 状态表与独立调度循环，限制并发，避免同步任务拖垮 API。
 - 插件通过受限子进程执行，超时、内存、stdout/stderr 大小和并发都由 .NET 核心控制。
 - 后续如果数据量上来，同一个镜像可以用启动参数拆角色，例如 `--role api`、`--role worker`，但 MVP 不拆。
 
@@ -53,14 +53,14 @@ MVP Docker Compose:
 
 ```text
 vultrack-app       # .NET API + scheduler + worker + static frontend host
-postgres           # 主数据库
-redis              # 队列、锁、缓存、任务状态
-minio              # 可选；也可换成本地 volume 或外部 S3
+postgres           # 元数据、任务状态和压缩 raw object
+duckdb             # 进程内列式证据与 affected component 投影
+gzip snapshots     # 漏洞详情静态缓存
 ```
 
-如果想进一步缩减:
+当前精简部署:
 
-- `minio` 可删除，raw object 直接写入 `/data/raw-objects` volume。
+- raw object 直接压缩写入 PostgreSQL，避免数百万小文件。
 - 前端可由 `vultrack-app` 托管，不单独起 nginx。
 - Node.js 插件运行时打包进 `vultrack-app` 镜像，通过子进程调用。
 

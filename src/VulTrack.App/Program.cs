@@ -39,6 +39,7 @@ builder.Services.AddSingleton<SourceScheduler>();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<DuckDbEvidenceStore>();
 builder.Services.AddSingleton<DuckDbEvidenceNormalizer>();
+builder.Services.AddSingleton<StagingPayloadCompactor>();
 builder.Services.AddSingleton<DuckDbAffectedComponentProjector>();
 builder.Services.AddSingleton<VulnerabilityDetailService>();
 builder.Services.AddSingleton<VulnerabilityDetailSnapshotStore>();
@@ -53,9 +54,17 @@ app.UseStaticFiles();
 
 app.MapGet("/", () => Results.Redirect("/index.html"));
 
-await EnsureRuntimeIndexesAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
-await EnsureDetailSnapshotQueueAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
-await BackfillCvssScoresAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
+var runtimeDb = app.Services.GetRequiredService<NpgsqlDataSource>();
+await EnsureRuntimeIndexesAsync(runtimeDb);
+try
+{
+    await EnsureDetailSnapshotQueueAsync(runtimeDb);
+}
+catch (Exception ex) when (ex is NpgsqlException or TimeoutException)
+{
+    app.Logger.LogWarning(ex, "Detail snapshot queue initialization was skipped because the database was busy.");
+}
+await BackfillCvssScoresAsync(runtimeDb);
 
 app.MapGet("/api/v1/system.health", () => ApiResult.Ok(new
 {
@@ -470,6 +479,41 @@ app.MapGet("/api/v1/vulnerability.aiSummary", async (AiVulnerabilitySummaryServi
         : ApiResult.Ok(result);
 });
 
+app.MapGet("/api/v1/vulnerability.aiAnalysis", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
+{
+    await using var command = db.CreateCommand("""
+        select vulnerability_id, model, prompt_version, evidence_hash, analysis_json::text,
+               input_chars, output_chars, source_url, updated_at
+        from ai_vulnerability_analyses
+        where vulnerability_id = $1
+        """);
+    command.Parameters.AddWithValue(id);
+
+    await using var reader = await command.ExecuteReaderAsync(ct);
+    if (!await reader.ReadAsync(ct))
+        return ApiResult.Ok(new
+        {
+            status = "not_analyzed",
+            analyzed = false,
+            message = "No AI analysis exists for this vulnerability."
+        });
+
+    return ApiResult.Ok(new
+    {
+        status = "analyzed",
+        analyzed = true,
+        vulnerabilityId = reader.GetGuid(0),
+        model = reader.GetString(1),
+        promptVersion = reader.GetString(2),
+        evidenceHash = reader.GetString(3),
+        analysis = JsonNode.Parse(reader.GetString(4)),
+        inputChars = reader.GetInt32(5),
+        outputChars = reader.GetInt32(6),
+        sourceUrl = reader.IsDBNull(7) ? null : reader.GetString(7),
+        updatedAt = reader.GetFieldValue<DateTimeOffset>(8)
+    });
+});
+
 app.MapPost("/api/v1/admin.vulnerability.aiSummary", async (HttpContext context, AdminAuthService auth, AiVulnerabilitySummaryService summaries, AiSummaryRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
@@ -505,6 +549,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     var offset = (page - 1) * pageSize;
     var sort = NormalizeVulnerabilitySort(request.Sort);
     var orderBy = VulnerabilityOrderBy(sort, "v");
+    var cveFirstOrderBy = CveFirstVulnerabilityOrderBy(sort, "v");
 
     var queryHasCveIdentifier = Identifier.ExpandWithEmbeddedCves(rawQuery).Any(x => Identifier.TypeOf(x) == "CVE");
     var ecosystemVersion = queryHasCveIdentifier ? null : ParseEcosystemVersion(rawQuery);
@@ -669,7 +714,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                        v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
                        v.identifiers, v.aliases
                 from vulnerabilities v
-                order by {orderBy}
+                order by {cveFirstOrderBy}
                 limit $1 offset $2
                 """);
         if (cveRange is not null)
@@ -1406,6 +1451,7 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
     foreach (var statement in new[]
     {
         "create index if not exists ix_vuln_modified on vulnerabilities(modified_at desc nulls last)",
+        "create index if not exists ix_vulnerabilities_updated_id on vulnerabilities(updated_at desc, id desc)",
         "create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last)",
         "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
         "create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier)",
@@ -1456,6 +1502,22 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         )
         """,
         "create index if not exists ix_ai_summaries_vuln_latest on ai_vulnerability_summaries(vulnerability_id, updated_at desc)",
+        """
+        create table if not exists ai_vulnerability_analyses (
+          vulnerability_id uuid primary key references vulnerabilities(id) on delete cascade,
+          model text not null,
+          prompt_version text not null,
+          evidence_hash text not null,
+          analysis_json jsonb not null,
+          input_json jsonb not null,
+          input_chars integer not null default 0,
+          output_chars integer not null default 0,
+          source_url text,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+        """,
+        "create index if not exists ix_ai_analyses_updated on ai_vulnerability_analyses(updated_at desc)",
         """
         do $$
         begin
@@ -1605,6 +1667,10 @@ static async Task EnsureDetailSnapshotQueueAsync(NpgsqlDataSource db)
         declare
           target_id uuid;
         begin
+          if current_setting('vultrack.defer_snapshot_queue', true) = 'on' then
+            return coalesce(new, old);
+          end if;
+
           if tg_op = 'DELETE' then
             target_id := old.id;
           else
@@ -1697,6 +1763,7 @@ static async Task EnsureDetailSnapshotQueueAsync(NpgsqlDataSource db)
         do $$
         begin
           if to_regclass('public.vulnerabilities') is not null then
+            drop trigger if exists trg_detail_snapshot_queue on vulnerabilities;
             drop trigger if exists trg_detail_snapshot_queue_vulnerabilities on vulnerabilities;
             create trigger trg_detail_snapshot_queue_vulnerabilities
             after insert or update or delete on vulnerabilities
@@ -1749,6 +1816,7 @@ static string DetailSnapshotQueueTrigger(string tableName) =>
     do $$
     begin
       if to_regclass('public.{tableName}') is not null then
+        drop trigger if exists trg_detail_snapshot_queue on {tableName};
         drop trigger if exists trg_detail_snapshot_queue_{tableName} on {tableName};
         create trigger trg_detail_snapshot_queue_{tableName}
         after insert or update or delete on {tableName}
@@ -1889,6 +1957,22 @@ static string VulnerabilityOrderBy(string sort, string alias)
         "identifierDesc" => $"{p}primary_identifier desc",
         _ => $"{p}modified_at desc nulls last, {p}primary_identifier desc"
     };
+}
+
+static string CveFirstVulnerabilityOrderBy(string sort, string alias)
+{
+    var p = string.IsNullOrWhiteSpace(alias) ? "" : $"{alias}.";
+    var cvePattern = "'^CVE-[0-9]{4}-[0-9]{4,}$'";
+    var embeddedCvePattern = "'\\yCVE-[0-9]{4}-[0-9]{4,}\\y'";
+    var cveRank = "case " +
+                  $"when {p}primary_identifier ~* {cvePattern} then 0 " +
+                  "when exists (" +
+                  "select 1 " +
+                  $"from unnest(coalesce({p}identifiers, array[]::text[]) || coalesce({p}aliases, array[]::text[])) as identifier(value) " +
+                  $"where identifier.value ~* {cvePattern} or identifier.value ~* {embeddedCvePattern}" +
+                  ") then 1 " +
+                  "else 2 end";
+    return $"{cveRank}, {VulnerabilityOrderBy(sort, alias)}";
 }
 
 static (string Start, string End)? TryGetCvePrefixRange(string query)
