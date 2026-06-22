@@ -107,14 +107,17 @@ async function countMatchedVulnerabilities(ids) {
 
 async function sampleMissingRows(snapshotIds, limit) {
   const rows = [];
-  let offset = 0;
+  let cursorUpdatedAt = null;
+  let cursorId = null;
   while (rows.length < limit) {
     const result = await client.query(`
       select id::text, primary_identifier, updated_at
       from vulnerabilities
-      order by updated_at desc nulls last, id
-      limit 1000 offset $1
-    `, [offset]);
+      where $1::timestamptz is null
+         or (updated_at, id) < ($1::timestamptz, $2::uuid)
+      order by updated_at desc, id desc
+      limit 1000
+    `, [cursorUpdatedAt, cursorId]);
     if (result.rows.length === 0) break;
     for (const row of result.rows) {
       if (!snapshotIds.has(row.id.toLowerCase())) {
@@ -122,7 +125,9 @@ async function sampleMissingRows(snapshotIds, limit) {
         if (rows.length >= limit) break;
       }
     }
-    offset += result.rows.length;
+    const last = result.rows.at(-1);
+    cursorUpdatedAt = last.updated_at;
+    cursorId = last.id;
   }
   return rows;
 }
