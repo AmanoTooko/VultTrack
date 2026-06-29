@@ -15,3 +15,16 @@ obj
 **/obj
 *.dump
 *.log
+*.pid
+*.duckdb
+*.duckdb.wal
+*.csv
+*.tsv
+*.xlsx
+*.json.gz
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.xz
+*.gz
