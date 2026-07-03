@@ -24,22 +24,31 @@ export async function run(client, ctx) {
 
   const data = JSON.parse(text);
   const records = groupByCve(data);
+  const unchanged = await loadSucceededRecordHashes(client, ctx.source.id);
   let count = 0;
+  let changed = 0;
   for (const [cveId, packages] of records) {
     if (count >= max) break;
     const payload = { cveId, packages };
+    const recordHash = sha256(stableJson(payload));
+    if (unchanged.get(cveId)?.has(recordHash)) {
+      count++;
+      continue;
+    }
+
     const rawIndexId = await writeRecord(client, ctx, {
       externalKey: cveId,
       externalId: cveId,
       sourceUrl: `https://security-tracker.debian.org/tracker/${cveId}`,
       identifiers: [cveId],
-      recordHash: sha256(stableJson(payload)),
+      recordHash,
       payload
     });
     await upsertDebian(client, rawIndexId, cveId, packages, payload);
     count++;
+    changed++;
   }
-  return { fetchedCount: count, parsedCount: count, checkpoint: { contentHash, transformVersion: TRANSFORM_VERSION, lastFetched: new Date().toISOString() } };
+  return { fetchedCount: records.size, changedCount: changed, parsedCount: changed, checkpoint: { contentHash, transformVersion: TRANSFORM_VERSION, lastFetched: new Date().toISOString() } };
 }
 
 export function groupByCve(data) {
@@ -52,4 +61,20 @@ export function groupByCve(data) {
     }
   }
   return records;
+}
+
+async function loadSucceededRecordHashes(client, sourceId) {
+  const result = await client.query(
+    `select external_key, record_hash
+     from source_raw_index
+     where source_id = $1
+       and normalize_status in ('succeeded', 'superseded')`,
+    [sourceId]
+  );
+  const hashes = new Map();
+  for (const row of result.rows) {
+    if (!hashes.has(row.external_key)) hashes.set(row.external_key, new Set());
+    hashes.get(row.external_key).add(row.record_hash);
+  }
+  return hashes;
 }

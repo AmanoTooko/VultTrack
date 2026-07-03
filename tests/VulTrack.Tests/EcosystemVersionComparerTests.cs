@@ -39,4 +39,28 @@ public class EcosystemVersionComparerTests
     {
         Assert.Equal(expected, EcosystemVersionComparer.Matches(version, range, "npm"));
     }
+
+    [Theory]
+    [InlineData("1.0.0", "< 2.0.0", true)]
+    [InlineData("1.0.0", ">= 0, < 2.0.0", true)]
+    [InlineData("2.0.0", ">= 0, < 2.0.0", false)]
+    public void LowerBoundRanges_AreMatchedSemantically(string version, string range, bool expected)
+    {
+        Assert.Equal(expected, EcosystemVersionComparer.Matches(version, range, "npm"));
+    }
+
+    [Theory]
+    [InlineData("a1b2c3d", "< 2.0.0")]
+    [InlineData("git+https://example.test/repo@a1b2c3d", "< 2.0.0")]
+    public void CommitLikeVersions_AreUnknownForSemanticRanges(string version, string range)
+    {
+        Assert.Null(EcosystemVersionComparer.Matches(version, range, "npm"));
+    }
+
+    [Fact]
+    public void CommitLikeVersions_CanMatchExactHashConstraints()
+    {
+        Assert.True(EcosystemVersionComparer.Matches("a1b2c3d", "= a1b2c3d", "npm"));
+        Assert.Null(EcosystemVersionComparer.Matches("a1b2c3d", "= deadbee", "npm"));
+    }
 }

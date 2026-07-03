@@ -1,4 +1,4 @@
-using System.Text.Json;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Npgsql;
 using NpgsqlTypes;
@@ -10,23 +10,93 @@ public sealed class NvdRawProcessor(
     IVulnerabilityCanonicalizer canonicalizer,
     IEnumerable<IAffectedComponentHook> affectedHooks,
     ILogger<NvdRawProcessor> logger)
+    : NormalizerBase(affectedHooks, canonicalizer)
 {
     public Task<ProcessPendingResult> ProcessPendingAsync(int limit, CancellationToken ct) =>
         ProcessPendingAsync(limit, "nvd-cve", ct);
 
     public async Task<ProcessPendingResult> ProcessPendingAsync(int limit, string sourceCode, CancellationToken ct)
     {
-        var processed = 0;
-        var failed = 0;
-
         var records = await SelectPendingRecordsAsync(limit, sourceCode, priorityOnly: true, ct);
         if (records.Count == 0)
         {
             records = await SelectPendingRecordsAsync(limit, sourceCode, priorityOnly: false, ct);
         }
 
+        try
+        {
+            return await ProcessBatchAsync(records, sourceCode, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "NVD batch normalize failed for {Count} records from {SourceCode}; falling back to savepoint-per-record mode.", records.Count, sourceCode);
+            return await ProcessIndividuallyAsync(records, ct);
+        }
+    }
+
+    private async Task<ProcessPendingResult> ProcessBatchAsync(IReadOnlyList<NvdStagingRecord> records, string sourceCode, CancellationToken ct)
+    {
+        var totalWatch = Stopwatch.StartNew();
+        var (drafts, parseFailed) = BuildDrafts(records);
+
+        await using var connection = await db.OpenConnectionAsync(ct);
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+
+        var resolveWatch = Stopwatch.StartNew();
+        var cache = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, drafts.Select(x => x.CanonicalDraft).ToList(), ct);
+        resolveWatch.Stop();
+
+        var canonicalized = new List<NvdCanonicalizedDraft>();
+        var canonicalFailed = 0;
+        var canonicalWatch = Stopwatch.StartNew();
+        foreach (var draft in drafts)
+        {
+            try
+            {
+                var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, draft.CanonicalDraft, cache, ct);
+                canonicalized.Add(new NvdCanonicalizedDraft(draft, vulnerabilityId));
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to canonicalize NVD CVE {CveId}", draft.Record.CveId);
+                canonicalFailed++;
+            }
+        }
+        canonicalWatch.Stop();
+
+        var remapWatch = Stopwatch.StartNew();
+        var currentCanonicalIds = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, canonicalized.Select(x => x.Draft.CanonicalDraft).ToList(), ct);
+        var remapped = 0;
+        canonicalized = canonicalized
+            .Select(item =>
+            {
+                var currentId = ResolveCanonicalIdFromCache(item.Draft.CanonicalDraft, currentCanonicalIds, item.VulnerabilityId);
+                if (currentId != item.VulnerabilityId) remapped++;
+                return item with { VulnerabilityId = currentId };
+            })
+            .ToList();
+        remapWatch.Stop();
+
+        var writeResult = await ProcessCanonicalizedBatchAsync(connection, canonicalized, ct);
+        await MarkNormalizedAsync(connection, writeResult.SucceededRawIndexIds, ct);
+        await transaction.CommitAsync(ct);
+
+        totalWatch.Stop();
+        var failed = parseFailed + canonicalFailed + writeResult.Failed;
+        logger.LogInformation(
+            "NVD batch normalize {SourceCode}: selected={Selected}, parsed={Parsed}, canonicalized={Canonicalized}, processed={Processed}, failed={Failed}, remapped={Remapped}, resolve_ms={ResolveMs}, canonical_ms={CanonicalMs}, remap_ms={RemapMs}, total_ms={TotalMs}.",
+            sourceCode, records.Count, drafts.Count, canonicalized.Count, writeResult.Processed, failed,
+            remapped, resolveWatch.ElapsedMilliseconds, canonicalWatch.ElapsedMilliseconds, remapWatch.ElapsedMilliseconds, totalWatch.ElapsedMilliseconds);
+        return new ProcessPendingResult(writeResult.Processed, failed);
+    }
+
+    private async Task<ProcessPendingResult> ProcessIndividuallyAsync(IReadOnlyList<NvdStagingRecord> records, CancellationToken ct)
+    {
+        var processed = 0;
+        var failed = 0;
         var succeededRawIndexIds = new List<Guid>();
         var affectedVulnerabilityIds = new HashSet<Guid>();
+
         await using var connection = await db.OpenConnectionAsync(ct);
         await using var transaction = await connection.BeginTransactionAsync(ct);
         foreach (var record in records)
@@ -44,10 +114,7 @@ public sealed class NvdRawProcessor(
                 await UpsertReferencesAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
                 var affectedFacts = await UpsertAffectedFactsAsync(connection, vulnerabilityId, vulnerabilityRecordId, record, ct);
                 if (affectedFacts.Count > 0) affectedVulnerabilityIds.Add(vulnerabilityId);
-                foreach (var hook in affectedHooks)
-                {
-                    await hook.OnAffectedFactsAsync(connection, vulnerabilityId, vulnerabilityRecordId, affectedFacts, ct);
-                }
+                await DispatchAffectedHooksAsync(connection, vulnerabilityId, vulnerabilityRecordId, affectedFacts, ct);
                 succeededRawIndexIds.Add(record.RawIndexId);
                 await transaction.ReleaseAsync(savepointName, ct);
                 processed++;
@@ -60,13 +127,327 @@ public sealed class NvdRawProcessor(
             }
         }
 
-        foreach (var hook in affectedHooks)
-        {
-            await hook.FlushProjectionsAsync(connection, affectedVulnerabilityIds.ToList(), ct);
-        }
+        await FlushAffectedProjectionsAsync(connection, affectedVulnerabilityIds, ct);
         await MarkNormalizedAsync(connection, succeededRawIndexIds, ct);
         await transaction.CommitAsync(ct);
         return new ProcessPendingResult(processed, failed);
+    }
+
+    private static (List<NvdNormalizationDraft> Drafts, int Failed) BuildDrafts(IReadOnlyList<NvdStagingRecord> records)
+    {
+        var drafts = new List<NvdNormalizationDraft>(records.Count);
+        var failed = 0;
+
+        foreach (var record in records)
+        {
+            try
+            {
+                var descriptions = ExtractDescriptionDrafts(record.Descriptions).ToList();
+                var title = descriptions.FirstOrDefault(x => string.Equals(x.Lang, "en", StringComparison.OrdinalIgnoreCase))?.Value
+                    ?? descriptions.FirstOrDefault()?.Value;
+                var severities = ExtractSeverityDrafts(record.Metrics).ToList();
+                var weaknesses = ExtractWeaknessDrafts(record.Weaknesses).ToList();
+                var references = ExtractReferenceDrafts(record.References).ToList();
+                var affectedFacts = ExtractNvdAffectedFacts(record.Configurations).ToList();
+                var vulnerableFacts = affectedFacts
+                    .Where(x => x.Vulnerable)
+                    .Select(x => new AffectedFactDraft("cpe", "cpe", x.Product, null, x.VersionRange, x.RangeType, x.SourceSpecificJson, x.Criteria))
+                    .DistinctBy(x => $"{x.Cpe23Uri}|{x.PackageName}|{x.VersionRange}|{x.RangeType}", StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                var canonicalDraft = new VulnerabilityCanonicalDraft(
+                    record.CveId,
+                    title,
+                    title,
+                    record.Status ?? "active",
+                    record.PublishedAt,
+                    record.ModifiedAt,
+                    [record.CveId],
+                    record.SourceId,
+                    record.RawIndexId);
+
+                drafts.Add(new NvdNormalizationDraft(
+                    record,
+                    canonicalDraft,
+                    descriptions,
+                    severities,
+                    weaknesses,
+                    references,
+                    affectedFacts,
+                    vulnerableFacts));
+            }
+            catch
+            {
+                failed++;
+            }
+        }
+
+        return (drafts, failed);
+    }
+
+    private async Task<(int Processed, int Failed, IReadOnlyList<Guid> SucceededRawIndexIds)> ProcessCanonicalizedBatchAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<NvdCanonicalizedDraft> canonicalized,
+        CancellationToken ct)
+    {
+        if (canonicalized.Count == 0) return (0, 0, []);
+
+        var recordInputs = canonicalized
+            .Select(item => new VulnerabilityRecordBatchItem(
+                item.VulnerabilityId,
+                item.Draft.Record.SourceId,
+                item.Draft.Record.RawIndexId,
+                item.Draft.Record.CveId,
+                item.Draft.CanonicalDraft.Title,
+                item.Draft.CanonicalDraft.Description,
+                item.Draft.Record.Status ?? "active"))
+            .ToList();
+
+        var watch = Stopwatch.StartNew();
+        var recordIds = await UpsertRecordsBatchAsync(connection, recordInputs, ct);
+        var recordsMs = watch.ElapsedMilliseconds;
+
+        var descriptionItems = new List<DescriptionBatchItem>(canonicalized.Count);
+        var severityItems = new List<SeverityScoreBatchItem>(canonicalized.Count);
+        var weaknessItems = new List<WeaknessBatchItem>(canonicalized.Count);
+        var referenceItems = new List<ReferenceBatchItem>(canonicalized.Count);
+        var affectedItems = new List<AffectedFactBatchItem>(canonicalized.Count);
+        var affectedRows = new List<NvdAffectedFactRow>();
+        var severitySelections = new List<NvdSeveritySelection>();
+        var affectedVulnerabilityIds = new List<Guid>();
+        var succeededIds = new List<Guid>(canonicalized.Count);
+
+        foreach (var item in canonicalized)
+        {
+            var draft = item.Draft;
+            var key = (draft.Record.SourceId, draft.Record.CveId, draft.Record.RawIndexId);
+            if (!recordIds.TryGetValue(key, out var recordId))
+                throw new InvalidOperationException($"Missing vulnerability record id for NVD raw {draft.Record.RawIndexId}");
+
+            descriptionItems.Add(new DescriptionBatchItem(item.VulnerabilityId, recordId, draft.Record.SourceId, draft.Descriptions));
+            severityItems.Add(new SeverityScoreBatchItem(item.VulnerabilityId, recordId, draft.Record.SourceId, draft.Record.RawIndexId, draft.Severities));
+            weaknessItems.Add(new WeaknessBatchItem(item.VulnerabilityId, recordId, draft.Record.SourceId, draft.Weaknesses));
+            referenceItems.Add(new ReferenceBatchItem(item.VulnerabilityId, recordId, draft.Record.SourceId, draft.References));
+            affectedItems.Add(new AffectedFactBatchItem(item.VulnerabilityId, recordId, draft.Record.SourceId, draft.Record.RawIndexId, draft.VulnerableAffectedFacts));
+
+            var selectedSeverity = draft.Severities.FirstOrDefault(x => x.IsSelected);
+            if (selectedSeverity is not null)
+            {
+                severitySelections.Add(new NvdSeveritySelection(
+                    item.VulnerabilityId,
+                    draft.Record.SourceId,
+                    selectedSeverity.Score,
+                    selectedSeverity.ScoringVersion,
+                    selectedSeverity.VectorString,
+                    selectedSeverity.SeverityLabel));
+            }
+
+            foreach (var fact in draft.AffectedFacts)
+            {
+                affectedRows.Add(new NvdAffectedFactRow(
+                    item.VulnerabilityId,
+                    recordId,
+                    draft.Record.SourceId,
+                    draft.Record.RawIndexId,
+                    fact));
+            }
+
+            if (draft.VulnerableAffectedFacts.Count > 0) affectedVulnerabilityIds.Add(item.VulnerabilityId);
+            succeededIds.Add(draft.Record.RawIndexId);
+        }
+
+        watch.Restart();
+        await InsertDescriptionsBatchAsync(connection, descriptionItems, ct);
+        var descriptionsMs = watch.ElapsedMilliseconds;
+        watch.Restart();
+        await InsertSeverityScoresBatchAsync(connection, severityItems, ct);
+        await UpdateNvdSeverityMetadataBatchAsync(connection, severitySelections, ct);
+        var severitiesMs = watch.ElapsedMilliseconds;
+        watch.Restart();
+        await InsertWeaknessesBatchAsync(connection, weaknessItems, ct);
+        var weaknessesMs = watch.ElapsedMilliseconds;
+        watch.Restart();
+        await InsertReferencesBatchAsync(connection, referenceItems, ct);
+        var referencesMs = watch.ElapsedMilliseconds;
+        watch.Restart();
+        await InsertNvdAffectedFactsBatchAsync(connection, affectedItems.Select(x => x.VulnerabilityRecordId).ToList(), affectedRows, ct);
+        await DispatchAffectedHooksBatchAsync(connection, affectedItems, ct);
+        var affectedMs = watch.ElapsedMilliseconds;
+        watch.Restart();
+        await FlushAffectedProjectionsAsync(connection, affectedVulnerabilityIds, ct);
+        var flushMs = watch.ElapsedMilliseconds;
+
+        logger.LogInformation(
+            "NVD batch write count={Count}: records_ms={RecordsMs}, descriptions_ms={DescriptionsMs}, severities_ms={SeveritiesMs}, weaknesses_ms={WeaknessesMs}, references_ms={ReferencesMs}, affected_ms={AffectedMs}, flush_ms={FlushMs}.",
+            canonicalized.Count, recordsMs, descriptionsMs, severitiesMs, weaknessesMs, referencesMs, affectedMs, flushMs);
+
+        return (canonicalized.Count, 0, succeededIds);
+    }
+
+    private static async Task UpdateNvdSeverityMetadataBatchAsync(NpgsqlConnection connection, IReadOnlyList<NvdSeveritySelection> selections, CancellationToken ct)
+    {
+        if (selections.Count == 0) return;
+
+        foreach (var batch in selections.Chunk(1000))
+        {
+            var values = new List<string>();
+            var parameters = new List<object>();
+            var parameterIndex = 1;
+            foreach (var row in batch)
+            {
+                values.Add($"(${parameterIndex++}::uuid,${parameterIndex++}::uuid,${parameterIndex++}::numeric,${parameterIndex++},${parameterIndex++},${parameterIndex++})");
+                parameters.Add(row.VulnerabilityId);
+                parameters.Add(row.SourceId);
+                parameters.Add((object?)row.Score ?? DBNull.Value);
+                parameters.Add((object?)row.Version ?? DBNull.Value);
+                parameters.Add((object?)row.Vector ?? DBNull.Value);
+                parameters.Add((object?)row.Label ?? DBNull.Value);
+            }
+
+            await using var cmd = new NpgsqlCommand($"""
+                update vulnerabilities v
+                set max_cvss_score = coalesce(incoming.score, v.max_cvss_score),
+                    max_cvss_version = coalesce(incoming.version, v.max_cvss_version),
+                    max_cvss_vector = coalesce(incoming.vector, v.max_cvss_vector),
+                    max_cvss_source_id = incoming.source_id,
+                    severity_label = coalesce(incoming.label, v.severity_label),
+                    severity_source = 'nvd-cve',
+                    severity_confidence = 1.0,
+                    updated_at = now()
+                from (values {string.Join(",", values)}) as incoming(id, source_id, score, version, vector, label)
+                where v.id = incoming.id
+                """, connection);
+            cmd.CommandTimeout = 300;
+            foreach (var parameter in parameters) cmd.Parameters.AddWithValue(parameter);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    private static async Task InsertNvdAffectedFactsBatchAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<Guid> recordIds,
+        IReadOnlyList<NvdAffectedFactRow> rows,
+        CancellationToken ct)
+    {
+        await DeleteRecordRowsBatchAsync(connection, "vulnerability_affected_facts", recordIds, ct);
+
+        var deduped = rows
+            .GroupBy(x => $"{x.VulnerabilityRecordId}|{x.Fact.Criteria}|{x.Fact.Product}|{x.Fact.VersionRange}|{x.Fact.RangeType}|{x.Fact.Vulnerable}", StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
+        if (deduped.Count == 0) return;
+
+        foreach (var batch in deduped.Chunk(1000))
+        {
+            var values = new List<string>();
+            var parameters = new List<object>();
+            var parameterIndex = 1;
+            foreach (var row in batch)
+            {
+                values.Add($"(${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++},'cpe','cpe',${parameterIndex++},${parameterIndex++},lower(${parameterIndex - 1}),${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++}::jsonb)");
+                parameters.Add(row.VulnerabilityId);
+                parameters.Add(row.VulnerabilityRecordId);
+                parameters.Add(row.SourceId);
+                parameters.Add(row.RawIndexId);
+                parameters.Add(row.Fact.Criteria);
+                parameters.Add(row.Fact.Product);
+                parameters.Add((object?)row.Fact.VersionRange ?? DBNull.Value);
+                parameters.Add(row.Fact.RangeType);
+                parameters.Add(row.Fact.Vulnerable);
+                parameters.Add(row.Fact.SourceSpecificJson);
+            }
+
+            await using var cmd = new NpgsqlCommand($"""
+                insert into vulnerability_affected_facts
+                  (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
+                   cpe23_uri, package_name, normalized_package_name, version_range_raw, range_type, vulnerable,
+                   source_specific)
+                values {string.Join(",", values)}
+                """, connection);
+            cmd.CommandTimeout = 300;
+            foreach (var parameter in parameters) cmd.Parameters.AddWithValue(parameter);
+            await cmd.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    private static IEnumerable<DescriptionDraft> ExtractDescriptionDrafts(string descriptionsJson)
+    {
+        foreach (var item in JsonNode.Parse(descriptionsJson)?.AsArray() ?? [])
+        {
+            var value = item?["value"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(value)) continue;
+            var lang = item?["lang"]?.GetValue<string>() ?? "und";
+            yield return new DescriptionDraft(lang, "detail", value, string.Equals(lang, "en", StringComparison.OrdinalIgnoreCase));
+        }
+    }
+
+    private static IEnumerable<SeverityScoreDraft> ExtractSeverityDrafts(string metricsJson)
+    {
+        var scores = ExtractCvss(metricsJson).ToList();
+        var selected = scores
+            .Where(x => x.Score is not null)
+            .OrderByDescending(x => x.Score)
+            .FirstOrDefault();
+
+        foreach (var score in scores)
+        {
+            yield return new SeverityScoreDraft(
+                "cvss",
+                score.Version,
+                "base",
+                score.Vector,
+                score.Score,
+                score.Severity,
+                score.RawJson,
+                selected is not null && score.RawJson == selected.RawJson);
+        }
+    }
+
+    private static IEnumerable<WeaknessDraft> ExtractWeaknessDrafts(string weaknessesJson)
+    {
+        foreach (var weakness in JsonNode.Parse(weaknessesJson)?.AsArray() ?? [])
+        {
+            foreach (var desc in weakness?["description"]?.AsArray() ?? [])
+            {
+                var value = desc?["value"]?.GetValue<string>();
+                if (string.IsNullOrWhiteSpace(value)) continue;
+                yield return new WeaknessDraft("CWE", value, value);
+            }
+        }
+    }
+
+    private static IEnumerable<ReferenceDraft> ExtractReferenceDrafts(string referencesJson)
+    {
+        foreach (var reference in JsonNode.Parse(referencesJson)?.AsArray() ?? [])
+        {
+            var url = reference?["url"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(url)) continue;
+            var tags = reference?["tags"]?.AsArray()
+                .Select(x => x?.GetValue<string>() ?? "")
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .ToArray() ?? [];
+            yield return new ReferenceDraft(url, null, tags);
+        }
+    }
+
+    private static IEnumerable<NvdAffectedFactDraft> ExtractNvdAffectedFacts(string configurationsJson)
+    {
+        foreach (var cpeMatch in WalkCpeMatches(JsonNode.Parse(configurationsJson)))
+        {
+            var criteria = cpeMatch?["criteria"]?.GetValue<string>();
+            if (string.IsNullOrWhiteSpace(criteria)) continue;
+            var product = ParseProduct(criteria);
+            var versionRange = ExtractCpeVersionRange(cpeMatch);
+            var rangeType = versionRange is not null ? "cpe_match" : "cpe_match_no_range";
+            var vulnerable = cpeMatch?["vulnerable"]?.GetValue<bool>() ?? true;
+            yield return new NvdAffectedFactDraft(
+                criteria,
+                product,
+                versionRange,
+                rangeType,
+                vulnerable,
+                cpeMatch?.ToJsonString() ?? "{}");
+        }
     }
 
     private async Task<List<NvdStagingRecord>> SelectPendingRecordsAsync(int limit, string sourceCode, bool priorityOnly, CancellationToken ct)
@@ -127,7 +508,7 @@ public sealed class NvdRawProcessor(
         var descriptions = JsonNode.Parse(record.Descriptions)?.AsArray();
         var title = descriptions?.FirstOrDefault(x => x?["lang"]?.GetValue<string>() == "en")?["value"]?.GetValue<string>();
         var selectedSeverity = ExtractCvss(record.Metrics).OrderByDescending(x => x.Score).FirstOrDefault();
-        var vulnerabilityId = await canonicalizer.UpsertCanonicalAsync(
+        var vulnerabilityId = await Canonicalizer.UpsertCanonicalAsync(
             conn,
             new VulnerabilityCanonicalDraft(
                 record.CveId,
@@ -433,6 +814,41 @@ public sealed class NvdRawProcessor(
         var parts = cpe.Split(':');
         return parts.Length > 4 ? parts[4].Replace("\\", "") : cpe;
     }
+
+    private sealed record NvdNormalizationDraft(
+        NvdStagingRecord Record,
+        VulnerabilityCanonicalDraft CanonicalDraft,
+        IReadOnlyList<DescriptionDraft> Descriptions,
+        IReadOnlyList<SeverityScoreDraft> Severities,
+        IReadOnlyList<WeaknessDraft> Weaknesses,
+        IReadOnlyList<ReferenceDraft> References,
+        IReadOnlyList<NvdAffectedFactDraft> AffectedFacts,
+        IReadOnlyList<AffectedFactDraft> VulnerableAffectedFacts);
+
+    private sealed record NvdCanonicalizedDraft(NvdNormalizationDraft Draft, Guid VulnerabilityId);
+
+    private sealed record NvdAffectedFactDraft(
+        string Criteria,
+        string Product,
+        string? VersionRange,
+        string RangeType,
+        bool Vulnerable,
+        string SourceSpecificJson);
+
+    private sealed record NvdAffectedFactRow(
+        Guid VulnerabilityId,
+        Guid VulnerabilityRecordId,
+        Guid SourceId,
+        Guid RawIndexId,
+        NvdAffectedFactDraft Fact);
+
+    private sealed record NvdSeveritySelection(
+        Guid VulnerabilityId,
+        Guid SourceId,
+        decimal? Score,
+        string? Version,
+        string? Vector,
+        string? Label);
 }
 
 public sealed record NvdStagingRecord(

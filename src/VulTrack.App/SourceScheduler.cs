@@ -7,10 +7,17 @@ namespace VulTrack.App;
 public sealed class SourceScheduler(
     NpgsqlDataSource db,
     IRawNormalizationService normalizer,
+    DuckDbAffectedComponentProjector affectedComponentProjector,
+    VulnerabilityDetailSnapshotBuilder detailSnapshotBuilder,
     IOptions<VulTrackSchedulerOptions> options,
     ILogger<SourceScheduler> logger) : BackgroundService
 {
     private VulTrackSchedulerOptions Options => options.Value;
+    private DateTimeOffset _lastDuckDbAffectedQueueRun = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastDetailSnapshotQueueRun = DateTimeOffset.MinValue;
+    private readonly SemaphoreSlim _duckDbAffectedQueueLock = new(1, 1);
+    private readonly SemaphoreSlim _detailSnapshotQueueLock = new(1, 1);
+    private readonly SemaphoreSlim _heavyWriteLock = new(1, 1);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -24,8 +31,11 @@ public sealed class SourceScheduler(
         var fetchInterval = TimeSpan.FromHours(Math.Max(1, Options.FetchIntervalHours));
 
         await CloseInterruptedRunsAsync(stoppingToken);
-        _ = Task.Run(() => RunFetchLoopAsync(fetchInterval, stoppingToken), stoppingToken);
-        await RunNormalizeLoopAsync(normalizeInterval, stoppingToken);
+        await Task.WhenAll(
+            RunFetchLoopAsync(fetchInterval, stoppingToken),
+            RunNormalizeLoopAsync(normalizeInterval, stoppingToken),
+            RunDuckDbProjectionLoopAsync(stoppingToken),
+            RunDetailSnapshotLoopAsync(stoppingToken));
     }
 
     private async Task CloseInterruptedRunsAsync(CancellationToken ct)
@@ -46,33 +56,15 @@ public sealed class SourceScheduler(
     private async Task RunNormalizeLoopAsync(TimeSpan interval, CancellationToken ct)
     {
         var limit = EnvInt("SCHEDULER_NORMALIZE_LIMIT", Options.NormalizeLimit, 1);
+        var parallelism = EnvInt("SCHEDULER_NORMALIZE_PARALLELISM", Options.NormalizeParallelism, 1);
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 await DedupEpssPendingAsync(ct);
                 var allSources = await LoadAllSourcesAsync(ct);
-                foreach (var source in allSources)
-                {
-                    if (ct.IsCancellationRequested) break;
-                    try
-                    {
-                        var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
-                        if (result.Processed > 0 || result.Failed > 0)
-                        {
-                            logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
-                                result.SourceCode, result.Processed, result.Failed);
-                        }
-                    }
-                    catch (OperationCanceledException) when (ct.IsCancellationRequested)
-                    {
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "Normalizer {Source} failed; continuing normalize cycle.", source.Code);
-                    }
-                }
+                await RunNormalizeSourcesAsync(allSources, limit, parallelism, "normalize cycle", ct);
+
             }
             catch (Exception ex)
             {
@@ -82,25 +74,34 @@ public sealed class SourceScheduler(
         }
     }
 
+    private async Task RunDuckDbProjectionLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await RunDuckDbAffectedComponentQueueAsync(ct);
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+    }
+
+    private async Task RunDetailSnapshotLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await RunDetailSnapshotQueueAsync(ct);
+            await Task.Delay(TimeSpan.FromSeconds(5), ct);
+        }
+    }
+
     private async Task RunFetchLoopAsync(TimeSpan interval, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
             try
             {
+                await CloseStaleScheduledRunsAsync(ct);
                 var dueSources = await LoadDueSourcesAsync(ct);
-                foreach (var source in dueSources)
-                {
-                    if (ct.IsCancellationRequested) break;
-                    try
-                    {
-                        await RunSourceAsync(source.Code, ct);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "Fetcher {Source} failed", source.Code);
-                    }
-                }
+                var parallelism = EnvInt("SCHEDULER_FETCH_PARALLELISM", Options.FetchParallelism, 1);
+                await RunFetchSourcesAsync(dueSources, parallelism, "fetch cycle", ct);
             }
             catch (Exception ex)
             {
@@ -115,12 +116,89 @@ public sealed class SourceScheduler(
         await DedupEpssPendingAsync(ct);
 
         var limit = EnvInt("SCHEDULER_NORMALIZE_LIMIT", Options.NormalizeLimit, 1);
+        var parallelism = EnvInt("SCHEDULER_NORMALIZE_PARALLELISM", Options.NormalizeParallelism, 1);
         var allSources = await LoadAllSourcesAsync(ct);
-        foreach (var source in allSources)
+        await RunNormalizeSourcesAsync(allSources, limit, parallelism, "scheduled normalization", ct);
+
+        await RunDuckDbAffectedComponentQueueAsync(ct);
+        await RunDetailSnapshotQueueAsync(ct);
+
+        await CloseStaleScheduledRunsAsync(ct);
+        var dueSources = await LoadDueSourcesAsync(ct);
+        var fetchParallelism = EnvInt("SCHEDULER_FETCH_PARALLELISM", Options.FetchParallelism, 1);
+        await RunFetchSourcesAsync(dueSources, fetchParallelism, "manual due-source run", ct);
+    }
+
+    private async Task RunFetchSourcesAsync(IReadOnlyList<ScheduledSource> sources, int parallelism, string context, CancellationToken ct)
+    {
+        if (sources.Count == 0) return;
+
+        var workerCount = Math.Clamp(parallelism, 1, Math.Min(8, sources.Count));
+        logger.LogInformation("Running {Count} due fetchers with parallelism={Parallelism} for {Context}.", sources.Count, workerCount, context);
+        var index = 0;
+        async Task Worker()
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var current = Interlocked.Increment(ref index) - 1;
+                if (current >= sources.Count) return;
+                var source = sources[current];
+                try
+                {
+                    await RunSourceAsync(source.Code, ct, trigger: "scheduled", fetchLimitOverride: source.FetchLimit);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Fetcher {Source} failed; continuing {Context}.", source.Code, context);
+                }
+            }
+        }
+
+        await Task.WhenAll(Enumerable.Range(0, workerCount).Select(_ => Worker()));
+    }
+
+    private async Task RunNormalizeSourcesAsync(IReadOnlyList<ScheduledSource> sources, int limit, int parallelism, string context, CancellationToken ct)
+    {
+        if (sources.Count == 0) return;
+
+        var workerCount = Math.Clamp(parallelism, 1, Math.Min(16, sources.Count));
+        if (workerCount == 1)
+        {
+            foreach (var source in sources)
+            {
+                if (ct.IsCancellationRequested) break;
+                await RunNormalizeSourceAsync(source.Code, limit, context, ct);
+            }
+            return;
+        }
+
+        logger.LogInformation("Running {Count} normalizer sources with parallelism={Parallelism} for {Context}.", sources.Count, workerCount, context);
+        var index = 0;
+        async Task Worker()
+        {
+            while (!ct.IsCancellationRequested)
+            {
+                var current = Interlocked.Increment(ref index) - 1;
+                if (current >= sources.Count) return;
+                await RunNormalizeSourceAsync(sources[current].Code, limit, context, ct);
+            }
+        }
+
+        await Task.WhenAll(Enumerable.Range(0, workerCount).Select(_ => Worker()));
+    }
+
+    private async Task RunNormalizeSourceAsync(string sourceCode, int limit, string context, CancellationToken ct)
+    {
+        await _heavyWriteLock.WaitAsync(ct);
+        try
         {
             try
             {
-                var result = await normalizer.ProcessSourcePendingAsync(source.Code, limit, ct);
+                var result = await normalizer.ProcessSourcePendingAsync(sourceCode, limit, ct);
                 if (result.Processed > 0 || result.Failed > 0)
                 {
                     logger.LogInformation("Normalizer {Source}: processed={Processed}, failed={Failed}",
@@ -133,26 +211,127 @@ public sealed class SourceScheduler(
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Normalizer {Source} failed; continuing scheduled normalization.", source.Code);
+                logger.LogError(ex, "Normalizer {Source} failed; continuing {Context}.", sourceCode, context);
             }
         }
-
-        var dueSources = await LoadDueSourcesAsync(ct);
-        foreach (var source in dueSources)
+        finally
         {
-            try
+            _heavyWriteLock.Release();
+        }
+    }
+
+    private async Task RunDetailSnapshotQueueAsync(CancellationToken ct)
+    {
+        if (!EnvBool("SCHEDULER_DETAIL_SNAPSHOT_QUEUE_ENABLED", Options.DetailSnapshotQueueEnabled))
+        {
+            return;
+        }
+
+        var intervalSeconds = EnvInt("SCHEDULER_DETAIL_SNAPSHOT_QUEUE_INTERVAL_SECONDS", Options.DetailSnapshotQueueIntervalSeconds, 0);
+        var now = DateTimeOffset.UtcNow;
+        if (intervalSeconds > 0 && now - _lastDetailSnapshotQueueRun < TimeSpan.FromSeconds(intervalSeconds))
+        {
+            return;
+        }
+
+        if (!await _detailSnapshotQueueLock.WaitAsync(0, ct))
+        {
+            return;
+        }
+
+        var heavyLockAcquired = false;
+        try
+        {
+            await _heavyWriteLock.WaitAsync(ct);
+            heavyLockAcquired = true;
+            _lastDetailSnapshotQueueRun = now;
+            var request = new DetailSnapshotBuildRequest(
+                Limit: EnvInt("SCHEDULER_DETAIL_SNAPSHOT_QUEUE_LIMIT", Options.DetailSnapshotQueueLimit, 1),
+                ConsumeQueue: true,
+                Concurrency: EnvInt("SCHEDULER_DETAIL_SNAPSHOT_QUEUE_CONCURRENCY", Options.DetailSnapshotQueueConcurrency, 1),
+                GzipLevel: EnvInt("SCHEDULER_DETAIL_SNAPSHOT_GZIP_LEVEL", Options.DetailSnapshotGzipLevel, 1));
+            var result = await detailSnapshotBuilder.RebuildAsync(request, ct);
+            if (result.selected > 0 || result.failed > 0)
             {
-                await RunSourceAsync(source.Code, ct);
+                logger.LogInformation(
+                    "Detail snapshot queue: selected={Selected}, written={Written}, removed={Removed}, failed={Failed}",
+                    result.selected,
+                    result.written,
+                    result.removed,
+                    result.failed);
             }
-            catch (Exception ex)
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Detail snapshot queue refresh failed; continuing scheduler cycle.");
+        }
+        finally
+        {
+            if (heavyLockAcquired) _heavyWriteLock.Release();
+            _detailSnapshotQueueLock.Release();
+        }
+    }
+
+    private async Task RunDuckDbAffectedComponentQueueAsync(CancellationToken ct)
+    {
+        if (!EnvBool("SCHEDULER_DUCKDB_AFFECTED_QUEUE_ENABLED", Options.DuckDbAffectedQueueEnabled))
+        {
+            return;
+        }
+
+        var intervalSeconds = EnvInt("SCHEDULER_DUCKDB_AFFECTED_QUEUE_INTERVAL_SECONDS", Options.DuckDbAffectedQueueIntervalSeconds, 0);
+        var now = DateTimeOffset.UtcNow;
+        if (intervalSeconds > 0 && now - _lastDuckDbAffectedQueueRun < TimeSpan.FromSeconds(intervalSeconds))
+        {
+            return;
+        }
+
+        if (!await _duckDbAffectedQueueLock.WaitAsync(0, ct))
+        {
+            return;
+        }
+
+        var heavyLockAcquired = false;
+        try
+        {
+            await _heavyWriteLock.WaitAsync(ct);
+            heavyLockAcquired = true;
+            _lastDuckDbAffectedQueueRun = now;
+            var request = new DuckDbAffectedComponentQueueRequest(
+                Limit: EnvInt("SCHEDULER_DUCKDB_AFFECTED_QUEUE_LIMIT", Options.DuckDbAffectedQueueLimit, 1),
+                BatchSize: EnvInt("SCHEDULER_DUCKDB_AFFECTED_QUEUE_BATCH_SIZE", Options.DuckDbAffectedQueueBatchSize, 1));
+            var result = await affectedComponentProjector.ProcessQueueAsync(request, ct);
+            if (result.selected > 0 || result.processedRows > 0)
             {
-                logger.LogError(ex, "Fetcher {Source} failed; continuing scheduled normalization.", source.Code);
+                logger.LogInformation(
+                    "DuckDB affected component queue: selected={Selected}, processed_vulnerabilities={ProcessedVulnerabilities}, rows={Rows}, elapsed_seconds={ElapsedSeconds:F1}",
+                    result.selected,
+                    result.processedVulnerabilities,
+                    result.processedRows,
+                    result.elapsedSeconds);
             }
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "DuckDB affected component queue refresh failed; continuing scheduler cycle.");
+        }
+        finally
+        {
+            if (heavyLockAcquired) _heavyWriteLock.Release();
+            _duckDbAffectedQueueLock.Release();
         }
     }
 
     public Task RunSourceNowAsync(string sourceCode, bool force, CancellationToken ct) =>
-        RunSourceAsync(sourceCode, ct, force);
+        RunSourceAsync(sourceCode, ct, force, "manual");
 
     private async Task<IReadOnlyList<ScheduledSource>> LoadAllSourcesAsync(CancellationToken ct)
     {
@@ -168,7 +347,7 @@ public sealed class SourceScheduler(
         {
             var code = reader.GetString(0);
             if (IsSourceAllowed(code))
-                rows.Add(new ScheduledSource(code, "", null));
+                rows.Add(new ScheduledSource(code, "", null, null));
         }
         return rows;
     }
@@ -179,7 +358,9 @@ public sealed class SourceScheduler(
         await using var cmd = db.CreateCommand("""
             select s.code, s.schedule_cron, s.config_json->>'runMode' as run_mode,
                    max(r.finished_at) filter (where r.status = 'succeeded') as last_success,
-                   s.checkpoint_json->>'initComplete' as init_complete
+                   s.checkpoint_json->>'initComplete' as init_complete,
+                   s.config_json->>'fetchLimit' as fetch_limit,
+                   bool_or(r.status = 'running' and r.started_at > now() - $2) as has_active_run
             from sources s
             left join source_sync_runs r on r.source_id = s.id
             where s.enabled = true
@@ -197,6 +378,7 @@ public sealed class SourceScheduler(
               s.code
             """);
         cmd.Parameters.AddWithValue(EnvBool("SCHEDULER_INCLUDE_INIT_SOURCES", Options.IncludeInitSources));
+        cmd.Parameters.AddWithValue(TimeSpan.FromSeconds(FetchTimeoutWithGraceSeconds()));
         await using var reader = await cmd.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
@@ -210,10 +392,17 @@ public sealed class SourceScheduler(
             var runMode = reader.IsDBNull(2) ? null : reader.GetString(2);
             var lastSuccess = reader.IsDBNull(3) ? (DateTimeOffset?)null : reader.GetFieldValue<DateTimeOffset>(3);
             var initComplete = reader.IsDBNull(4) ? null : reader.GetString(4);
+            var fetchLimit = reader.IsDBNull(5) ? null : reader.GetString(5);
+            var hasActiveRun = !reader.IsDBNull(6) && reader.GetBoolean(6);
+            if (hasActiveRun)
+            {
+                continue;
+            }
+
             if (string.Equals(runMode, "init", StringComparison.OrdinalIgnoreCase) && cron is null)
             {
                 if (lastSuccess is null || string.Equals(initComplete, "false", StringComparison.OrdinalIgnoreCase))
-                    rows.Add(new ScheduledSource(code, "", lastSuccess));
+                    rows.Add(new ScheduledSource(code, "", lastSuccess, fetchLimit));
                 continue;
             }
 
@@ -221,7 +410,7 @@ public sealed class SourceScheduler(
                 (string.Equals(initComplete, "false", StringComparison.OrdinalIgnoreCase) ||
                  IsDue(cron, lastSuccess, DateTimeOffset.UtcNow)))
             {
-                rows.Add(new ScheduledSource(code, cron, lastSuccess));
+                rows.Add(new ScheduledSource(code, cron, lastSuccess, fetchLimit));
             }
         }
 
@@ -241,7 +430,7 @@ public sealed class SourceScheduler(
             .Contains(code, StringComparer.OrdinalIgnoreCase);
     }
 
-    private async Task RunSourceAsync(string source, CancellationToken ct, bool force = false)
+    private async Task RunSourceAsync(string source, CancellationToken ct, bool force = false, string trigger = "scheduled", string? fetchLimitOverride = null)
     {
         var repoRoot = ResolveRepoRoot();
         var node = Environment.GetEnvironmentVariable("PLUGIN_NODE_BIN") ?? Options.PluginNodeBin;
@@ -258,7 +447,11 @@ public sealed class SourceScheduler(
         psi.ArgumentList.Add("--source");
         psi.ArgumentList.Add(source);
         psi.Environment["DATABASE_URL"] = ToPluginDatabaseUrl(Environment.GetEnvironmentVariable("DATABASE_URL") ?? "");
-        var fetchLimit = Environment.GetEnvironmentVariable("SCHEDULER_FETCH_LIMIT") ?? Options.FetchLimit;
+        psi.Environment["FETCHER_TIMEOUT_MS"] = ((int)timeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var fetchLimit = FirstNonBlank(
+            Environment.GetEnvironmentVariable("SCHEDULER_FETCH_LIMIT"),
+            fetchLimitOverride,
+            Options.FetchLimit);
         if (!string.IsNullOrWhiteSpace(fetchLimit))
         {
             psi.Environment["FETCHER_MAX_RECORDS"] = fetchLimit;
@@ -267,6 +460,7 @@ public sealed class SourceScheduler(
         {
             psi.Environment["FETCHER_FORCE"] = "1";
         }
+        psi.Environment["FETCHER_TRIGGER"] = trigger;
 
         logger.LogInformation("Starting fetcher {Source}", source);
         using var process = Process.Start(psi);
@@ -283,6 +477,7 @@ public sealed class SourceScheduler(
             TryKill(process);
             await process.WaitForExitAsync(CancellationToken.None);
             var timeoutStderr = await stderrTask;
+            await CloseRunsForSourceAsync(source, trigger, $"Fetcher {source} timed out after {timeout.TotalSeconds:n0}s. {Truncate(timeoutStderr, 1000)}", CancellationToken.None);
             throw new TimeoutException($"Fetcher {source} timed out after {timeout.TotalSeconds:n0}s. {timeoutStderr}");
         }
 
@@ -291,6 +486,7 @@ public sealed class SourceScheduler(
 
         if (process.ExitCode != 0)
         {
+            await CloseRunsForSourceAsync(source, trigger, $"Fetcher {source} failed with exit code {process.ExitCode}. {Truncate(stderr, 1000)}", ct);
             throw new InvalidOperationException($"Fetcher {source} failed: {stderr}");
         }
 
@@ -311,6 +507,62 @@ public sealed class SourceScheduler(
             // Best effort: the scheduler logs the timeout and continues with the next cycle.
         }
     }
+
+    private async Task CloseStaleScheduledRunsAsync(CancellationToken ct)
+    {
+        await using var cmd = db.CreateCommand("""
+            update source_sync_runs
+            set status = 'failed',
+                finished_at = now(),
+                error_count = greatest(error_count, 1),
+                log_summary = coalesce(nullif(log_summary, ''), 'Scheduled fetcher exceeded timeout without completing.')
+            where status = 'running'
+              and trigger = 'scheduled'
+              and started_at < now() - $1
+            """);
+        cmd.Parameters.AddWithValue(TimeSpan.FromSeconds(FetchTimeoutWithGraceSeconds()));
+        var count = await cmd.ExecuteNonQueryAsync(ct);
+        if (count > 0)
+        {
+            logger.LogWarning("Closed {Count} stale scheduled source sync runs.", count);
+        }
+    }
+
+    private async Task CloseRunsForSourceAsync(string sourceCode, string trigger, string message, CancellationToken ct)
+    {
+        await using var cmd = db.CreateCommand("""
+            update source_sync_runs r
+            set status = 'failed',
+                finished_at = now(),
+                error_count = greatest(r.error_count, 1),
+                log_summary = left($2, 4000)
+            from sources s
+            where s.id = r.source_id
+              and s.code = $1
+              and r.status = 'running'
+              and r.trigger = $3
+            """);
+        cmd.Parameters.AddWithValue(sourceCode);
+        cmd.Parameters.AddWithValue(message);
+        cmd.Parameters.AddWithValue(trigger);
+        var count = await cmd.ExecuteNonQueryAsync(ct);
+        if (count > 0)
+        {
+            logger.LogWarning("Closed {Count} failed scheduled source sync runs for {Source}.", count, sourceCode);
+        }
+    }
+
+    private int FetchTimeoutWithGraceSeconds()
+    {
+        var timeout = EnvInt("SCHEDULER_FETCH_TIMEOUT_SECONDS", Options.FetchTimeoutSeconds, 30);
+        return Math.Max(60, timeout + 60);
+    }
+
+    private static string Truncate(string value, int maxLength) =>
+        value.Length <= maxLength ? value : value[..maxLength];
+
+    private static string? FirstNonBlank(params string?[] values) =>
+        values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
 
     private static bool IsDue(string cron, DateTimeOffset? lastSuccess, DateTimeOffset now)
     {
@@ -402,7 +654,7 @@ public sealed class SourceScheduler(
         }
     }
 
-    private sealed record ScheduledSource(string Code, string Cron, DateTimeOffset? LastSuccess);
+    private sealed record ScheduledSource(string Code, string Cron, DateTimeOffset? LastSuccess, string? FetchLimit);
 
     private static int EnvInt(string name, int fallback, int min)
     {
@@ -427,8 +679,19 @@ public sealed class VulTrackSchedulerOptions
     public int FetchIntervalHours { get; init; } = 12;
     public int NormalizeLimit { get; init; } = 500;
     public int FetchTimeoutSeconds { get; init; } = 600;
+    public int FetchParallelism { get; init; } = 2;
     public string? FetchLimit { get; init; }
     public string PluginNodeBin { get; init; } = "node";
     public string[] SourceCodes { get; init; } = [];
     public bool IncludeInitSources { get; init; }
+    public int NormalizeParallelism { get; init; } = 1;
+    public bool DetailSnapshotQueueEnabled { get; init; } = true;
+    public int DetailSnapshotQueueIntervalSeconds { get; init; } = 300;
+    public int DetailSnapshotQueueLimit { get; init; } = 500;
+    public int DetailSnapshotQueueConcurrency { get; init; } = 4;
+    public int DetailSnapshotGzipLevel { get; init; } = 6;
+    public bool DuckDbAffectedQueueEnabled { get; init; } = true;
+    public int DuckDbAffectedQueueIntervalSeconds { get; init; } = 60;
+    public int DuckDbAffectedQueueLimit { get; init; } = 1000;
+    public int DuckDbAffectedQueueBatchSize { get; init; } = 1000;
 }

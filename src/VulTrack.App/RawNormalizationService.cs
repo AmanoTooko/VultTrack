@@ -75,7 +75,8 @@ public sealed class RawNormalizationService(
         }
         finally
         {
-            await ReleaseSourceNormalizeLockAsync(connection, sourceCode, CancellationToken.None);
+            if (connection.FullState == System.Data.ConnectionState.Open)
+                await ReleaseSourceNormalizeLockAsync(connection, sourceCode, CancellationToken.None);
         }
     }
 

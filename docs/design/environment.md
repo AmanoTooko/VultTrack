@@ -12,10 +12,7 @@ POSTGRES_DB=vultrack
 POSTGRES_USER=vultrack
 POSTGRES_PASSWORD=change-me
 
-REDIS_CONNECTION=redis:6379
-
-RAW_OBJECT_STORE=filesystem
-RAW_OBJECT_PATH=/data/raw-objects
+RAW_OBJECT_STORE=pgsql
 
 PLUGIN_ROOT=/app/plugins
 PLUGIN_NODE_BIN=/usr/local/bin/node
@@ -62,8 +59,8 @@ OTEL_EXPORTER_OTLP_ENDPOINT=
     /cve-list
     /threat-intel
 /data
-  /raw-objects
-  /plugin-tmp
+  /duckdb
+  /vulnerability-details
   /logs
 ```
 
@@ -75,21 +72,15 @@ services:
     image: vultrack-app:local
     depends_on:
       - postgres
-      - redis
     ports:
       - "8080:8080"
-    volumes:
-      - vultrack_raw:/data/raw-objects
     environment:
       POSTGRES_HOST: postgres
-      REDIS_CONNECTION: redis:6379
+      RAW_OBJECT_STORE: pgsql
 
   postgres:
     image: postgres:16
 
-  redis:
-    image: redis:7
 ```
 
-MinIO/S3 是可选项。MVP 使用 filesystem object store 即可。
-
+raw object 默认以 gzip 压缩 bytea 写入 PostgreSQL，并通过 source hash 去重；旧部署可用迁移脚本回收 filesystem object store。

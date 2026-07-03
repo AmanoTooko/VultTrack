@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { rm } from 'node:fs/promises';
+import path from 'node:path';
 import pg from 'pg';
 
 const { Client } = pg;
@@ -6,6 +8,7 @@ const apply = process.argv.includes('--apply');
 const confirmed = process.argv.includes('--confirm=REBUILD_CANONICAL_DATA');
 const exactCounts = !apply || process.argv.includes('--exact-counts');
 const databaseUrl = process.env.DATABASE_URL ?? 'postgres://vultrack:vultrack@127.0.0.1:5432/vultrack';
+const duckDbPath = path.resolve(process.env.VULTRACK_DUCKDB_PATH ?? 'data/duckdb/vultrack-evidence.duckdb');
 const tables = [
   'vulnerability_affected_evidence',
   'version_match_cache',
@@ -73,7 +76,9 @@ try {
     throw error;
   }
   await client.query(`analyze ${tables.join(', ')}, sbom_components, sbom_uploads, source_raw_index`);
-  console.log('Canonical and derived data cleared. Parsed raw records were requeued for normalization.');
+  await rm(duckDbPath, { force: true });
+  await rm(`${duckDbPath}.wal`, { force: true });
+  console.log(`Canonical and derived data cleared. Parsed raw records were requeued for normalization. DuckDB evidence store cleared: ${duckDbPath}`);
 } finally {
   await client.end();
 }

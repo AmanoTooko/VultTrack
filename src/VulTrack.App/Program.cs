@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Npgsql;
 using VulTrack.App;
@@ -24,10 +25,26 @@ builder.Services.AddSingleton<IRawNormalizer, ExploitPocRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ExternalAdvisoryRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, DistroRawNormalizer>();
 builder.Services.AddSingleton<IRawNormalizer, ComponentCatalogNormalizer>();
-builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>();
+builder.Services.AddSingleton<RawNormalizationService>();
+var normalizerBackend = Environment.GetEnvironmentVariable("VULTRACK_NORMALIZER_BACKEND")
+    ?? builder.Configuration["VulTrack:NormalizerBackend"]
+    ?? "postgres";
+if (string.Equals(normalizerBackend, "duckdb", StringComparison.OrdinalIgnoreCase))
+    builder.Services.AddSingleton<IRawNormalizationService, DuckDbRawNormalizationService>();
+else
+    builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>();
 builder.Services.AddSingleton<ComponentVulnerabilitySearchService>();
 builder.Services.AddSingleton<AdminAuthService>();
 builder.Services.AddSingleton<SourceScheduler>();
+builder.Services.AddMemoryCache();
+builder.Services.AddSingleton<DuckDbEvidenceStore>();
+builder.Services.AddSingleton<DuckDbEvidenceNormalizer>();
+builder.Services.AddSingleton<StagingPayloadCompactor>();
+builder.Services.AddSingleton<DuckDbAffectedComponentProjector>();
+builder.Services.AddSingleton<VulnerabilityDetailService>();
+builder.Services.AddSingleton<VulnerabilityDetailSnapshotStore>();
+builder.Services.AddSingleton<VulnerabilityDetailSnapshotBuilder>();
+builder.Services.AddHttpClient<AiVulnerabilitySummaryService>();
 builder.Services.AddHostedService(sp => sp.GetRequiredService<SourceScheduler>());
 
 var app = builder.Build();
@@ -37,8 +54,17 @@ app.UseStaticFiles();
 
 app.MapGet("/", () => Results.Redirect("/index.html"));
 
-await EnsureRuntimeIndexesAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
-await BackfillCvssScoresAsync(app.Services.GetRequiredService<NpgsqlDataSource>());
+var runtimeDb = app.Services.GetRequiredService<NpgsqlDataSource>();
+await EnsureRuntimeIndexesAsync(runtimeDb);
+try
+{
+    await EnsureDetailSnapshotQueueAsync(runtimeDb);
+}
+catch (Exception ex) when (ex is NpgsqlException or TimeoutException)
+{
+    app.Logger.LogWarning(ex, "Detail snapshot queue initialization was skipped because the database was busy.");
+}
+await BackfillCvssScoresAsync(runtimeDb);
 
 app.MapGet("/api/v1/system.health", () => ApiResult.Ok(new
 {
@@ -413,6 +439,99 @@ app.MapPost("/api/v1/admin.scheduler.runDue", async (HttpContext context, AdminA
     return ApiResult.Ok(new { completed = true });
 });
 
+app.MapPost("/api/v1/admin.duckdbEvidence.normalize", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer normalizer, DuckDbEvidenceNormalizeRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var result = await normalizer.NormalizeAsync(request, ct);
+    return ApiResult.Ok(result);
+});
+
+app.MapGet("/api/v1/admin.duckdbEvidence.stats", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await store.StatsAsync(ct));
+});
+
+app.MapPost("/api/v1/admin.duckdbAffectedComponents.rebuild", async (HttpContext context, AdminAuthService auth, DuckDbAffectedComponentProjector projector, DuckDbAffectedComponentRebuildRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await projector.RebuildAsync(request, ct));
+});
+
+app.MapPost("/api/v1/admin.duckdbAffectedComponents.processQueue", async (HttpContext context, AdminAuthService auth, DuckDbAffectedComponentProjector projector, DuckDbAffectedComponentQueueRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await projector.ProcessQueueAsync(request, ct));
+});
+
+app.MapPost("/api/v1/admin.detailSnapshot.rebuild", async (HttpContext context, AdminAuthService auth, VulnerabilityDetailSnapshotBuilder builder, DetailSnapshotBuildRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var result = await builder.RebuildAsync(request, ct);
+    return ApiResult.Ok(result);
+});
+
+app.MapGet("/api/v1/vulnerability.aiSummary", async (AiVulnerabilitySummaryService summaries, Guid id, CancellationToken ct) =>
+{
+    var result = await summaries.GetAsync(id, generate: false, force: false, ct);
+    return result is null
+        ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString())
+        : ApiResult.Ok(result);
+});
+
+app.MapGet("/api/v1/vulnerability.aiAnalysis", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
+{
+    await using var command = db.CreateCommand("""
+        select vulnerability_id, model, prompt_version, evidence_hash, analysis_json::text,
+               input_chars, output_chars, source_url, updated_at
+        from ai_vulnerability_analyses
+        where vulnerability_id = $1
+        """);
+    command.Parameters.AddWithValue(id);
+
+    await using var reader = await command.ExecuteReaderAsync(ct);
+    if (!await reader.ReadAsync(ct))
+        return ApiResult.Ok(new
+        {
+            status = "not_analyzed",
+            analyzed = false,
+            message = "No AI analysis exists for this vulnerability."
+        });
+
+    return ApiResult.Ok(new
+    {
+        status = "analyzed",
+        analyzed = true,
+        vulnerabilityId = reader.GetGuid(0),
+        model = reader.GetString(1),
+        promptVersion = reader.GetString(2),
+        evidenceHash = reader.GetString(3),
+        analysis = JsonNode.Parse(reader.GetString(4)),
+        inputChars = reader.GetInt32(5),
+        outputChars = reader.GetInt32(6),
+        sourceUrl = reader.IsDBNull(7) ? null : reader.GetString(7),
+        updatedAt = reader.GetFieldValue<DateTimeOffset>(8)
+    });
+});
+
+app.MapPost("/api/v1/admin.vulnerability.aiSummary", async (HttpContext context, AdminAuthService auth, AiVulnerabilitySummaryService summaries, AiSummaryRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var result = await summaries.GetAsync(request.Id, generate: true, force: request.Force, ct);
+    return result is null
+        ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", request.Id.ToString())
+        : ApiResult.Ok(result);
+});
+
+app.MapGet("/api/v1/admin.vulnerability.aiSummaryInput", async (HttpContext context, AdminAuthService auth, AiVulnerabilitySummaryService summaries, Guid id, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    var result = await summaries.GetInputAsync(id, ct);
+    return result is null
+        ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString())
+        : ApiResult.Ok(result);
+});
+
 app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, VulnerabilitySearchRequest request, CancellationToken ct) =>
 {
     var rows = new List<object>();
@@ -430,6 +549,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     var offset = (page - 1) * pageSize;
     var sort = NormalizeVulnerabilitySort(request.Sort);
     var orderBy = VulnerabilityOrderBy(sort, "v");
+    var cveFirstOrderBy = CveFirstVulnerabilityOrderBy(sort, "v");
 
     var queryHasCveIdentifier = Identifier.ExpandWithEmbeddedCves(rawQuery).Any(x => Identifier.TypeOf(x) == "CVE");
     var ecosystemVersion = queryHasCveIdentifier ? null : ParseEcosystemVersion(rawQuery);
@@ -594,7 +714,7 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
                        v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
                        v.identifiers, v.aliases
                 from vulnerabilities v
-                order by {orderBy}
+                order by {cveFirstOrderBy}
                 limit $1 offset $2
                 """);
         if (cveRange is not null)
@@ -695,8 +815,15 @@ app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, Can
     });
 });
 
-app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
+app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvidenceStore duckDb, VulnerabilityDetailSnapshotStore snapshots, string? source, bool? snapshot, Guid id, CancellationToken ct) =>
 {
+    if (snapshot != false && !string.Equals(source, "pgsql", StringComparison.OrdinalIgnoreCase))
+    {
+        var snapshotDetail = await snapshots.TryGetAsync(id, ct);
+        if (snapshotDetail is JsonElement detail)
+            return ApiResult.Ok(detail);
+    }
+
     await using var cmd = db.CreateCommand("""
         select v.id, v.primary_identifier, coalesce(preferred_title.value, v.title), coalesce(preferred_description.value, v.description),
                v.status, v.severity_label, v.max_cvss_score, v.max_cvss_version, v.max_cvss_vector,
@@ -811,6 +938,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
     var sourceUrls = BuildSourceUrls(vulnerability.primaryIdentifier, vulnerability.aliases);
 
     var queryId = actualId;
+    var useDuckDb = source == "duckdb" || (duckDb.Enabled && source != "pgsql");
 
     return ApiResult.Ok(new
     {
@@ -826,19 +954,23 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             limit 50
             """, queryId, ct),
         records = await QueryRecordsGroupedAsync(db, queryId, ct),
-        affectedComponents = await QueryRowsAsync(db, """
-            select ecosystem, package_name, display_name,
-                   left(coalesce(primary_purl,''), 80) as primary_purl,
-                   left(coalesce(primary_cpe23_uri,''), 80) as primary_cpe23_uri,
-                   normalized_range, range_type, confidence, evidence_count, resolution_status
-            from vulnerability_affected_components
-            where vulnerability_id = $1
-            order by CASE WHEN range_type IN ('ECOSYSTEM','semver','vendor') THEN 0 ELSE 1 END,
-                     CASE WHEN normalized_range IS NOT NULL AND normalized_range <> '' THEN 0 ELSE 1 END,
-                     ecosystem nulls last, display_name
-            limit 60
-            """, queryId, ct),
-        affectedExpressions = await QueryRowsAsync(db, """
+        affectedComponents = useDuckDb
+            ? await duckDb.QueryAffectedComponentsAsync(queryId, 60, ct)
+            : await QueryRowsAsync(db, """
+                select ecosystem, package_name, display_name,
+                       left(coalesce(primary_purl,''), 80) as primary_purl,
+                       left(coalesce(primary_cpe23_uri,''), 80) as primary_cpe23_uri,
+                       normalized_range, range_type, confidence, evidence_count, resolution_status
+                from vulnerability_affected_components
+                where vulnerability_id = $1
+                order by CASE WHEN range_type IN ('ECOSYSTEM','semver','vendor') THEN 0 ELSE 1 END,
+                         CASE WHEN normalized_range IS NOT NULL AND normalized_range <> '' THEN 0 ELSE 1 END,
+                         ecosystem nulls last, display_name
+                limit 60
+                """, queryId, ct),
+        affectedExpressions = useDuckDb
+            ? (await duckDb.QueryAffectedFactsAsync(vulnerability.primaryIdentifier, 250, ct))
+            : await QueryRowsAsync(db, """
             select s.code, f.fact_type, f.ecosystem, f.package_name, f.purl,
                    f.purl_without_version, f.cpe23_uri, f.version_range_raw,
                    f.range_type, f.vulnerable, f.source_confidence
@@ -871,7 +1003,9 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
                      s.code nulls last
             limit 16
             """, queryId, ct),
-        severities = await QueryRowsAsync(db, """
+        severities = useDuckDb
+            ? (await duckDb.QuerySeverityScoresAsync(vulnerability.primaryIdentifier, 20, ct))
+            : await QueryRowsAsync(db, """
             select s.code, scoring_system, scoring_version, score_type, vector_string,
                    score, severity_label, is_selected
             from vulnerability_severity_scores vss
@@ -881,7 +1015,9 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
                      is_selected desc, score desc nulls last
             limit 20
             """, queryId, ct),
-        references = await QueryRowsAsync(db, """
+        references = useDuckDb
+            ? (await duckDb.QueryReferencesAsync(vulnerability.primaryIdentifier, 160, ct))
+            : await QueryRowsAsync(db, """
             with ranked as (
               select s.code, url, ref_type, tags,
                      row_number() over (partition by s.code order by url) as source_rank
@@ -891,9 +1027,9 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, Guid id, 
             )
             select code, url, ref_type, tags
             from ranked
-            where source_rank <= 20
+            where source_rank <= 40
             order by code nulls last, source_rank, url
-            limit 40
+            limit 160
             """, queryId, ct),
         exploits = await QueryRowsAsync(db, """
             select s.code, e.source_key, e.title, e.source_url, e.artifact_url,
@@ -1315,6 +1451,7 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
     foreach (var statement in new[]
     {
         "create index if not exists ix_vuln_modified on vulnerabilities(modified_at desc nulls last)",
+        "create index if not exists ix_vulnerabilities_updated_id on vulnerabilities(updated_at desc, id desc)",
         "create index if not exists ix_vuln_published on vulnerabilities(published_at desc nulls last)",
         "create index if not exists ix_vuln_sort on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last)",
         "create index if not exists ix_vuln_cvss_identifier_filter on vulnerabilities((coalesce(max_cvss_score, 0)) desc, modified_at desc nulls last, primary_identifier)",
@@ -1324,6 +1461,7 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_raw_pending_status_by_source on source_raw_index(source_id, normalize_status) where normalize_status in ('pending', 'failed')",
         "create index if not exists ix_raw_pending_source_updated on source_raw_index(source_id, normalize_status, updated_at, id) where normalize_status in ('pending', 'failed')",
         "create index if not exists ix_raw_pending_source_order on source_raw_index(source_id, updated_at, id) where normalize_status in ('pending', 'failed')",
+        "create index if not exists ix_raw_source_id_order on source_raw_index(source_id, id)",
         "drop index if exists ix_raw_pending_by_source",
         "create index if not exists ix_stg_nvd_cpe_normalize_order on stg_nvd_cpe_dictionary(cpe23_uri, raw_index_id)",
         "create index if not exists ix_stg_nvd_cves_normalize_order on stg_nvd_cves(modified_at nulls last, cve_id, raw_index_id)",
@@ -1347,6 +1485,39 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         "create index if not exists ix_descriptions_source_fk on vulnerability_descriptions(source_id)",
         "create index if not exists ix_identifier_edges_source_fk on vulnerability_identifier_edges(source_id)",
         "create index if not exists ix_identifier_index_source_fk on vulnerability_identifier_index(source_id)",
+        "create index if not exists ix_identifier_groups_canonical_fk on vulnerability_identifier_groups(canonical_vulnerability_id) where canonical_vulnerability_id is not null",
+        """
+        create table if not exists ai_vulnerability_summaries (
+          vulnerability_id uuid not null references vulnerabilities(id) on delete cascade,
+          model text not null,
+          prompt_version text not null,
+          evidence_hash text not null,
+          summary_json jsonb not null,
+          input_json jsonb not null,
+          input_chars integer not null default 0,
+          output_chars integer not null default 0,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now(),
+          primary key (vulnerability_id, model, prompt_version, evidence_hash)
+        )
+        """,
+        "create index if not exists ix_ai_summaries_vuln_latest on ai_vulnerability_summaries(vulnerability_id, updated_at desc)",
+        """
+        create table if not exists ai_vulnerability_analyses (
+          vulnerability_id uuid primary key references vulnerabilities(id) on delete cascade,
+          model text not null,
+          prompt_version text not null,
+          evidence_hash text not null,
+          analysis_json jsonb not null,
+          input_json jsonb not null,
+          input_chars integer not null default 0,
+          output_chars integer not null default 0,
+          source_url text,
+          created_at timestamptz not null default now(),
+          updated_at timestamptz not null default now()
+        )
+        """,
+        "create index if not exists ix_ai_analyses_updated on ai_vulnerability_analyses(updated_at desc)",
         """
         do $$
         begin
@@ -1469,6 +1640,191 @@ static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
         await cmd.ExecuteNonQueryAsync();
     }
 }
+
+static async Task EnsureDetailSnapshotQueueAsync(NpgsqlDataSource db)
+{
+    foreach (var statement in new[]
+    {
+        """
+        create table if not exists vulnerability_detail_snapshot_queue (
+          vulnerability_id uuid primary key,
+          queued_at timestamptz not null default now()
+        )
+        """,
+        "create index if not exists ix_detail_snapshot_queue_queued_at on vulnerability_detail_snapshot_queue(queued_at, vulnerability_id)",
+        """
+        create table if not exists duckdb_affected_component_queue (
+          vulnerability_id uuid primary key,
+          queued_at timestamptz not null default now()
+        )
+        """,
+        "create index if not exists ix_duckdb_affected_component_queue_queued_at on duckdb_affected_component_queue(queued_at, vulnerability_id)",
+        """
+        create or replace function queue_vulnerability_detail_snapshot_id()
+        returns trigger
+        language plpgsql
+        as $$
+        declare
+          target_id uuid;
+        begin
+          if current_setting('vultrack.defer_snapshot_queue', true) = 'on' then
+            return coalesce(new, old);
+          end if;
+
+          if tg_op = 'DELETE' then
+            target_id := old.id;
+          else
+            target_id := new.id;
+          end if;
+
+          if target_id is not null then
+            insert into vulnerability_detail_snapshot_queue(vulnerability_id, queued_at)
+            values (target_id, now())
+            on conflict (vulnerability_id) do update set queued_at = excluded.queued_at;
+          end if;
+
+          return coalesce(new, old);
+        end;
+        $$;
+        """,
+        """
+        create or replace function queue_vulnerability_detail_snapshot_vulnerability_id()
+        returns trigger
+        language plpgsql
+        as $$
+        declare
+          target_id uuid;
+        begin
+          if tg_op = 'DELETE' then
+            target_id := old.vulnerability_id;
+          else
+            target_id := new.vulnerability_id;
+          end if;
+
+          if target_id is not null then
+            insert into vulnerability_detail_snapshot_queue(vulnerability_id, queued_at)
+            values (target_id, now())
+            on conflict (vulnerability_id) do update set queued_at = excluded.queued_at;
+          end if;
+
+          return coalesce(new, old);
+        end;
+        $$;
+        """,
+        """
+        create or replace function queue_duckdb_affected_component_projection()
+        returns trigger
+        language plpgsql
+        as $$
+        declare
+          target_id uuid;
+        begin
+          if tg_op = 'DELETE' then
+            target_id := old.vulnerability_id;
+          else
+            target_id := new.vulnerability_id;
+          end if;
+
+          if target_id is not null then
+            insert into duckdb_affected_component_queue(vulnerability_id, queued_at)
+            values (target_id, now())
+            on conflict (vulnerability_id) do update set queued_at = excluded.queued_at;
+          end if;
+
+          return coalesce(new, old);
+        end;
+        $$;
+        """,
+        """
+        create or replace function queue_vulnerability_detail_snapshot_canonical_id()
+        returns trigger
+        language plpgsql
+        as $$
+        declare
+          target_id uuid;
+        begin
+          if tg_op = 'DELETE' then
+            target_id := old.canonical_vulnerability_id;
+          else
+            target_id := new.canonical_vulnerability_id;
+          end if;
+
+          if target_id is not null then
+            insert into vulnerability_detail_snapshot_queue(vulnerability_id, queued_at)
+            values (target_id, now())
+            on conflict (vulnerability_id) do update set queued_at = excluded.queued_at;
+          end if;
+
+          return coalesce(new, old);
+        end;
+        $$;
+        """,
+        """
+        do $$
+        begin
+          if to_regclass('public.vulnerabilities') is not null then
+            drop trigger if exists trg_detail_snapshot_queue on vulnerabilities;
+            drop trigger if exists trg_detail_snapshot_queue_vulnerabilities on vulnerabilities;
+            create trigger trg_detail_snapshot_queue_vulnerabilities
+            after insert or update or delete on vulnerabilities
+            for each row execute function queue_vulnerability_detail_snapshot_id();
+          end if;
+        end;
+        $$;
+        """,
+        DetailSnapshotQueueTrigger("vulnerability_records"),
+        DetailSnapshotQueueTrigger("vulnerability_affected_components"),
+        DetailSnapshotQueueTrigger("vulnerability_affected_facts"),
+        DetailSnapshotQueueTrigger("vulnerability_descriptions"),
+        DetailSnapshotQueueTrigger("vulnerability_weaknesses"),
+        DetailSnapshotQueueTrigger("vulnerability_exploits"),
+        DetailSnapshotQueueTrigger("vulnerability_references"),
+        DetailSnapshotQueueTrigger("vulnerability_severity_scores"),
+        """
+        do $$
+        begin
+          if to_regclass('public.vulnerability_affected_facts') is not null then
+            drop trigger if exists trg_duckdb_affected_component_queue on vulnerability_affected_facts;
+            create trigger trg_duckdb_affected_component_queue
+            after insert or update or delete on vulnerability_affected_facts
+            for each row execute function queue_duckdb_affected_component_projection();
+          end if;
+        end;
+        $$;
+        """,
+        """
+        do $$
+        begin
+          if to_regclass('public.vulnerability_identifier_index') is not null then
+            drop trigger if exists trg_detail_snapshot_queue_vulnerability_identifier_index on vulnerability_identifier_index;
+            create trigger trg_detail_snapshot_queue_vulnerability_identifier_index
+            after insert or update or delete on vulnerability_identifier_index
+            for each row execute function queue_vulnerability_detail_snapshot_canonical_id();
+          end if;
+        end;
+        $$;
+        """
+    })
+    {
+        await using var cmd = db.CreateCommand(statement);
+        await cmd.ExecuteNonQueryAsync();
+    }
+}
+
+static string DetailSnapshotQueueTrigger(string tableName) =>
+    $"""
+    do $$
+    begin
+      if to_regclass('public.{tableName}') is not null then
+        drop trigger if exists trg_detail_snapshot_queue on {tableName};
+        drop trigger if exists trg_detail_snapshot_queue_{tableName} on {tableName};
+        create trigger trg_detail_snapshot_queue_{tableName}
+        after insert or update or delete on {tableName}
+        for each row execute function queue_vulnerability_detail_snapshot_vulnerability_id();
+      end if;
+    end;
+    $$;
+    """;
 
 static async Task BackfillCvssScoresAsync(NpgsqlDataSource db)
 {
@@ -1601,6 +1957,22 @@ static string VulnerabilityOrderBy(string sort, string alias)
         "identifierDesc" => $"{p}primary_identifier desc",
         _ => $"{p}modified_at desc nulls last, {p}primary_identifier desc"
     };
+}
+
+static string CveFirstVulnerabilityOrderBy(string sort, string alias)
+{
+    var p = string.IsNullOrWhiteSpace(alias) ? "" : $"{alias}.";
+    var cvePattern = "'^CVE-[0-9]{4}-[0-9]{4,}$'";
+    var embeddedCvePattern = "'\\yCVE-[0-9]{4}-[0-9]{4,}\\y'";
+    var cveRank = "case " +
+                  $"when {p}primary_identifier ~* {cvePattern} then 0 " +
+                  "when exists (" +
+                  "select 1 " +
+                  $"from unnest(coalesce({p}identifiers, array[]::text[]) || coalesce({p}aliases, array[]::text[])) as identifier(value) " +
+                  $"where identifier.value ~* {cvePattern} or identifier.value ~* {embeddedCvePattern}" +
+                  ") then 1 " +
+                  "else 2 end";
+    return $"{cveRank}, {VulnerabilityOrderBy(sort, alias)}";
 }
 
 static (string Start, string End)? TryGetCvePrefixRange(string query)

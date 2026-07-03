@@ -29,6 +29,39 @@ public sealed record AdminSourceActionRequest(
     bool Force = false,
     int Limit = 100);
 
+public sealed record DetailSnapshotBuildRequest(
+    string? Shard = null,
+    int Limit = 100,
+    string? Since = null,
+    Guid[]? Ids = null,
+    bool ConsumeQueue = false,
+    int Concurrency = 4,
+    int GzipLevel = 6);
+
+public sealed record DuckDbAffectedComponentRebuildRequest(
+    bool Reset = true,
+    int BatchSize = 100000,
+    int Limit = 0);
+
+public sealed record DuckDbAffectedComponentQueueRequest(
+    int Limit = 5000,
+    int BatchSize = 1000);
+
+public sealed record DuckDbAffectedComponentQueueResult(
+    bool ok,
+    int limit,
+    int batchSize,
+    long selected,
+    long processedRows,
+    long processedVulnerabilities,
+    long duckDbAffectedComponents,
+    double elapsedSeconds,
+    double rowsPerSecond);
+
+public sealed record AiSummaryRequest(
+    Guid Id,
+    bool Force = false);
+
 public sealed record ComponentVulnerabilitySearchRequest(
     string? ComponentName = null,
     string? Name = null,

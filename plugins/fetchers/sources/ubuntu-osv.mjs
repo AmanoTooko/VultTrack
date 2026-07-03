@@ -9,8 +9,10 @@ import { upsertOsv } from '../lib/staging.mjs';
 
 export const sourceCode = 'ubuntu-osv';
 const UBUNTU_OSV_URL = 'https://security-metadata.canonical.com/osv/osv-all.tar.xz';
+const TEMP_DIR_PREFIX = 'vultrack-ubuntu-osv-';
 
 export async function run(client, ctx) {
+  await cleanupStaleTempDirs();
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
   const explicitIds = getCsvEnv('UBUNTU_OSV_IDS');
   if (explicitIds.length || getBoolEnv('FETCHER_SMOKE')) {
@@ -26,43 +28,71 @@ export async function run(client, ctx) {
   const mirrorDir = getRootPath('data/mirrors');
   await fs.mkdir(mirrorDir, { recursive: true });
   const archive = path.join(mirrorDir, 'ubuntu-osv-all.tar.xz');
+  const partialArchive = `${archive}.part`;
   const timeoutMs = getIntEnv('FETCHER_TIMEOUT_MS', 600000);
-  const download = spawnSync('curl', ['-fL', '--retry', '3', '--retry-delay', '2', '-o', archive, UBUNTU_OSV_URL], {
+  await fs.rm(partialArchive, { force: true });
+  const download = spawnSync('curl', [
+    '-fL',
+    '--retry', '5',
+    '--retry-all-errors',
+    '--retry-delay', '2',
+    '--connect-timeout', '30',
+    '--max-time', String(Math.max(60, Math.floor(timeoutMs / 1000))),
+    '--silent',
+    '--show-error',
+    '-o', partialArchive,
+    UBUNTU_OSV_URL
+  ], {
     encoding: 'utf8',
     timeout: timeoutMs
   });
-  if (download.status !== 0) throw new Error(`Failed to download Ubuntu OSV tarball: ${download.stderr}`);
+  if (download.status !== 0) {
+    await fs.rm(partialArchive, { force: true });
+    throw new Error(`Failed to download Ubuntu OSV tarball: ${download.stderr.trim() || `curl exited with ${download.status}`}`);
+  }
+  await fs.rename(partialArchive, archive);
 
   const contentHash = sha256(await fs.readFile(archive));
   if (checkpoint.contentHash === contentHash) {
     console.error('Ubuntu OSV tarball unchanged, skipping.');
     return { fetchedCount: 0, parsedCount: 0, checkpoint: { contentHash, ...metadata, skipped: true } };
   }
-  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-ubuntu-osv-'));
-  const result = spawnSync('tar', ['-xJf', archive, '-C', tmpDir], { stdio: 'pipe' });
-  if (result.status !== 0) throw new Error(`Failed to extract Ubuntu OSV tarball: ${result.stderr.toString()}`);
-  const files = [];
-  await walk(tmpDir, files, max);
-  let count = 0;
-  for (const file of files) {
-    if (count >= max) break;
-    const item = JSON.parse(await fs.readFile(file, 'utf8'));
-    const ids = [item.id, ...(item.aliases ?? [])].filter(Boolean);
-    const rawIndexId = await writeRecord(client, ctx, {
-      externalKey: item.id,
-      externalId: item.id,
-      sourceUrl: 'https://security-metadata.canonical.com/osv/',
-      identifiers: ids,
-      publishedAt: item.published,
-      modifiedAt: item.modified,
-      recordHash: sha256(stableJson(item)),
-      payload: item
-    });
-    await upsertOsv(client, rawIndexId, item, 'stg_ubuntu_osv');
-    count++;
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), TEMP_DIR_PREFIX));
+  try {
+    const result = spawnSync('tar', ['-xJf', archive, '-C', tmpDir], { stdio: 'pipe' });
+    if (result.status !== 0) throw new Error(`Failed to extract Ubuntu OSV tarball: ${result.stderr.toString()}`);
+    const files = [];
+    await walk(tmpDir, files, max);
+    let count = 0;
+    for (const file of files) {
+      if (count >= max) break;
+      const item = JSON.parse(await fs.readFile(file, 'utf8'));
+      const ids = [item.id, ...(item.aliases ?? [])].filter(Boolean);
+      const rawIndexId = await writeRecord(client, ctx, {
+        externalKey: item.id,
+        externalId: item.id,
+        sourceUrl: 'https://security-metadata.canonical.com/osv/',
+        identifiers: ids,
+        publishedAt: item.published,
+        modifiedAt: item.modified,
+        recordHash: sha256(stableJson(item)),
+        payload: item
+      });
+      await upsertOsv(client, rawIndexId, item, 'stg_ubuntu_osv');
+      count++;
+    }
+    return { fetchedCount: count, parsedCount: count, checkpoint: { contentHash, ...metadata, lastFetched: new Date().toISOString() } };
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
   }
-  await fs.rm(tmpDir, { recursive: true, force: true });
-  return { fetchedCount: count, parsedCount: count, checkpoint: { contentHash, ...metadata, lastFetched: new Date().toISOString() } };
+}
+
+async function cleanupStaleTempDirs() {
+  const tempRoot = os.tmpdir();
+  const entries = await fs.readdir(tempRoot, { withFileTypes: true }).catch(() => []);
+  await Promise.all(entries
+    .filter(entry => entry.isDirectory() && entry.name.startsWith(TEMP_DIR_PREFIX))
+    .map(entry => fs.rm(path.join(tempRoot, entry.name), { recursive: true, force: true }).catch(() => {})));
 }
 
 async function fetchMetadata(url) {

@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using Npgsql;
 
@@ -174,7 +175,7 @@ public static class SbomEndpoints
         return ApiResult.Ok(new { sbom, components = comps, vulnerabilities = vulns });
     }
 
-    private static async Task<IResult> Match(NpgsqlDataSource db, SbomMatchRequest req, CancellationToken ct)
+    private static async Task<IResult> Match(NpgsqlDataSource db, DuckDbEvidenceStore duckDb, SbomMatchRequest req, CancellationToken ct)
     {
         var m = 0;
         await using var conn = await db.OpenConnectionAsync(ct);
@@ -208,170 +209,30 @@ public static class SbomEndpoints
             await reset.ExecuteNonQueryAsync(ct);
         }
 
-        await using (var temp = new NpgsqlCommand("""
-            create temp table temp_sbom_match_components (
-              component_id uuid primary key,
-              purl text,
-              purl_decoded text,
-              purl_without_version text,
-              name text,
-              version text,
-              ecosystem text,
-              mapped_ecosystem text,
-              cpe23_uri text,
-              cpe_prefix text,
-              cpe_product text,
-              source_package_name text,
-              source_package_version text
-            ) on commit drop
-            """, conn))
-        {
-            await temp.ExecuteNonQueryAsync(ct);
-        }
+        if (!duckDb.Enabled)
+            return ApiResult.Error("DUCKDB_DISABLED", "SBOM matching requires DuckDB affected component projection.");
 
-        foreach (var chunk in comps.Chunk(400))
+        var matchComponents = comps.Select(component =>
         {
-            var p = 1;
-            var values = new List<string>();
-            var parameters = new List<object>();
-            foreach (var (cid, purl, name, ver, eco, _, _, cpe23Uri, sourcePackageName, sourcePackageVersion) in chunk)
-            {
-                var purlDec = string.IsNullOrWhiteSpace(purl) ? null : Uri.UnescapeDataString(purl);
-                var pwv = purlDec is null ? null : StripVersion(purlDec) ?? purlDec;
-                var meco = MapEcosystem(eco);
-                var cpePrefix = CpeProductPrefix(cpe23Uri);
-                var cpeProduct = ParseCpe(cpe23Uri)?.Product;
-                values.Add($"(${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++},${p++})");
-                parameters.Add(cid);
-                parameters.Add((object?)purl ?? DBNull.Value);
-                parameters.Add((object?)purlDec ?? DBNull.Value);
-                parameters.Add((object?)pwv ?? DBNull.Value);
-                parameters.Add((object?)name ?? DBNull.Value);
-                parameters.Add((object?)ver ?? DBNull.Value);
-                parameters.Add((object?)eco ?? DBNull.Value);
-                parameters.Add((object?)meco ?? DBNull.Value);
-                parameters.Add((object?)cpe23Uri ?? DBNull.Value);
-                parameters.Add((object?)cpePrefix ?? DBNull.Value);
-                parameters.Add((object?)cpeProduct ?? DBNull.Value);
-                parameters.Add((object?)sourcePackageName ?? DBNull.Value);
-                parameters.Add((object?)sourcePackageVersion ?? DBNull.Value);
-            }
-            await using var insertTemp = new NpgsqlCommand($"""
-                insert into temp_sbom_match_components (
-                  component_id, purl, purl_decoded, purl_without_version, name, version,
-                  ecosystem, mapped_ecosystem, cpe23_uri, cpe_prefix, cpe_product,
-                  source_package_name, source_package_version
-                ) values {string.Join(",", values)}
-                """, conn);
-            foreach (var parameter in parameters) insertTemp.Parameters.AddWithValue(parameter);
-            await insertTemp.ExecuteNonQueryAsync(ct);
-        }
-
-        await using (var analyzeTemp = new NpgsqlCommand("analyze temp_sbom_match_components", conn))
-        {
-            await analyzeTemp.ExecuteNonQueryAsync(ct);
-        }
-
-        var matches = new List<SbomCandidateMatch>();
-        await using (var sq = new NpgsqlCommand("""
-            with candidates as (
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 1 as match_priority, 'cpe-exact' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.cpe23_uri is not null and c.primary_cpe23_uri = t.cpe23_uri
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 2 as match_priority, 'purl' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.purl_without_version is not null
-               and (c.primary_purl = t.purl_without_version or c.primary_purl = t.purl_decoded)
-               and (
-                 t.mapped_ecosystem is null
-                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
-                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
-               )
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 3 as match_priority, 'source-package' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.source_package_name is not null
-               and lower(c.package_name)=lower(t.source_package_name)
-               and (
-                 t.mapped_ecosystem is null
-                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
-                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
-               )
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 4 as match_priority, 'name' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.purl_without_version is null
-               and t.cpe23_uri is null
-               and t.source_package_name is null
-               and t.name is not null
-               and lower(c.display_name)=lower(t.name)
-               and (
-                 t.mapped_ecosystem is null
-                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
-                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
-               )
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 5 as match_priority, 'package' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.purl_without_version is null
-               and t.cpe23_uri is null
-               and t.source_package_name is null
-               and t.name is not null
-               and lower(c.package_name)=lower(t.name)
-               and (
-                 t.mapped_ecosystem is null
-                 or lower(coalesce(c.ecosystem,'')) = lower(t.mapped_ecosystem)
-                 or (position(':' in t.mapped_ecosystem) = 0 and lower(coalesce(c.ecosystem,'')) like lower(t.mapped_ecosystem) || ':%')
-               )
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 6 as match_priority, 'cpe-product' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.cpe_prefix is not null and c.primary_cpe23_uri like t.cpe_prefix || '%'
-              union all
-              select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
-                     t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
-                     c.normalized_range, c.primary_cpe23_uri, 7 as match_priority, 'cpe-product' as match_basis
-              from temp_sbom_match_components t
-              join vulnerability_affected_components c on t.cpe_product is not null
-               and lower(c.package_name)=lower(t.cpe_product)
-               and lower(coalesce(c.ecosystem,''))='cpe'
-            )
-            select distinct on (c.component_id, c.vulnerability_id)
-                   c.component_id, c.purl, c.component_version, c.component_cpe, c.source_package_version,
-                   c.vulnerability_id, c.display_name, c.ecosystem, c.normalized_range, c.primary_cpe23_uri, c.match_basis
-            from candidates c
-            order by c.component_id, c.vulnerability_id, c.match_priority,
-              case when c.normalized_range is not null and c.normalized_range <> '' and c.normalized_range ~ '^[<>]=?' then 0 else 1 end
-            """, conn))
-        {
-            await using var sr = await sq.ExecuteReaderAsync(ct);
-            while (await sr.ReadAsync(ct))
-                matches.Add(new SbomCandidateMatch(
-                    sr.GetGuid(0),
-                    sr.IsDBNull(1) ? null : sr.GetString(1),
-                    sr.IsDBNull(2) ? null : sr.GetString(2),
-                    sr.IsDBNull(3) ? null : sr.GetString(3),
-                    sr.IsDBNull(4) ? null : sr.GetString(4),
-                    sr.GetGuid(5),
-                    sr.IsDBNull(6) ? null : sr.GetString(6),
-                    sr.IsDBNull(7) ? null : sr.GetString(7),
-                    sr.IsDBNull(8) ? null : sr.GetString(8),
-                    sr.IsDBNull(9) ? null : sr.GetString(9),
-                    sr.IsDBNull(10) ? null : sr.GetString(10)));
-        }
+            var purlDec = string.IsNullOrWhiteSpace(component.Purl) ? null : Uri.UnescapeDataString(component.Purl);
+            var pwv = purlDec is null ? null : StripVersion(purlDec) ?? purlDec;
+            var meco = MapEcosystem(component.Eco);
+            return new DuckDbSbomMatchComponent(
+                component.Id,
+                component.Purl,
+                purlDec,
+                pwv,
+                component.Name,
+                component.Version,
+                component.Eco,
+                meco,
+                component.Cpe23Uri,
+                CpeProductPrefix(component.Cpe23Uri),
+                ParseCpe(component.Cpe23Uri)?.Product,
+                component.SourcePackageName,
+                component.SourcePackageVersion);
+        }).ToList();
+        var matches = await duckDb.QuerySbomCandidateMatchesAsync(matchComponents, ct);
 
         var matched = matches
             .Select(item =>
@@ -380,6 +241,7 @@ public static class SbomEndpoints
                     ? item.SourcePackageVersion ?? item.ComponentVersion
                     : item.ComponentVersion;
                 var versionMatched = ResolveSbomVersionMatch(matchedVersion, item.Range, item.Ecosystem, item.ComponentCpe, item.MatchedCpe, item.Basis);
+                var possible = versionMatched != true && IsPossibleSbomMatch(matchedVersion, item.Range, item.Basis);
                 return new
                 {
                     item.ComponentId,
@@ -388,12 +250,12 @@ public static class SbomEndpoints
                     item.DisplayName,
                     item.Ecosystem,
                     item.Range,
-                    item.Basis,
+                    Basis = possible ? $"possible-{item.Basis}" : item.Basis,
                     MatchedVersion = matchedVersion,
-                    VersionMatched = versionMatched
+                    VersionMatched = possible ? (bool?)null : versionMatched
                 };
             })
-            .Where(item => item.VersionMatched == true)
+            .Where(item => item.VersionMatched == true || item.Basis?.StartsWith("possible-", StringComparison.OrdinalIgnoreCase) == true)
             .ToList();
 
         foreach (var chunk in matched.Chunk(1000))
@@ -410,7 +272,7 @@ public static class SbomEndpoints
                 parameters.Add((object?)item.DisplayName ?? DBNull.Value);
                 parameters.Add((object?)item.Ecosystem ?? DBNull.Value);
                 parameters.Add((object?)item.Range ?? DBNull.Value);
-                parameters.Add(item.VersionMatched.GetValueOrDefault());
+                parameters.Add((object?)item.VersionMatched ?? DBNull.Value);
                 parameters.Add((object?)item.Basis ?? DBNull.Value);
                 parameters.Add((object?)item.MatchedVersion ?? DBNull.Value);
             }
@@ -464,8 +326,55 @@ public static class SbomEndpoints
         return ApiResult.Ok(new { deleted = true });
     }
 
-    private static async Task<IResult> Export(NpgsqlDataSource db, Guid id, CancellationToken ct)
+    private static async Task<IResult> Export(NpgsqlDataSource db, VulnerabilityDetailSnapshotStore snapshots, Guid id, CancellationToken ct)
     {
+        var exportRows = new List<SbomExportRow>();
+        await using var cmd = db.CreateCommand("""
+            select sc.name, sc.purl, sc.cpe23_uri, sc.vendor, sc.product, sc.version,
+                   sv.vulnerability_id,
+                   v.primary_identifier, sv.normalized_range, sv.version_matched,
+                   v.severity_label, v.max_cvss_score, v.title
+            from sbom_components sc
+            left join sbom_vulnerabilities sv on sv.sbom_component_id = sc.id
+            left join vulnerabilities v on v.id = sv.vulnerability_id
+            where sc.sbom_id = $1
+            order by lower(coalesce(sc.name, sc.product, sc.purl, sc.cpe23_uri, '')), coalesce(v.max_cvss_score, 0) desc nulls last, v.primary_identifier
+            """);
+        cmd.Parameters.AddWithValue(id);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            exportRows.Add(new SbomExportRow(
+                reader.IsDBNull(0) ? "" : reader.GetString(0),
+                reader.IsDBNull(1) ? "" : reader.GetString(1),
+                reader.IsDBNull(2) ? "" : reader.GetString(2),
+                reader.IsDBNull(3) ? "" : reader.GetString(3),
+                reader.IsDBNull(4) ? "" : reader.GetString(4),
+                reader.IsDBNull(5) ? "" : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetGuid(6),
+                reader.IsDBNull(7) ? "" : reader.GetString(7),
+                reader.IsDBNull(8) ? "" : reader.GetString(8),
+                reader.IsDBNull(9) ? null : reader.GetBoolean(9),
+                reader.IsDBNull(10) ? "" : reader.GetString(10),
+                reader.IsDBNull(11) ? null : reader.GetDecimal(11),
+                reader.IsDBNull(12) ? "" : reader.GetString(12)));
+        }
+
+        var vulnerabilityIds = exportRows
+            .Select(row => row.VulnerabilityId)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .Distinct()
+            .ToArray();
+        var snapshotDetails = await snapshots.TryGetManyAsync(vulnerabilityIds, ct);
+        var fallbackIds = vulnerabilityIds
+            .Where(vulnerabilityId =>
+                !snapshotDetails.TryGetValue(vulnerabilityId, out var detail) ||
+                string.IsNullOrWhiteSpace(SnapshotWeaknesses(detail)) ||
+                string.IsNullOrWhiteSpace(SnapshotReferenceUrls(detail)))
+            .ToArray();
+        var fallbackDetails = await LoadSbomExportFallbackDetailsAsync(db, fallbackIds, ct);
+
         var rows = new StringBuilder();
         rows.AppendLine("""
             <html><head><meta charset="utf-8"></head><body>
@@ -476,48 +385,201 @@ public static class SbomEndpoints
             </tr></thead><tbody>
             """);
 
-        await using var cmd = db.CreateCommand("""
-            select sc.name, sc.purl, sc.cpe23_uri, sc.vendor, sc.product, sc.version,
-                   v.primary_identifier, sv.normalized_range, sv.version_matched,
-                   v.severity_label, v.max_cvss_score, v.title,
-                   coalesce(w.cwes, '') as cwes,
-                   coalesce(refs.urls, '') as urls
-            from sbom_components sc
-            left join sbom_vulnerabilities sv on sv.sbom_component_id = sc.id
-            left join vulnerabilities v on v.id = sv.vulnerability_id
-            left join lateral (
-              select string_agg(distinct nullif(weakness_id,''), '; ') as cwes
-              from vulnerability_weaknesses
-              where vulnerability_id = v.id
-            ) w on true
-            left join lateral (
-              select string_agg(url, '; ') as urls
-              from (
-                select distinct url
-                from vulnerability_references
-                where vulnerability_id = v.id and url is not null
-                order by url
-                limit 20
-              ) r
-            ) refs on true
-            where sc.sbom_id = $1
-            order by lower(coalesce(sc.name, sc.product, sc.purl, sc.cpe23_uri, '')), coalesce(v.max_cvss_score, 0) desc nulls last, v.primary_identifier
-            """);
-        cmd.Parameters.AddWithValue(id);
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        foreach (var row in exportRows)
         {
-            rows.Append("<tr>");
-            for (var i = 0; i < reader.FieldCount; i++)
-                rows.Append("<td>").Append(Html(reader.IsDBNull(i) ? "" : reader.GetValue(i)?.ToString() ?? "")).Append("</td>");
-            rows.AppendLine("</tr>");
+            JsonElement? snapshotDetail = row.VulnerabilityId is Guid vulnerabilityId && snapshotDetails.TryGetValue(vulnerabilityId, out var detail)
+                ? detail
+                : null;
+            var fallback = row.VulnerabilityId is Guid fallbackId && fallbackDetails.TryGetValue(fallbackId, out var fallbackDetail)
+                ? fallbackDetail
+                : SbomExportDetail.Empty;
+            var severity = SnapshotVulnerabilityText(snapshotDetail, "severityLabel") ?? row.Severity;
+            var cvss = SnapshotVulnerabilityDecimal(snapshotDetail, "maxCvssScore") ?? row.Cvss;
+            var title = SnapshotVulnerabilityText(snapshotDetail, "title") ?? row.Title;
+            var cwes = FirstText(SnapshotWeaknesses(snapshotDetail), fallback.Cwes);
+            var urls = FirstText(SnapshotReferenceUrls(snapshotDetail), fallback.Urls);
+
+            AppendCells(rows,
+                row.ComponentName,
+                row.ComponentPurl,
+                row.Cpe23Uri,
+                row.Vendor,
+                row.Product,
+                row.ComponentVersion,
+                row.Cve,
+                row.AffectedRange,
+                row.VersionMatched?.ToString() ?? "",
+                severity,
+                cvss?.ToString() ?? "",
+                cwes,
+                urls,
+                title);
         }
+
         rows.AppendLine("</tbody></table></body></html>");
 
         return Results.File(
             Encoding.UTF8.GetBytes(rows.ToString()),
             "application/vnd.ms-excel; charset=utf-8",
             $"vultrack-sbom-{id:N}.xls");
+    }
+
+    private static async Task<IReadOnlyDictionary<Guid, SbomExportDetail>> LoadSbomExportFallbackDetailsAsync(NpgsqlDataSource db, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)
+    {
+        var details = new Dictionary<Guid, SbomExportDetail>();
+        if (vulnerabilityIds.Count == 0) return details;
+
+        await using (var cweCmd = db.CreateCommand("""
+            select vulnerability_id, string_agg(distinct nullif(weakness_id,''), '; ') as cwes
+            from vulnerability_weaknesses
+            where vulnerability_id = any($1)
+            group by vulnerability_id
+            """))
+        {
+            cweCmd.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+            await using var reader = await cweCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var vulnerabilityId = reader.GetGuid(0);
+                var current = details.TryGetValue(vulnerabilityId, out var existing)
+                    ? existing
+                    : SbomExportDetail.Empty;
+                details[vulnerabilityId] = current with
+                {
+                    Cwes = reader.IsDBNull(1) ? "" : reader.GetString(1)
+                };
+            }
+        }
+
+        await using (var urlsCmd = db.CreateCommand("""
+            with distinct_urls as (
+              select distinct vulnerability_id, url
+              from vulnerability_references
+              where vulnerability_id = any($1)
+                and url is not null
+            ),
+            ranked_urls as (
+              select vulnerability_id, url,
+                     row_number() over (partition by vulnerability_id order by url) as rn
+              from distinct_urls
+            )
+            select vulnerability_id, string_agg(url, '; ' order by url) as urls
+            from ranked_urls
+            where rn <= 20
+            group by vulnerability_id
+            """))
+        {
+            urlsCmd.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+            await using var reader = await urlsCmd.ExecuteReaderAsync(ct);
+            while (await reader.ReadAsync(ct))
+            {
+                var vulnerabilityId = reader.GetGuid(0);
+                var current = details.TryGetValue(vulnerabilityId, out var existing)
+                    ? existing
+                    : SbomExportDetail.Empty;
+                details[vulnerabilityId] = current with
+                {
+                    Urls = reader.IsDBNull(1) ? "" : reader.GetString(1)
+                };
+            }
+        }
+
+        return details;
+    }
+
+    private static void AppendCells(StringBuilder rows, params string?[] values)
+    {
+        rows.Append("<tr>");
+        foreach (var value in values)
+            rows.Append("<td>").Append(Html(value ?? "")).Append("</td>");
+        rows.AppendLine("</tr>");
+    }
+
+    private static string? SnapshotVulnerabilityText(JsonElement? detail, string propertyName)
+    {
+        if (detail is not JsonElement element ||
+            !element.TryGetProperty("vulnerability", out var vulnerability) ||
+            !vulnerability.TryGetProperty(propertyName, out var value) ||
+            value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString();
+    }
+
+    private static decimal? SnapshotVulnerabilityDecimal(JsonElement? detail, string propertyName)
+    {
+        if (detail is not JsonElement element ||
+            !element.TryGetProperty("vulnerability", out var vulnerability) ||
+            !vulnerability.TryGetProperty(propertyName, out var value) ||
+            value.ValueKind != JsonValueKind.Number)
+        {
+            return null;
+        }
+
+        return value.TryGetDecimal(out var parsed) ? parsed : null;
+    }
+
+    private static string SnapshotWeaknesses(JsonElement? detail)
+    {
+        if (detail is not JsonElement element ||
+            !element.TryGetProperty("weaknesses", out var weaknesses) ||
+            weaknesses.ValueKind != JsonValueKind.Array)
+        {
+            return "";
+        }
+
+        return string.Join("; ", weaknesses
+            .EnumerateArray()
+            .Select(weakness =>
+                JsonPropertyText(weakness, "weakness_id") ??
+                JsonPropertyText(weakness, "weaknessId") ??
+                JsonPropertyText(weakness, "description"))
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(30));
+    }
+
+    private static string SnapshotReferenceUrls(JsonElement? detail)
+    {
+        if (detail is not JsonElement element) return "";
+
+        var urls = new List<string>();
+        if (element.TryGetProperty("references", out var references) &&
+            references.ValueKind == JsonValueKind.Array)
+        {
+            urls.AddRange(references
+                .EnumerateArray()
+                .Select(reference => JsonPropertyText(reference, "url"))
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value!));
+        }
+
+        if (urls.Count == 0 &&
+            element.TryGetProperty("sourceUrls", out var sourceUrls) &&
+            sourceUrls.ValueKind == JsonValueKind.Object)
+        {
+            urls.AddRange(sourceUrls
+                .EnumerateObject()
+                .Select(property => property.Value.ValueKind == JsonValueKind.String ? property.Value.GetString() : null)
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value!));
+        }
+
+        return string.Join("; ", urls
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Order(StringComparer.OrdinalIgnoreCase)
+            .Take(20));
+    }
+
+    private static string? JsonPropertyText(JsonElement element, string propertyName)
+    {
+        return element.TryGetProperty(propertyName, out var value) &&
+               value.ValueKind != JsonValueKind.Null &&
+               value.ValueKind != JsonValueKind.Undefined
+            ? value.ValueKind == JsonValueKind.String ? value.GetString() : value.ToString()
+            : null;
     }
 
     private static string? StripVersion(string purl) =>
@@ -574,6 +636,16 @@ public static class SbomEndpoints
         return string.Equals(component.Version, matched.Version, StringComparison.OrdinalIgnoreCase);
     }
 
+    private static bool IsPossibleSbomMatch(string? version, string? range, string? basis)
+    {
+        if (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(range)) return false;
+        if (!EcosystemVersionComparer.IsCommitLikeVersion(version)) return false;
+        return basis is not null && (
+            basis.Equals("purl", StringComparison.OrdinalIgnoreCase) ||
+            basis.Equals("source-package", StringComparison.OrdinalIgnoreCase) ||
+            basis.Equals("cpe-exact", StringComparison.OrdinalIgnoreCase));
+    }
+
     private static string? CpeProductPrefix(string? cpe)
     {
         var parsed = ParseCpe(cpe);
@@ -626,7 +698,7 @@ public static class SbomEndpoints
     }
 
     private static string FirstText(params string?[] values) =>
-        values.First(x => !string.IsNullOrWhiteSpace(x))!.Trim();
+        values.FirstOrDefault(x => !string.IsNullOrWhiteSpace(x))?.Trim() ?? "";
 
     private static string? SbomNameFromSerial(string? serialNumber)
     {
@@ -641,6 +713,26 @@ public static class SbomEndpoints
     private static string UnescapeCpePart(string value) => value.Replace("\\:", ":").Replace("\\\\", "\\");
 
     private static string EscapeCpePart(string value) => value.Replace("\\", "\\\\").Replace(":", "\\:");
+
+    private sealed record SbomExportRow(
+        string ComponentName,
+        string ComponentPurl,
+        string Cpe23Uri,
+        string Vendor,
+        string Product,
+        string ComponentVersion,
+        Guid? VulnerabilityId,
+        string Cve,
+        string AffectedRange,
+        bool? VersionMatched,
+        string Severity,
+        decimal? Cvss,
+        string Title);
+
+    private sealed record SbomExportDetail(string Cwes = "", string Urls = "")
+    {
+        public static readonly SbomExportDetail Empty = new();
+    }
 
     private sealed record SbomComponentDraft(
         string? Purl,

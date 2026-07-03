@@ -26,9 +26,17 @@ Set production values in `.env`:
 POSTGRES_PASSWORD=<strong-password>
 DATABASE_URL=postgres://vultrack:<strong-password>@postgres:5432/vultrack
 VULTRACK_SCHEDULER_ENABLED=true
+VULTRACK_NORMALIZER_BACKEND=duckdb
+VULTRACK_DUCKDB_ENABLED=true
+VULTRACK_DUCKDB_PATH=/workspace/data/duckdb/vultrack-evidence.duckdb
+VULTRACK_DETAIL_SNAPSHOT_DIR=/workspace/data/vulnerability-details
 SCHEDULER_NORMALIZE_LIMIT=5000
 SCHEDULER_FETCH_TIMEOUT_SECONDS=1800
 SCHEDULER_INCLUDE_INIT_SOURCES=true
+VULTRACK_AI_ENABLED=false
+VULTRACK_AI_BASE_URL=<openai-compatible-base-url>
+VULTRACK_AI_API_KEY=<api-key>
+VULTRACK_AI_MODEL=gemini-3.1-pro-preview
 NVD_API_KEY=<optional>
 GITHUB_TOKEN=<optional-but-recommended>
 ```
@@ -72,6 +80,8 @@ For a controlled first import:
 docker compose exec api node /workspace/plugins/fetchers/run-all.mjs
 docker compose exec api npm run normalize:parallel
 ```
+
+For scheduler-driven init, set `SCHEDULER_NORMALIZE_PARALLELISM=4` first and tune upward only after watching PostgreSQL memory and I/O. The standalone `normalize:parallel` runner discovers pending sources from the database by default, so it avoids repeatedly calling idle sources during long imports.
 
 For init mirrors, run specific sources during an off-peak window:
 

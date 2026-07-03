@@ -1,4 +1,5 @@
 using System.Text.Json.Nodes;
+using System.Diagnostics;
 using Npgsql;
 
 namespace VulTrack.App;
@@ -49,39 +50,39 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             }
         }
 
-        var processed = 0;
-        var failed = 0;
-        var succeededIds = new List<Guid>();
-        var affectedVulnIds = new List<Guid>();
+        var drafts = new List<DistroNormalizationDraft>();
+        var noDraftRawIds = new HashSet<Guid>();
+        var failedRawIds = new HashSet<Guid>();
         foreach (var row in rows)
         {
             try
             {
+                var rawDraftCount = 0;
                 foreach (var identifier in row.Identifiers.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase))
                 {
                     var ids = ExtractAllIdentifiers(identifier);
                     var title = $"{identifier} affects Alpine package {row.PackageName}";
-                    var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, identifier, title, title, "active", null, null, ids, ct);
-                    var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, $"{identifier}:{row.DistroRelease}:{row.PackageName}", title, title, "active", ct);
-                    var facts = ExtractAlpineFacts(row, identifier).ToList();
-                    await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
-                    if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
+                    drafts.Add(new DistroNormalizationDraft(
+                        row.RawIndexId,
+                        $"{identifier}:{row.DistroRelease}:{row.PackageName}",
+                        row.SourceId,
+                        new VulnerabilityCanonicalDraft(identifier, title, title, "active", null, null, ids, row.SourceId, row.RawIndexId),
+                        ExtractAlpineFacts(row, identifier).ToList()));
+                    rawDraftCount++;
                 }
 
-                succeededIds.Add(row.RawIndexId);
-                processed++;
+                if (rawDraftCount == 0) noDraftRawIds.Add(row.RawIndexId);
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to normalize Alpine {Package}", row.PackageName);
-                failed++;
+                failedRawIds.Add(row.RawIndexId);
             }
         }
 
-        await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
-        await MarkNormalizedBatchAsync(connection, succeededIds, ct);
-
-        return new NormalizeBatchResult("alpine-secdb", processed, failed);
+        var result = await ProcessDistroDraftsAsync(connection, "alpine-secdb", drafts, noDraftRawIds, failedRawIds, ct);
+        await MarkNormalizedBatchAsync(connection, result.SucceededRawIndexIds, ct);
+        return new NormalizeBatchResult("alpine-secdb", result.Processed, result.Failed);
     }
 
     private async Task<NormalizeBatchResult> ProcessDebianAsync(NpgsqlConnection connection, int limit, CancellationToken ct)
@@ -109,34 +110,245 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             }
         }
 
-        var processed = 0;
-        var failed = 0;
-        var succeededIds = new List<Guid>();
-        var affectedVulnIds = new List<Guid>();
+        var drafts = new List<DistroNormalizationDraft>();
+        var noDraftRawIds = new HashSet<Guid>();
+        var failedRawIds = new HashSet<Guid>();
         foreach (var row in rows)
         {
             try
             {
-                var identifiers = ExtractAllIdentifiers(row.CveId);
-                var vulnerabilityId = await UpsertVulnerabilityAsync(connection, row.SourceId, row.RawIndexId, row.CveId, null, null, "active", null, null, identifiers, ct);
-                var recordId = await UpsertRecordAsync(connection, vulnerabilityId, row.SourceId, row.RawIndexId, row.CveId, null, null, "active", ct);
-                var facts = ExtractDebianFacts(row).ToList();
-                await InsertAffectedFactsAsync(connection, vulnerabilityId, recordId, row.SourceId, row.RawIndexId, facts, ct);
-                if (facts.Count > 0) affectedVulnIds.Add(vulnerabilityId);
-                succeededIds.Add(row.RawIndexId);
-                processed++;
+                var rowDrafts = BuildDebianDrafts(row).ToList();
+                if (rowDrafts.Count == 0)
+                {
+                    noDraftRawIds.Add(row.RawIndexId);
+                    continue;
+                }
+
+                drafts.AddRange(rowDrafts);
             }
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to normalize Debian {CveId}", row.CveId);
-                failed++;
+                failedRawIds.Add(row.RawIndexId);
+            }
+        }
+
+        var result = await ProcessDistroDraftsAsync(connection, "debian-security-tracker", drafts, noDraftRawIds, failedRawIds, ct);
+        await MarkNormalizedBatchAsync(connection, result.SucceededRawIndexIds, ct);
+        return new NormalizeBatchResult("debian-security-tracker", result.Processed, result.Failed);
+    }
+
+    private static IEnumerable<DistroNormalizationDraft> BuildDebianDrafts(DebianRow row)
+    {
+        if (IsDebianVulnerabilityIdentifier(row.CveId))
+        {
+            var identifiers = ExtractAllIdentifiers(row.CveId);
+            yield return new DistroNormalizationDraft(
+                row.RawIndexId,
+                row.CveId,
+                row.SourceId,
+                new VulnerabilityCanonicalDraft(row.CveId, null, null, "active", null, null, identifiers, row.SourceId, row.RawIndexId),
+                ExtractDebianFacts(row).ToList());
+            yield break;
+        }
+
+        var packages = JsonNode.Parse(row.Packages)?.AsObject();
+        if (packages is null) yield break;
+
+        // Older Debian staging rows were keyed by source package (for example
+        // "linux") and stored CVE objects below it. Convert those rows back
+        // into one vulnerability draft per CVE, with the original key as the
+        // affected package name.
+        var packageName = row.CveId;
+        foreach (var (identifier, advisory) in packages)
+        {
+            if (!IsDebianVulnerabilityIdentifier(identifier)) continue;
+            var facts = ExtractDebianFacts(packageName, advisory).ToList();
+            if (facts.Count == 0) continue;
+            var identifiers = ExtractAllIdentifiers(identifier);
+            yield return new DistroNormalizationDraft(
+                row.RawIndexId,
+                identifier,
+                row.SourceId,
+                new VulnerabilityCanonicalDraft(identifier, null, null, "active", null, null, identifiers, row.SourceId, row.RawIndexId),
+                facts);
+        }
+    }
+
+    private async Task<(int Processed, int Failed, IReadOnlyList<Guid> SucceededRawIndexIds)> ProcessDistroDraftsAsync(
+        NpgsqlConnection connection,
+        string sourceCode,
+        IReadOnlyList<DistroNormalizationDraft> drafts,
+        IReadOnlySet<Guid> noDraftRawIds,
+        HashSet<Guid> failedRawIds,
+        CancellationToken ct)
+    {
+        var rawDraftCounts = drafts
+            .GroupBy(x => x.RawIndexId)
+            .ToDictionary(group => group.Key, group => group.Count());
+        var canonicalized = new List<DistroCanonicalizedDraft>();
+
+        if (drafts.Count > 0)
+        {
+            var resolveWatch = Stopwatch.StartNew();
+            var cache = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, drafts.Select(x => x.CanonicalDraft).ToList(), ct);
+            resolveWatch.Stop();
+            var canonicalWatch = Stopwatch.StartNew();
+            foreach (var draft in drafts)
+            {
+                try
+                {
+                    var vulnerabilityId = await Canonicalizer.GetOrCreateCanonicalAsync(connection, draft.CanonicalDraft, cache, ct);
+                    canonicalized.Add(new DistroCanonicalizedDraft(draft, vulnerabilityId));
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to canonicalize distro record {SourceRecordId} from raw {RawIndexId}", draft.SourceRecordId, draft.RawIndexId);
+                    failedRawIds.Add(draft.RawIndexId);
+                }
+            }
+            canonicalWatch.Stop();
+
+            var remapWatch = Stopwatch.StartNew();
+            var currentCanonicalIds = await Canonicalizer.ResolveCanonicalIdsBatchAsync(connection, canonicalized.Select(x => x.Draft.CanonicalDraft).ToList(), ct);
+            var remapped = 0;
+            canonicalized = canonicalized
+                .Select(item =>
+                {
+                    var currentId = ResolveCanonicalIdFromCache(item.Draft.CanonicalDraft, currentCanonicalIds, item.VulnerabilityId);
+                    if (currentId != item.VulnerabilityId) remapped++;
+                    return item with { VulnerabilityId = currentId };
+                })
+                .ToList();
+            remapWatch.Stop();
+
+            logger.LogInformation("Distro normalize {SourceCode}: parsed={Parsed}, canonicalized={Canonicalized}, resolve_ms={ResolveMs}, canonical_ms={CanonicalMs}.",
+                sourceCode, drafts.Count, canonicalized.Count, resolveWatch.ElapsedMilliseconds, canonicalWatch.ElapsedMilliseconds);
+            if (remapped > 0)
+            {
+                logger.LogInformation("Distro normalize {SourceCode}: remapped {Remapped} in-batch canonical ids after merges in {RemapMs} ms.",
+                    sourceCode, remapped, remapWatch.ElapsedMilliseconds);
+            }
+        }
+
+        var writeResult = await ProcessDistroCanonicalizedBatchAsync(connection, sourceCode, canonicalized, ct);
+        foreach (var rawId in writeResult.FailedRawIndexIds) failedRawIds.Add(rawId);
+
+        var succeededDraftCounts = writeResult.SucceededRawIndexIds
+            .Where(rawId => !failedRawIds.Contains(rawId))
+            .GroupBy(rawId => rawId)
+            .ToDictionary(group => group.Key, group => group.Count());
+
+        var succeededRawIds = new HashSet<Guid>(noDraftRawIds.Where(rawId => !failedRawIds.Contains(rawId)));
+        foreach (var (rawId, expectedCount) in rawDraftCounts)
+        {
+            if (!failedRawIds.Contains(rawId) &&
+                succeededDraftCounts.TryGetValue(rawId, out var succeededCount) &&
+                succeededCount == expectedCount)
+            {
+                succeededRawIds.Add(rawId);
+            }
+        }
+
+        var attemptedRawIds = rawDraftCounts.Keys.Concat(noDraftRawIds).Concat(failedRawIds).Distinct().ToArray();
+        var failedCount = attemptedRawIds.Count(rawId => !succeededRawIds.Contains(rawId));
+        return (succeededRawIds.Count, failedCount, succeededRawIds.ToArray());
+    }
+
+    private async Task<(IReadOnlyList<Guid> SucceededRawIndexIds, IReadOnlyList<Guid> FailedRawIndexIds)> ProcessDistroCanonicalizedBatchAsync(
+        NpgsqlConnection connection,
+        string sourceCode,
+        IReadOnlyList<DistroCanonicalizedDraft> canonicalized,
+        CancellationToken ct)
+    {
+        if (canonicalized.Count == 0) return ([], []);
+
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            try
+            {
+                var recordInputs = canonicalized
+                    .Select(item => new VulnerabilityRecordBatchItem(
+                        item.VulnerabilityId,
+                        item.Draft.SourceId,
+                        item.Draft.RawIndexId,
+                        item.Draft.SourceRecordId,
+                        item.Draft.CanonicalDraft.Title,
+                        item.Draft.CanonicalDraft.Description,
+                        "active"))
+                    .ToList();
+
+                var watch = Stopwatch.StartNew();
+                var recordIds = await UpsertRecordsBatchAsync(connection, recordInputs, ct);
+                var recordsMs = watch.ElapsedMilliseconds;
+                var affectedItems = new List<AffectedFactBatchItem>();
+                var affectedVulnIds = new List<Guid>();
+                var succeededRawIds = new List<Guid>();
+
+                foreach (var item in canonicalized)
+                {
+                    var key = (item.Draft.SourceId, item.Draft.SourceRecordId, item.Draft.RawIndexId);
+                    if (!recordIds.TryGetValue(key, out var recordId))
+                        throw new InvalidOperationException($"Missing vulnerability record id for distro raw {item.Draft.RawIndexId}");
+
+                    affectedItems.Add(new AffectedFactBatchItem(item.VulnerabilityId, recordId, item.Draft.SourceId, item.Draft.RawIndexId, item.Draft.AffectedFacts));
+                    if (item.Draft.AffectedFacts.Count > 0) affectedVulnIds.Add(item.VulnerabilityId);
+                    succeededRawIds.Add(item.Draft.RawIndexId);
+                }
+
+                watch.Restart();
+                await InsertAffectedFactsBatchAsync(connection, affectedItems, ct);
+                var affectedMs = watch.ElapsedMilliseconds;
+                watch.Restart();
+                await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
+                var flushMs = watch.ElapsedMilliseconds;
+                logger.LogInformation("Distro batch write {SourceCode} count={Count}: records_ms={RecordsMs}, affected_ms={AffectedMs}, flush_ms={FlushMs}.",
+                    sourceCode, canonicalized.Count, recordsMs, affectedMs, flushMs);
+                return (succeededRawIds, []);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.DeadlockDetected && attempt == 1)
+            {
+                logger.LogWarning(ex, "Distro batch normalize {SourceCode} deadlocked for {Count} records; retrying batch once.", sourceCode, canonicalized.Count);
+                await Task.Delay(500, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Distro batch normalize {SourceCode} failed for {Count} records; falling back to per-record writes.", sourceCode, canonicalized.Count);
+                return await ProcessDistroCanonicalizedIndividuallyAsync(connection, canonicalized, ct);
+            }
+        }
+
+        return await ProcessDistroCanonicalizedIndividuallyAsync(connection, canonicalized, ct);
+    }
+
+    private async Task<(IReadOnlyList<Guid> SucceededRawIndexIds, IReadOnlyList<Guid> FailedRawIndexIds)> ProcessDistroCanonicalizedIndividuallyAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<DistroCanonicalizedDraft> canonicalized,
+        CancellationToken ct)
+    {
+        var succeededRawIds = new List<Guid>();
+        var failedRawIds = new List<Guid>();
+        var affectedVulnIds = new List<Guid>();
+
+        foreach (var item in canonicalized)
+        {
+            try
+            {
+                var draft = item.Draft;
+                var recordId = await UpsertRecordAsync(connection, item.VulnerabilityId, draft.SourceId, draft.RawIndexId, draft.SourceRecordId, draft.CanonicalDraft.Title, draft.CanonicalDraft.Description, "active", ct);
+                await InsertAffectedFactsAsync(connection, item.VulnerabilityId, recordId, draft.SourceId, draft.RawIndexId, draft.AffectedFacts, ct);
+                if (draft.AffectedFacts.Count > 0) affectedVulnIds.Add(item.VulnerabilityId);
+                succeededRawIds.Add(draft.RawIndexId);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to write distro record {SourceRecordId} from raw {RawIndexId}", item.Draft.SourceRecordId, item.Draft.RawIndexId);
+                failedRawIds.Add(item.Draft.RawIndexId);
             }
         }
 
         await FlushAffectedProjectionsAsync(connection, affectedVulnIds, ct);
-        await MarkNormalizedBatchAsync(connection, succeededIds, ct);
-
-        return new NormalizeBatchResult("debian-security-tracker", processed, failed);
+        return (succeededRawIds, failedRawIds);
     }
 
     private static IEnumerable<AffectedFactDraft> ExtractDebianFacts(DebianRow row)
@@ -146,28 +358,34 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
         foreach (var (name, value) in packages)
         {
             if (string.IsNullOrWhiteSpace(name)) continue;
-            var releases = value?["releases"]?.AsObject();
-            if (releases is null) continue;
-            foreach (var (release, advisory) in releases)
+            foreach (var fact in ExtractDebianFacts(name, value))
+                yield return fact;
+        }
+    }
+
+    private static IEnumerable<AffectedFactDraft> ExtractDebianFacts(string packageName, JsonNode? value)
+    {
+        var releases = value?["releases"]?.AsObject();
+        if (releases is null) yield break;
+        foreach (var (release, advisory) in releases)
+        {
+            var status = advisory?["status"]?.GetValue<string>()?.ToLowerInvariant();
+            var fixedVersion = advisory?["fixed_version"]?.GetValue<string>();
+            var range = status switch
             {
-                var status = advisory?["status"]?.GetValue<string>()?.ToLowerInvariant();
-                var fixedVersion = advisory?["fixed_version"]?.GetValue<string>();
-                var range = status switch
-                {
-                    "open" => ">= 0",
-                    "resolved" when !string.IsNullOrWhiteSpace(fixedVersion) && fixedVersion != "0" => $"< {fixedVersion}",
-                    _ => null
-                };
-                if (range is null) continue;
-                yield return new AffectedFactDraft(
-                    "package",
-                    DebianEcosystem(release),
-                    name,
-                    $"pkg:deb/debian/{Uri.EscapeDataString(name)}",
-                    range,
-                    $"security-tracker:{status}",
-                    advisory?.ToJsonString() ?? "{}");
-            }
+                "open" => ">= 0",
+                "resolved" when !string.IsNullOrWhiteSpace(fixedVersion) && fixedVersion != "0" => $"< {fixedVersion}",
+                _ => null
+            };
+            if (range is null) continue;
+            yield return new AffectedFactDraft(
+                "package",
+                DebianEcosystem(release),
+                packageName,
+                $"pkg:deb/debian/{Uri.EscapeDataString(packageName)}",
+                range,
+                $"security-tracker:{status}",
+                advisory?.ToJsonString() ?? "{}");
         }
     }
 
@@ -217,6 +435,19 @@ public sealed class DistroRawNormalizer(IEnumerable<IAffectedComponentHook> affe
             ids.Add(match.Groups[1].Value);
         return IdentifiersFrom(ids);
     }
+
+    private static bool IsDebianVulnerabilityIdentifier(string value) =>
+        value.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)
+        || value.StartsWith("TEMP-", StringComparison.OrdinalIgnoreCase);
+
+    private sealed record DistroNormalizationDraft(
+        Guid RawIndexId,
+        string SourceRecordId,
+        Guid SourceId,
+        VulnerabilityCanonicalDraft CanonicalDraft,
+        IReadOnlyList<AffectedFactDraft> AffectedFacts);
+
+    private sealed record DistroCanonicalizedDraft(DistroNormalizationDraft Draft, Guid VulnerabilityId);
 
     private sealed record AlpineRow(Guid RawIndexId, string DistroRelease, string PackageName, string[] Identifiers, string Secfixes, Guid SourceId);
     private sealed record DebianRow(Guid RawIndexId, string CveId, string Packages, Guid SourceId);

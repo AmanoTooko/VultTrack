@@ -79,7 +79,7 @@ npm run fetch:all:smoke
 | `EXPLOITDB_ARCHIVE_ARTIFACTS` | `0` | 设置为 `1` 时才逐条下载并归档 Exploit-DB PoC 文件 |
 | `FETCHER_USER_AGENT` | `VulTrack/0.1` | HTTP User-Agent |
 | `NVD_API_KEY` | - | NVD API Key (避免 Cloudflare 限速) |
-| `NVD_PAGE_SIZE` | `2000` | NVD API 每页条数 |
+| `NVD_PAGE_SIZE` | `1000` | NVD API 每页条数；较小分页可降低上游 503 的重试成本 |
 | `GITHUB_TOKEN` | - | GitHub Personal Access Token |
 | `OSS_INDEX_USERNAME` / `OSS_INDEX_TOKEN` | - | Sonatype OSS Index 凭据，用于 Maven 独立漏洞 API |
 | `OSV_IDS` | smoke 时 `GHSA-jfh8-c2jp-5v3q` | smoke 模式指定 OSV ID |
@@ -90,7 +90,8 @@ npm run fetch:all:smoke
 | `MAVEN_COMPONENTS` | `group:artifact@version,...` | Maven advisory/metadata 输入 |
 | `NUGET_PACKAGES` | `Newtonsoft.Json,...` | NuGet metadata 输入 |
 | `CVE_LIST_LOCAL_PATH` | `data/mirrors/cvelistV5` | CVE List v5 本地路径 |
-| `RAW_OBJECT_PATH` | `./data/raw-objects` | 原始数据存储路径 |
+| `RAW_OBJECT_STORE` | `pgsql` | 原始数据存储；默认压缩写入 PostgreSQL，`filesystem` 仅用于兼容旧部署 |
+| `RAW_OBJECT_PATH` | `./data/raw-objects` | 仅在 `RAW_OBJECT_STORE=filesystem/dual` 时使用 |
 
 ## 数据流程
 

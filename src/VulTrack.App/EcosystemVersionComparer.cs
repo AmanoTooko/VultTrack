@@ -21,6 +21,15 @@ public static class EcosystemVersionComparer
 
         foreach (var constraint in constraints)
         {
+            if (IsCommitLikeVersion(version) || IsCommitLikeVersion(constraint.Version))
+            {
+                var exactHashMatch = constraint.Op is "=" or "==" &&
+                                     string.Equals(NormalizeCommitLikeVersion(version), NormalizeCommitLikeVersion(constraint.Version), StringComparison.OrdinalIgnoreCase);
+                if (exactHashMatch) continue;
+                Cache.TryAdd(cacheKey, null);
+                return null;
+            }
+
             var compared = Compare(version, constraint.Version, ecosystem);
             var matched = constraint.Op switch
             {
@@ -40,6 +49,23 @@ public static class EcosystemVersionComparer
 
         Cache.TryAdd(cacheKey, true);
         return true;
+    }
+
+    public static bool IsCommitLikeVersion(string? version)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return false;
+        var value = NormalizeCommitLikeVersion(version);
+        return value.StartsWith("git+", StringComparison.OrdinalIgnoreCase) ||
+               Regex.IsMatch(value, "^[0-9a-f]{7,40}$", RegexOptions.IgnoreCase);
+    }
+
+    private static string NormalizeCommitLikeVersion(string version)
+    {
+        var value = version.Trim();
+        var at = value.LastIndexOf('@');
+        if (at >= 0 && at < value.Length - 1) value = value[(at + 1)..];
+        var slash = value.LastIndexOf('/');
+        return slash >= 0 && slash < value.Length - 1 ? value[(slash + 1)..] : value;
     }
 
     public static int Compare(string left, string right, string? ecosystem = null)

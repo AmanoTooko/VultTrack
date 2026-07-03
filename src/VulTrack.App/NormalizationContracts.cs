@@ -26,6 +26,11 @@ public interface IAffectedComponentHook
     Task FlushProjectionsAsync(NpgsqlConnection connection, IReadOnlyList<Guid> vulnerabilityIds, CancellationToken ct);
 }
 
+public interface IBatchAffectedComponentHook : IAffectedComponentHook
+{
+    Task OnAffectedFactsBatchAsync(NpgsqlConnection connection, IReadOnlyList<AffectedFactBatchItem> items, CancellationToken ct);
+}
+
 public interface IVulnerabilityCanonicalizer
 {
     Task<Guid> UpsertCanonicalAsync(NpgsqlConnection connection, VulnerabilityCanonicalDraft draft, CancellationToken ct);
@@ -34,6 +39,47 @@ public interface IVulnerabilityCanonicalizer
 }
 
 public sealed record NormalizeBatchResult(string SourceCode, int Processed, int Failed);
+
+public sealed record VulnerabilityRecordBatchItem(
+    Guid VulnerabilityId,
+    Guid SourceId,
+    Guid RawIndexId,
+    string SourceRecordId,
+    string? Title,
+    string? Description,
+    string? Status);
+
+public sealed record DescriptionBatchItem(
+    Guid VulnerabilityId,
+    Guid VulnerabilityRecordId,
+    Guid SourceId,
+    IReadOnlyList<DescriptionDraft> Descriptions);
+
+public sealed record SeverityScoreBatchItem(
+    Guid VulnerabilityId,
+    Guid VulnerabilityRecordId,
+    Guid SourceId,
+    Guid RawIndexId,
+    IReadOnlyList<SeverityScoreDraft> Scores);
+
+public sealed record ReferenceBatchItem(
+    Guid VulnerabilityId,
+    Guid VulnerabilityRecordId,
+    Guid SourceId,
+    IReadOnlyList<ReferenceDraft> References);
+
+public sealed record WeaknessBatchItem(
+    Guid VulnerabilityId,
+    Guid VulnerabilityRecordId,
+    Guid SourceId,
+    IReadOnlyList<WeaknessDraft> Weaknesses);
+
+public sealed record AffectedFactBatchItem(
+    Guid VulnerabilityId,
+    Guid VulnerabilityRecordId,
+    Guid SourceId,
+    Guid RawIndexId,
+    IReadOnlyList<AffectedFactDraft> Facts);
 
 public sealed record VulnerabilityCanonicalDraft(
     string PreferredIdentifier,
