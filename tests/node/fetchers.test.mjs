@@ -678,6 +678,17 @@ test('Nuclei fetcher refuses truncated revisions without advancing the completed
   assert.equal(rejected.checkpoint.observedGitRevision, 'revision-b');
   assert.equal(rejected.checkpoint.skipped, false);
 
+  const empty = nucleiSnapshotPlan({
+    gitRevision: 'revision-a',
+    completedGitRevision: 'revision-a',
+    snapshotComplete: true,
+    recordCount: 2
+  }, 'revision-b', 0, 5000);
+  assert.equal(empty.snapshotComplete, false);
+  assert.equal(empty.checkpoint.rejectedReason, 'empty_snapshot');
+  assert.equal(empty.checkpoint.completedGitRevision, 'revision-a');
+  assert.equal(empty.checkpoint.gitRevision, 'revision-a');
+
   const complete = nucleiSnapshotPlan({}, 'revision-b', 4348, 5000);
   assert.equal(complete.snapshotComplete, true);
   assert.equal(complete.checkpoint.snapshotComplete, true);
@@ -694,7 +705,10 @@ test('Nuclei DuckDB projection applies a complete revision before finalizing the
   assert.doesNotMatch(fetcher, /commitSpoolSegment/);
   assert.match(fetcher, /snapshotComplete: true/);
   assert.match(spool, /Nuclei spool record is not a complete revision snapshot/);
-  assert.match(spool, /EnsureCurrentNucleiSnapshot\(nucleiSnapshotId\)/);
+  assert.match(spool, /var expectedRecordCount = EnsureCurrentNucleiSnapshot\(nucleiSnapshotId\)/);
+  assert.match(spool, /records != expectedRecordCount/);
+  assert.match(spool, /exploitBatch\.Count != expectedRecordCount/);
+  assert.match(spool, /distinctRawIds != expectedRecordCount/);
   assert.match(spool, /ApplyNucleiSnapshotAsync\(exploitBatch, nucleiSnapshotId!, ct\)/);
   assert.ok(
     spool.indexOf('ApplyNucleiSnapshotAsync(exploitBatch, nucleiSnapshotId!, ct)') <
@@ -708,6 +722,8 @@ test('Nuclei DuckDB projection applies a complete revision before finalizing the
   );
   assert.match(nucleiApply, /UpsertExploitRowsAsync\(connection, uniqueRows, snapshotId, ct\)/);
   assert.match(nucleiApply, /snapshot_id is distinct from \{SqlValue\(snapshotId\)\}/);
+  assert.match(nucleiApply, /NUCLEI_ALLOW_LARGE_SNAPSHOT_DROP/);
+  assert.match(nucleiApply, /NucleiSnapshotDropThreshold/);
   assert.match(nucleiApply, /Nuclei snapshot verification failed/);
   assert.doesNotMatch(nucleiApply, /delete from exploits/i);
 

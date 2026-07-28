@@ -54,7 +54,7 @@ export async function run(client, ctx) {
 
   const plan = nucleiSnapshotPlan(checkpoint, mirror.revision, templates.length, max);
   if (!plan.snapshotComplete) {
-    console.error(`[${sourceCode}] refusing truncated revision ${mirror.revision}: ${templates.length} templates exceed FETCHER_MAX_RECORDS=${max}`);
+    console.error(`[${sourceCode}] refusing incomplete revision ${mirror.revision}: ${templates.length} eligible templates (${plan.checkpoint.rejectedReason})`);
     return { fetchedCount: 0, parsedCount: templates.length, checkpoint: plan.checkpoint };
   }
 
@@ -108,7 +108,10 @@ export async function run(client, ctx) {
 
 export function nucleiSnapshotPlan(previousCheckpoint, revision, recordCount, maxRecords) {
   const observedAt = new Date().toISOString();
-  if (recordCount > maxRecords) {
+  const rejectedReason = recordCount <= 0
+    ? 'empty_snapshot'
+    : (recordCount > maxRecords ? 'max_records_exceeded' : null);
+  if (rejectedReason) {
     return {
       snapshotComplete: false,
       checkpoint: {
@@ -116,6 +119,7 @@ export function nucleiSnapshotPlan(previousCheckpoint, revision, recordCount, ma
         snapshotComplete: false,
         observedGitRevision: revision,
         rejectedRecordCount: recordCount,
+        rejectedReason,
         skipped: false,
         lastRejectedAt: observedAt
       }

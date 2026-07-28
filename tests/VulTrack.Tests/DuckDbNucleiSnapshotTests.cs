@@ -11,7 +11,9 @@ public sealed class DuckDbNucleiSnapshotTests
     public async Task CompleteRevision_ReplacesTheActiveSetWithoutDuplicateKeys()
     {
         var root = Path.Combine(Path.GetTempPath(), "vultrack-nuclei-tests", Guid.NewGuid().ToString("N"));
+        var previousAllowLargeDrop = Environment.GetEnvironmentVariable("NUCLEI_ALLOW_LARGE_SNAPSHOT_DROP");
         Directory.CreateDirectory(root);
+        Environment.SetEnvironmentVariable("NUCLEI_ALLOW_LARGE_SNAPSHOT_DROP", "false");
         try
         {
             var configuration = new ConfigurationBuilder()
@@ -27,6 +29,7 @@ public sealed class DuckDbNucleiSnapshotTests
             var firstId = Guid.NewGuid();
             var removedId = Guid.NewGuid();
             var addedId = Guid.NewGuid();
+            var thirdId = Guid.NewGuid();
             var first = await store.ApplyNucleiSnapshotAsync(
             [
                 Exploit(firstId, "CVE-2024-0001", "revision-a title"),
@@ -39,14 +42,22 @@ public sealed class DuckDbNucleiSnapshotTests
             [
                 Exploit(firstId, "CVE-2024-0001", "revision-b updated title"),
                 Exploit(addedId, "CVE-2024-0003", "new in revision-b"),
+                Exploit(thirdId, "CVE-2024-0004", "another revision-b template"),
                 Exploit(addedId, "CVE-2024-0003", "new in revision-b")
             ], "revision-b", CancellationToken.None);
 
-            Assert.Equal(2, second.ActiveRows);
-            Assert.Equal(2, second.ActiveDistinctRawIds);
+            Assert.Equal(3, second.ActiveRows);
+            Assert.Equal(3, second.ActiveDistinctRawIds);
             Assert.Single(await store.QueryExploitsAsync("CVE-2024-0001", 10, CancellationToken.None));
             Assert.Empty(await store.QueryExploitsAsync("CVE-2024-0002", 10, CancellationToken.None));
             Assert.Single(await store.QueryExploitsAsync("CVE-2024-0003", 10, CancellationToken.None));
+            Assert.Single(await store.QueryExploitsAsync("CVE-2024-0004", 10, CancellationToken.None));
+            Assert.Equal(second, await store.GetNucleiSnapshotStatsAsync(CancellationToken.None));
+
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                store.ApplyNucleiSnapshotAsync(
+                    [Exploit(firstId, "CVE-2024-0001", "unexpected small revision")],
+                    "revision-c", CancellationToken.None));
             Assert.Equal(second, await store.GetNucleiSnapshotStatsAsync(CancellationToken.None));
 
             await Assert.ThrowsAsync<InvalidDataException>(() =>
@@ -56,6 +67,7 @@ public sealed class DuckDbNucleiSnapshotTests
         }
         finally
         {
+            Environment.SetEnvironmentVariable("NUCLEI_ALLOW_LARGE_SNAPSHOT_DROP", previousAllowLargeDrop);
             Directory.Delete(root, recursive: true);
         }
     }
@@ -97,6 +109,17 @@ public sealed class DuckDbNucleiSnapshotTests
                     new DuckDbSpoolIngestRequest(recoveredName, BatchSize: 100, DeleteOnSuccess: false), CancellationToken.None);
                 Assert.Single(await store.QueryExploitsAsync("CVE-2024-0100", 10, CancellationToken.None));
 
+                await WriteCheckpointAsync(root, "revision-c", recordCount: 2);
+                var countMismatchName = "nuclei-templates-count-mismatch-s0000.ndjson.ready";
+                await WriteReadySpoolAsync(root, countMismatchName, "revision-c", "CVE-2024-0102");
+                await Assert.ThrowsAsync<InvalidDataException>(() => normalizer.IngestSpoolAsync(
+                    new DuckDbSpoolIngestRequest(countMismatchName, BatchSize: 100, DeleteOnSuccess: false), CancellationToken.None));
+                Assert.True(File.Exists(Path.Combine(root, "incoming", countMismatchName.Replace(".ready", ".failed", StringComparison.Ordinal))));
+                Assert.Single(await store.QueryExploitsAsync("CVE-2024-0100", 10, CancellationToken.None));
+                Assert.Empty(await store.QueryExploitsAsync("CVE-2024-0102", 10, CancellationToken.None));
+
+                await WriteCheckpointAsync(root, "revision-b");
+
                 var oldName = "nuclei-templates-old-revision-s0000.ndjson.ready";
                 await WriteReadySpoolAsync(root, oldName, "revision-a", "CVE-2024-0101");
                 await Assert.ThrowsAsync<InvalidDataException>(() => normalizer.IngestSpoolAsync(
@@ -127,13 +150,19 @@ public sealed class DuckDbNucleiSnapshotTests
         null,
         "2026-07-28T00:00:00Z");
 
-    private static async Task WriteCheckpointAsync(string root, string revision)
+    private static async Task WriteCheckpointAsync(string root, string revision, int recordCount = 1)
     {
         var state = Path.Combine(root, "state");
         Directory.CreateDirectory(state);
         await File.WriteAllTextAsync(Path.Combine(state, "nuclei-templates.json"), JsonSerializer.Serialize(new
         {
-            checkpoint = new { gitRevision = revision, completedGitRevision = revision, snapshotComplete = true }
+            checkpoint = new
+            {
+                gitRevision = revision,
+                completedGitRevision = revision,
+                snapshotComplete = true,
+                recordCount
+            }
         }));
     }
 
