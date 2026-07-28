@@ -1,7 +1,7 @@
 import { authHeaders, fetchJson } from '../lib/http.mjs';
 import { getIntEnv, getRootPath } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
-import { resumeInitOffset, saveCheckpoint, saveInitProgress, writeRecord } from '../lib/db.mjs';
+import { commitSpoolSegment, resumeInitOffset, saveCheckpoint, saveInitProgress, writeRecord } from '../lib/db.mjs';
 import { upsertNvdCve } from '../lib/staging.mjs';
 
 export const sourceCode = 'nvd-cve';
@@ -9,6 +9,125 @@ export const sourceCode = 'nvd-cve';
 const NVD_MAX_DATE_WINDOW_DAYS = 120;
 const GIT_REPO = 'https://github.com/fkie-cad/nvd-json-data-feeds.git';
 const MIRROR_DIR = 'data/mirrors/nvd-cve-feeds';
+
+export async function initFromOfficialFeeds(client, ctx, max) {
+  const zlib = await import('node:zlib');
+  const { promisify } = await import('node:util');
+  const gunzip = promisify(zlib.gunzip);
+  const checkpoint = ctx.source.checkpoint_json ?? {};
+  const startYear = Math.max(2002, getIntEnv('NVD_BASELINE_START_YEAR', 2002));
+  const endYear = Math.min(new Date().getUTCFullYear(), getIntEnv('NVD_BASELINE_END_YEAR', new Date().getUTCFullYear()));
+  const mode = 'official-feeds-v2';
+  const canResume = checkpoint.initComplete === false && checkpoint.initMode === mode;
+  const resumeYear = canResume ? Math.max(startYear, Number(checkpoint.year) || startYear) : startYear;
+  const resumeOffset = canResume ? Math.max(0, Number(checkpoint.itemOffset) || 0) : 0;
+  let count = 0;
+  let latestMod = checkpoint.latestModStartDate ?? null;
+  let nextYear = resumeYear;
+  let nextOffset = resumeOffset;
+
+  for (let year = resumeYear; year <= endYear && count < max; year++) {
+    const url = `https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-${year}.json.gz`;
+    console.error(`[nvd-cve] downloading official feed ${year}...`);
+    const compressed = await fetchOfficialFeed(url);
+    const feed = JSON.parse((await gunzip(compressed)).toString('utf8'));
+    const items = feed.vulnerabilities ?? [];
+    const offset = year === resumeYear ? resumeOffset : 0;
+    console.error(`[nvd-cve] feed ${year}: ${items.length} records, starting at ${offset}`);
+
+    for (let index = offset; index < items.length && count < max; index++) {
+      const item = items[index];
+      const cve = item.cve;
+      if (!cve?.id) continue;
+      if (cve.lastModified && (!latestMod || cve.lastModified > latestMod)) latestMod = cve.lastModified;
+      await writeRecord(client, ctx, {
+        externalKey: cve.id,
+        externalId: cve.id,
+        sourceUrl: `https://nvd.nist.gov/vuln/detail/${cve.id}`,
+        publishedAt: cve.published,
+        modifiedAt: cve.lastModified,
+        identifiers: [cve.id],
+        recordHash: sha256(stableJson(item)),
+        payload: item
+      });
+      count++;
+      nextYear = year;
+      nextOffset = index + 1;
+      if ((index + 1) % 5000 === 0) {
+        await saveInitProgress(client, ctx, {
+          initMode: mode,
+          year,
+          itemOffset: index + 1,
+          startYear,
+          endYear,
+          latestModStartDate: latestMod
+        });
+        console.error(`[nvd-cve] streamed ${count} records through ${year}:${index + 1}`);
+      }
+    }
+
+    if (nextOffset >= items.length) {
+      nextYear = year + 1;
+      nextOffset = 0;
+    }
+    if (client.__spool) {
+      const segmentCheckpoint = {
+        initMode: mode,
+        initComplete: nextYear > endYear,
+        year: nextYear,
+        itemOffset: nextOffset,
+        startYear,
+        endYear,
+        latestModStartDate: latestMod,
+        lastFetched: new Date().toISOString()
+      };
+      await commitSpoolSegment(client, ctx.source.id, segmentCheckpoint);
+      ctx.source.checkpoint_json = segmentCheckpoint;
+      console.error(`[nvd-cve] committed feed segment ${year}, next year ${nextYear}`);
+    }
+  }
+
+  const complete = nextYear > endYear;
+  return {
+    fetchedCount: count,
+    parsedCount: count,
+    checkpoint: {
+      initMode: mode,
+      initComplete: complete,
+      year: nextYear,
+      itemOffset: nextOffset,
+      startYear,
+      endYear,
+      latestModStartDate: latestMod,
+      lastFetched: new Date().toISOString()
+    }
+  };
+}
+
+async function fetchOfficialFeed(url) {
+  // NVD's CDN can be well below 200 KiB/s from the compact host. Annual
+  // archives are currently around 25 MiB, so a short generic HTTP timeout can
+  // repeatedly abort a healthy transfer just before it completes.
+  const timeoutMs = Math.max(120000, getIntEnv('NVD_FEED_TIMEOUT_MS', 900000));
+  let lastError;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: { 'user-agent': 'VulTrack/0.1' },
+        signal: AbortSignal.timeout(timeoutMs)
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
+      return Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      lastError = error;
+      if (attempt === 4) break;
+      const delayMs = attempt * 5000;
+      console.error(`[nvd-cve] feed download failed (${error.message}), retrying in ${delayMs / 1000}s`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+  throw lastError;
+}
 
 function runGit(spawnSync, args) {
   const result = spawnSync('git', args, { stdio: 'inherit' });

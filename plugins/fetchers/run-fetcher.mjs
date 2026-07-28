@@ -1,5 +1,14 @@
 #!/usr/bin/env node
-import { withClient, getSource, startRun, finishRun, saveCheckpoint, recordError } from './lib/db.mjs';
+import {
+  withClient,
+  getSource,
+  startRun,
+  finishRun,
+  saveCheckpoint,
+  recordError,
+  flushWriteBatch,
+  rollbackWriteBatch
+} from './lib/db.mjs';
 
 const source = getArg('--source');
 if (!source) {
@@ -28,13 +37,14 @@ await withClient(async (client) => {
   const ctx = { source: sourceRow, run };
   try {
     const result = await mod.run(client, ctx);
+    await flushWriteBatch(client);
     if (result.checkpoint) {
       await saveCheckpoint(client, sourceRow.id, result.checkpoint);
     }
     await finishRun(client, run.id, {
       status: 'succeeded',
       fetchedCount: result.fetchedCount,
-      changedCount: result.fetchedCount,
+      changedCount: result.changedCount ?? result.fetchedCount,
       parsedCount: result.parsedCount,
       errorCount: 0,
       checkpoint: result.checkpoint,
@@ -42,6 +52,7 @@ await withClient(async (client) => {
     });
     console.log(JSON.stringify({ ok: true, source, runId: run.id, ...result }));
   } catch (error) {
+    await rollbackWriteBatch(client);
     await recordError(client, ctx, 'fetch', error);
     await finishRun(client, run.id, {
       status: 'failed',

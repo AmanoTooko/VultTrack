@@ -11,15 +11,31 @@ export const sourceCode = 'nuclei-templates';
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
+  const checkpoint = ctx.source.checkpoint_json ?? {};
   const mirror = await ensureGitMirror(sourceCode, 'https://github.com/projectdiscovery/nuclei-templates.git', 'main');
+  const completedRevision = checkpoint.completedGitRevision ??
+    (checkpoint.snapshotComplete === false ? null : checkpoint.gitRevision);
+  if (completedRevision === mirror.revision && !process.env.FETCHER_FORCE) {
+    return {
+      fetchedCount: 0,
+      parsedCount: 0,
+      checkpoint: {
+        ...checkpoint,
+        completedGitRevision: completedRevision,
+        gitRevision: completedRevision,
+        snapshotComplete: true,
+        skipped: true,
+        lastChecked: new Date().toISOString()
+      }
+    };
+  }
   const files = await walkFiles(
     mirror.dir,
     (file) => /\.(ya?ml)$/i.test(file) && !file.includes('/.github/')
   );
 
-  let count = 0;
+  const templates = [];
   for (const file of files) {
-    if (count >= max) break;
     const body = await fs.readFile(file, 'utf8');
     if (!/\bcve\b/i.test(body)) continue;
     let doc;
@@ -33,49 +49,91 @@ export async function run(client, ctx) {
     const tags = String(doc?.info?.tags ?? '').split(',').map((x) => x.trim()).filter(Boolean);
     const rel = path.relative(mirror.dir, file);
     const verified = Boolean(doc?.info?.metadata?.verified);
+    templates.push({ body, doc, identifiers, tags, rel, verified });
+  }
+
+  const plan = nucleiSnapshotPlan(checkpoint, mirror.revision, templates.length, max);
+  if (!plan.snapshotComplete) {
+    console.error(`[${sourceCode}] refusing truncated revision ${mirror.revision}: ${templates.length} templates exceed FETCHER_MAX_RECORDS=${max}`);
+    return { fetchedCount: 0, parsedCount: templates.length, checkpoint: plan.checkpoint };
+  }
+
+  const fetchedAt = new Date().toISOString();
+  for (const template of templates) {
     const artifact = await writeArtifact(client, ctx, {
-      externalKey: rel,
-      filename: rel,
-      body,
+      externalKey: template.rel,
+      filename: template.rel,
+      body: template.body,
       contentType: 'application/yaml',
       schemaHint: 'nuclei-template'
     });
     const item = sanitizeUnicode({
       provider: 'nuclei-templates',
-      sourceKey: doc?.id || rel,
-      identifiers,
-      title: doc?.info?.name ?? doc?.id ?? rel,
-      sourceUrl: `https://github.com/projectdiscovery/nuclei-templates/blob/main/${rel}`,
-      artifactUrl: `https://raw.githubusercontent.com/projectdiscovery/nuclei-templates/main/${rel}`,
+      sourceKey: template.doc?.id || template.rel,
+      identifiers: template.identifiers,
+      title: template.doc?.info?.name ?? template.doc?.id ?? template.rel,
+      sourceUrl: `https://github.com/projectdiscovery/nuclei-templates/blob/main/${template.rel}`,
+      artifactUrl: `https://raw.githubusercontent.com/projectdiscovery/nuclei-templates/main/${template.rel}`,
       artifactObjectId: artifact.objectId,
       artifactSha256: artifact.sha256,
       artifactType: 'nuclei_template',
-      exploitType: classifyExploitType(doc?.info?.name, doc?.info?.description, tags.join(' ')),
-      maturity: maturityFor('nuclei-templates', verified),
-      verificationStatus: verified ? 'source_verified' : 'template_reviewed',
-      requiresAuth: tags.includes('authenticated') || /authenticated|requires auth/i.test(body),
+      exploitType: classifyExploitType(template.doc?.info?.name, template.doc?.info?.description, template.tags.join(' ')),
+      maturity: maturityFor('nuclei-templates', template.verified),
+      verificationStatus: template.verified ? 'source_verified' : 'template_reviewed',
+      requiresAuth: template.tags.includes('authenticated') || /authenticated|requires auth/i.test(template.body),
       requiresUserInteraction: false,
       language: 'yaml',
-      platform: doc?.info?.metadata?.product ?? null,
-      author: Array.isArray(doc?.info?.author) ? doc.info.author.join(', ') : (doc?.info?.author ?? null),
-      modifiedAt: new Date().toISOString(),
-      tags,
-      payload: { id: doc?.id, info: doc?.info, path: rel, gitRevision: mirror.revision }
+      platform: template.doc?.info?.metadata?.product ?? null,
+      author: Array.isArray(template.doc?.info?.author) ? template.doc.info.author.join(', ') : (template.doc?.info?.author ?? null),
+      modifiedAt: fetchedAt,
+      tags: template.tags,
+      payload: { id: template.doc?.id, info: template.doc?.info, path: template.rel, gitRevision: mirror.revision }
     });
     const rawIndexId = await writeRecord(client, ctx, {
-      externalKey: item.sourceKey,
+      externalKey: template.rel,
       externalId: item.sourceKey,
       sourceUrl: item.sourceUrl,
       modifiedAt: item.modifiedAt,
-      identifiers,
+      identifiers: template.identifiers,
+      snapshotId: mirror.revision,
+      snapshotComplete: true,
       recordHash: sha256(stableJson({ sourceKey: item.sourceKey, artifactSha256: item.artifactSha256, revision: mirror.revision })),
       payload: item
     });
     await upsertExploitPoc(client, rawIndexId, item);
-    count++;
   }
 
-  return { fetchedCount: count, parsedCount: count, checkpoint: { gitRevision: mirror.revision, lastFetched: new Date().toISOString() } };
+  return { fetchedCount: templates.length, parsedCount: templates.length, checkpoint: plan.checkpoint };
+}
+
+export function nucleiSnapshotPlan(previousCheckpoint, revision, recordCount, maxRecords) {
+  const observedAt = new Date().toISOString();
+  if (recordCount > maxRecords) {
+    return {
+      snapshotComplete: false,
+      checkpoint: {
+        ...previousCheckpoint,
+        snapshotComplete: false,
+        observedGitRevision: revision,
+        rejectedRecordCount: recordCount,
+        skipped: false,
+        lastRejectedAt: observedAt
+      }
+    };
+  }
+  return {
+    snapshotComplete: true,
+    checkpoint: {
+      ...previousCheckpoint,
+      gitRevision: revision,
+      completedGitRevision: revision,
+      observedGitRevision: revision,
+      snapshotComplete: true,
+      skipped: false,
+      lastFetched: observedAt,
+      recordCount
+    }
+  };
 }
 
 export function nucleiIdentifiers(doc) {

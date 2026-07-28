@@ -35,12 +35,16 @@ export async function fetchBuffer(url, options = {}) {
 }
 
 export async function fetchText(url, options = {}) {
-  const res = await fetchWithTimeout(url, options);
+  const res = await fetchResponse(url, options);
   if (!res.ok) {
     const text = await res.text().catch(() => '');
     throw new Error(`HTTP ${res.status} for ${url}: ${text.slice(0, 500)}`);
   }
   return res.text();
+}
+
+export async function fetchResponse(url, options = {}) {
+  return fetchWithTimeout(url, options);
 }
 
 async function fetchWithTimeout(url, options = {}) {

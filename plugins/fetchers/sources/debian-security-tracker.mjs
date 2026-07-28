@@ -64,6 +64,7 @@ export function groupByCve(data) {
 }
 
 async function loadSucceededRecordHashes(client, sourceId) {
+  if (client.__spool) return new Map();
   const result = await client.query(
     `select external_key, record_hash
      from source_raw_index

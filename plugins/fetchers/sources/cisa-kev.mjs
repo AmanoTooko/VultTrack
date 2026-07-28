@@ -17,7 +17,7 @@ export async function run(client, ctx) {
   const contentHash = sha256(Buffer.from(text));
 
   // Skip if content unchanged
-  if (checkpoint.contentHash === contentHash) {
+  if (checkpoint.contentHash === contentHash && process.env.FETCHER_FORCE !== '1') {
     console.error('CISA KEV unchanged, skipping.');
     return { fetchedCount: 0, parsedCount: 0, checkpoint: { contentHash, skipped: true } };
   }

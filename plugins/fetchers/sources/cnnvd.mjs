@@ -111,6 +111,7 @@ async function fetchListPage(pageIndex, pageSize, retries = 3) {
 }
 
 async function rawRecordCount(client, sourceId) {
+  if (client.__spool) return 0;
   const result = await client.query('select count(*)::bigint as count from source_raw_index where source_id = $1', [sourceId]);
   return Number(result.rows[0]?.count ?? 0);
 }

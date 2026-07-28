@@ -1,4 +1,5 @@
 export async function upsertNvdCve(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   const cve = item.cve ?? item;
   await client.query(
     `insert into stg_nvd_cves
@@ -25,6 +26,7 @@ export async function upsertNvdCve(client, rawIndexId, item) {
 }
 
 export async function upsertNvdCpe(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   const cpe = item.cpe ?? item;
   const uri = cpe.cpeName ?? cpe.cpe23Uri ?? cpe.cpe23_uri;
   const parts = parseCpe23(uri);
@@ -51,6 +53,7 @@ export async function upsertNvdCpe(client, rawIndexId, item) {
 }
 
 export async function upsertGhsa(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   const identifiers = item.identifiers ?? [];
   const cve = identifiers.find((x) => x.type === 'CVE')?.value ?? item.cve_id ?? null;
   const vulnerabilities = item.vulnerabilities ?? [];
@@ -83,6 +86,7 @@ export async function upsertGhsa(client, rawIndexId, item) {
 }
 
 export async function upsertOsv(client, rawIndexId, item, table = 'stg_osv_vulnerabilities') {
+  if (!rawIndexId) return;
   const sql = table === 'stg_ubuntu_osv'
     ? `insert into stg_ubuntu_osv (raw_index_id, osv_id, aliases, affected, payload)
        values ($1,$2,$3,$4,$5)
@@ -111,6 +115,7 @@ export async function upsertOsv(client, rawIndexId, item, table = 'stg_osv_vulne
 }
 
 export async function upsertCveList(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   const metadata = item.cveMetadata ?? {};
   await client.query(
     `insert into stg_cve_list_records
@@ -132,6 +137,7 @@ export async function upsertCveList(client, rawIndexId, item) {
 }
 
 export async function upsertThreatIntel(client, rawIndexId, provider, identifier, item, epss = null) {
+  if (!rawIndexId) return;
   await client.query(
     `insert into stg_threat_intel_records
        (raw_index_id, provider, identifier, epss_score, epss_percentile, observed_at, payload)
@@ -154,6 +160,7 @@ export async function upsertThreatIntel(client, rawIndexId, provider, identifier
 }
 
 export async function upsertAlpine(client, rawIndexId, release, pkg, identifiers, payload) {
+  if (!rawIndexId) return;
   await client.query(
     `insert into stg_alpine_secdb
        (raw_index_id, distro_release, package_name, identifiers, secfixes, payload)
@@ -164,6 +171,7 @@ export async function upsertAlpine(client, rawIndexId, release, pkg, identifiers
 }
 
 export async function upsertDebian(client, rawIndexId, cveId, packages, payload) {
+  if (!rawIndexId) return;
   await client.query(
     `insert into stg_debian_security_tracker
        (raw_index_id, cve_id, packages, payload)
@@ -174,6 +182,7 @@ export async function upsertDebian(client, rawIndexId, cveId, packages, payload)
 }
 
 export async function upsertRegistryPackage(client, rawIndexId, registry, ecosystem, item) {
+  if (!rawIndexId) return;
   await client.query(
     `insert into stg_registry_packages
        (raw_index_id, registry, ecosystem, namespace, name, version, purl, repository_url, homepage_url, metadata, payload)
@@ -196,6 +205,7 @@ export async function upsertRegistryPackage(client, rawIndexId, registry, ecosys
 }
 
 export async function upsertEcosystemAdvisory(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   await client.query(
     `insert into stg_ecosystem_advisories
        (raw_index_id, provider, ecosystem, advisory_id, identifiers, package_name, purl,
@@ -238,6 +248,7 @@ export async function upsertEcosystemAdvisory(client, rawIndexId, item) {
 }
 
 export async function upsertExploitPoc(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   await client.query(
     `insert into stg_exploit_pocs
        (raw_index_id, provider, source_key, identifiers, title, source_url, artifact_url,
@@ -295,6 +306,7 @@ export async function upsertExploitPoc(client, rawIndexId, item) {
 }
 
 export async function upsertExternalAdvisory(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   await client.query(
     `insert into stg_external_advisories
        (raw_index_id, provider, advisory_id, identifiers, title, summary, description,
@@ -351,6 +363,7 @@ function parseCpe23(uri) {
 }
 
 export async function upsertAndroidOsv(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   await client.query(
     `insert into stg_android_osv
        (raw_index_id, osv_id, aliases, affected, severity, summary, details, references_json, published_at, modified_at, payload)
@@ -373,6 +386,7 @@ export async function upsertAndroidOsv(client, rawIndexId, item) {
 }
 
 export async function upsertNpmAdvisory(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   const identifiers = item.identifiers ?? [];
   const cve = identifiers.find((x) => x.type === 'CVE')?.value ?? item.cve_id ?? null;
   const vulnerabilities = item.vulnerabilities ?? [];
@@ -404,6 +418,7 @@ export async function upsertNpmAdvisory(client, rawIndexId, item) {
 }
 
 export async function upsertPypiAdvisory(client, rawIndexId, item) {
+  if (!rawIndexId) return;
   await client.query(
     `insert into stg_pypi_advisories
        (raw_index_id, pysec_id, aliases, ecosystem, package_name, summary, details, affected,
