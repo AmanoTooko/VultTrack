@@ -8,14 +8,237 @@ namespace VulTrack.App;
 
 public static class SbomEndpoints
 {
-    public static void Map(WebApplication app)
+    public static void Map(WebApplication app, bool duckDbPrimary = false)
     {
+        if (duckDbPrimary)
+        {
+            app.MapPost("/api/v1/sbom.upload", UploadDuckDb).DisableAntiforgery();
+            app.MapGet("/api/v1/sbom.list", ListDuckDb);
+            app.MapGet("/api/v1/sbom.get", GetDuckDb);
+            app.MapPost("/api/v1/sbom.match", MatchDuckDb);
+            app.MapGet("/api/v1/sbom.export", ExportDuckDb);
+            app.MapPost("/api/v1/sbom.delete", DeleteDuckDb);
+            return;
+        }
         app.MapPost("/api/v1/sbom.upload", Upload).DisableAntiforgery();
         app.MapGet("/api/v1/sbom.list", List);
         app.MapGet("/api/v1/sbom.get", Get);
         app.MapPost("/api/v1/sbom.match", Match);
         app.MapGet("/api/v1/sbom.export", Export);
         app.MapPost("/api/v1/sbom.delete", Delete);
+    }
+
+    private static async Task<IResult> UploadDuckDb(DuckDbEvidenceStore duckDb, HttpRequest request, CancellationToken ct)
+    {
+        try
+        {
+            using var reader = new StreamReader(request.Body);
+            var json = await reader.ReadToEndAsync(ct);
+            var doc = JsonNode.Parse(json);
+            if (doc is null) return ApiResult.Error("INVALID", "Cannot parse JSON");
+
+            var meta = doc["metadata"];
+            var metadataName = $"{Text(meta?["component"]?["name"])} {Text(meta?["component"]?["version"])}".Trim();
+            var name = FirstText(request.Query["name"].ToString(), metadataName,
+                SbomNameFromSerial(Text(doc["serialNumber"])), "CycloneDX SBOM");
+            var id = Guid.NewGuid();
+            var drafts = (doc["components"]?.AsArray() ?? [])
+                .Select(ToSbomComponent)
+                .Where(component => !string.IsNullOrWhiteSpace(component.Purl) || !string.IsNullOrWhiteSpace(component.Cpe23Uri))
+                .GroupBy(component => (component.Purl ?? "", component.Cpe23Uri ?? "", component.Name ?? "", component.Version ?? "", component.Ecosystem ?? ""))
+                .Select(group => group.First())
+                .ToList();
+            var components = drafts.Select(draft => new DuckDbSbomComponent(
+                Guid.NewGuid(), id, draft.Purl, draft.Name, draft.Version, draft.Ecosystem, draft.GroupName,
+                draft.Vendor, draft.Product, draft.Cpe23Uri, draft.SourcePackageName, draft.SourcePackageVersion,
+                draft.ComponentType, draft.MetadataJson, 0)).ToList();
+            await duckDb.SaveSbomAsync(id, name, json, components, ct);
+            return ApiResult.Ok(new { id, name, componentCount = components.Count });
+        }
+        catch (Exception ex)
+        {
+            return ApiResult.Error("UPLOAD_FAILED", ex.Message);
+        }
+    }
+
+    private static async Task<IResult> ListDuckDb(DuckDbEvidenceStore duckDb, CancellationToken ct)
+    {
+        var items = (await duckDb.ListSbomsAsync(ct)).Select(item => new
+        {
+            id = item.Id,
+            item.Name,
+            item.Format,
+            item.ComponentCount,
+            item.MatchedCount,
+            item.UploadedAt
+        });
+        return ApiResult.Ok(new { items });
+    }
+
+    private static async Task<IResult> GetDuckDb(
+        DuckDbEvidenceStore duckDb,
+        Guid id,
+        int? vulnerabilityLimit,
+        int? vulnerabilityOffset,
+        CancellationToken ct)
+    {
+        var upload = await duckDb.GetSbomAsync(id, ct);
+        if (upload is null) return ApiResult.NotFound("NOT_FOUND", id.ToString());
+        var components = (await duckDb.GetSbomComponentsAsync(id, ct)).Select(component => new
+        {
+            id = component.Id,
+            purl = component.Purl,
+            name = component.Name,
+            version = component.Version,
+            ecosystem = component.Ecosystem,
+            type = component.ComponentType,
+            vulnCount = component.VulnCount,
+            vendor = component.Vendor,
+            product = component.Product,
+            cpe23Uri = component.Cpe23Uri,
+            sourcePackageName = component.SourcePackageName,
+            sourcePackageVersion = component.SourcePackageVersion
+        });
+        var vulnerabilities = (await duckDb.GetSbomFindingsAsync(
+            id, Math.Clamp(vulnerabilityLimit ?? 2000, 1, 10000), Math.Max(vulnerabilityOffset ?? 0, 0), ct))
+            .Select(finding => new
+            {
+                id = finding.Id,
+                componentId = finding.ComponentId,
+                vulnerabilityId = finding.VulnerabilityId,
+                primaryIdentifier = finding.PrimaryIdentifier,
+                title = finding.Title,
+                severityLabel = finding.SeverityLabel,
+                cvssScore = finding.CvssScore,
+                componentName = finding.ComponentName,
+                ecosystem = finding.Ecosystem,
+                versionRange = finding.VersionRange,
+                versionMatched = finding.VersionMatched,
+                matchBasis = finding.MatchBasis,
+                matchedVersion = finding.MatchedVersion,
+                identifiers = finding.Identifiers,
+                aliases = finding.Aliases
+            });
+        var sbom = new
+        {
+            id = upload.Id,
+            upload.Name,
+            upload.Format,
+            upload.ComponentCount,
+            upload.MatchedCount,
+            upload.UploadedAt
+        };
+        return ApiResult.Ok(new { sbom, components, vulnerabilities });
+    }
+
+    private static async Task<IResult> MatchDuckDb(
+        DuckDbEvidenceStore duckDb,
+        SbomMatchRequest req,
+        CancellationToken ct)
+    {
+        var components = await duckDb.GetSbomComponentsAsync(req.SbomId, ct);
+        if (components.Count == 0 && await duckDb.GetSbomAsync(req.SbomId, ct) is null)
+            return ApiResult.NotFound("NOT_FOUND", req.SbomId.ToString());
+
+        var matchComponents = components.Select(component =>
+        {
+            var decodedPurl = string.IsNullOrWhiteSpace(component.Purl) ? null : Uri.UnescapeDataString(component.Purl);
+            var purlWithoutVersion = decodedPurl is null ? null : StripVersion(decodedPurl) ?? decodedPurl;
+            return new DuckDbSbomMatchComponent(
+                component.Id, component.Purl, decodedPurl, purlWithoutVersion, component.Name, component.Version,
+                component.Ecosystem, MapEcosystem(component.Ecosystem), component.Cpe23Uri,
+                CpeProductPrefix(component.Cpe23Uri), ParseCpe(component.Cpe23Uri)?.Product,
+                component.SourcePackageName, component.SourcePackageVersion);
+        }).ToList();
+        var candidates = await duckDb.QuerySbomCandidateMatchesAsync(matchComponents, ct);
+        var evaluated = candidates.Select(item =>
+        {
+            var matchedVersion = string.Equals(item.Basis, "source-package", StringComparison.OrdinalIgnoreCase)
+                ? item.SourcePackageVersion ?? item.ComponentVersion
+                : item.ComponentVersion;
+            var versionMatched = ResolveSbomVersionMatch(matchedVersion, item.Range, item.Ecosystem, item.ComponentCpe, item.MatchedCpe, item.Basis);
+            var possible = versionMatched != true && IsPossibleSbomMatch(matchedVersion, item.Range, item.Basis);
+            return new DuckDbSbomMatch(
+                item.ComponentId, item.VulnerabilityId, item.Purl, item.DisplayName, item.Ecosystem, item.Range,
+                possible ? null : versionMatched, possible ? $"possible-{item.Basis}" : item.Basis, matchedVersion);
+        })
+        .ToList();
+        var matches = evaluated
+            .Where(item => item.VersionMatched == true || item.Basis?.StartsWith("possible-", StringComparison.OrdinalIgnoreCase) == true)
+            .GroupBy(item => (item.ComponentId, item.VulnerabilityId))
+            .Select(group => group
+                .OrderByDescending(item => item.VersionMatched == true)
+                .ThenBy(item => MatchBasisPriority(item.Basis))
+                .ThenBy(item => item.Range?.Length ?? int.MaxValue)
+                .First())
+            .ToList();
+        await duckDb.ReplaceSbomMatchesAsync(req.SbomId, matches, ct);
+        return ApiResult.Ok(new { matched = matches.Count, source = "duckdb" });
+    }
+
+    private static int MatchBasisPriority(string? basis)
+    {
+        var normalized = basis?.StartsWith("possible-", StringComparison.OrdinalIgnoreCase) == true
+            ? basis["possible-".Length..]
+            : basis;
+        return normalized?.ToLowerInvariant() switch
+        {
+            "cpe-exact" => 0,
+            "purl" => 1,
+            "source-package" => 2,
+            "name" => 3,
+            "package" => 4,
+            "cpe-product" => 5,
+            _ => 9
+        };
+    }
+
+    private static async Task<IResult> DeleteDuckDb(DuckDbEvidenceStore duckDb, SbomDeleteRequest req, CancellationToken ct)
+    {
+        await duckDb.DeleteSbomAsync(req.SbomId, ct);
+        return ApiResult.Ok(new { deleted = true });
+    }
+
+    private static async Task<IResult> ExportDuckDb(DuckDbEvidenceStore duckDb, Guid id, CancellationToken ct)
+    {
+        if (await duckDb.GetSbomAsync(id, ct) is null)
+            return ApiResult.NotFound("NOT_FOUND", id.ToString());
+        var components = await duckDb.GetSbomComponentsAsync(id, ct);
+        var findings = await duckDb.GetSbomFindingsAsync(id, 10000, 0, ct);
+        var keys = findings.Select(finding => finding.PrimaryIdentifier).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var weaknesses = await duckDb.QueryWeaknessesManyAsync(keys, 80, ct);
+        var references = await duckDb.QueryReferencesManyAsync(keys, 160, ct);
+        var findingsByComponent = findings.GroupBy(finding => finding.ComponentId).ToDictionary(group => group.Key, group => group.ToArray());
+        var rows = new StringBuilder();
+        rows.AppendLine("""
+            <html><head><meta charset="utf-8"></head><body><table border="1">
+            <thead><tr><th>Component Name</th><th>Component PURL</th><th>CPE 2.3 URI</th><th>Vendor</th><th>Product</th><th>Component Version</th><th>CVE</th><th>Affected Version / Range</th><th>Version Matched</th><th>Severity</th><th>CVSS</th><th>CWE</th><th>URLs</th><th>Title</th></tr></thead><tbody>
+            """);
+        foreach (var component in components)
+        {
+            var componentFindings = findingsByComponent.GetValueOrDefault(component.Id) ?? [];
+            if (componentFindings.Length == 0)
+            {
+                AppendCells(rows, component.Name ?? "", component.Purl ?? "", component.Cpe23Uri ?? "",
+                    component.Vendor ?? "", component.Product ?? "", component.Version ?? "",
+                    "", "", "", "", "", "", "", "");
+                continue;
+            }
+            foreach (var finding in componentFindings)
+            {
+                var cwes = weaknesses.GetValueOrDefault(finding.PrimaryIdentifier) ?? [];
+                var urls = references.GetValueOrDefault(finding.PrimaryIdentifier) ?? [];
+                AppendCells(rows, component.Name ?? "", component.Purl ?? "", component.Cpe23Uri ?? "",
+                    component.Vendor ?? "", component.Product ?? "", component.Version ?? "",
+                    finding.PrimaryIdentifier, finding.VersionRange ?? "", finding.VersionMatched?.ToString() ?? "",
+                    finding.SeverityLabel ?? "", finding.CvssScore?.ToString() ?? "",
+                    string.Join("; ", cwes.Select(row => Convert.ToString(row.GetValueOrDefault("weakness_id"))).Where(value => !string.IsNullOrWhiteSpace(value))),
+                    string.Join("; ", urls.Select(row => Convert.ToString(row.GetValueOrDefault("url"))).Where(value => !string.IsNullOrWhiteSpace(value))),
+                    finding.Title ?? "");
+            }
+        }
+        rows.AppendLine("</tbody></table></body></html>");
+        return Results.File(Encoding.UTF8.GetBytes(rows.ToString()), "application/vnd.ms-excel; charset=utf-8", $"vultrack-sbom-{id:N}.xls");
     }
 
     private static async Task<IResult> Upload(NpgsqlDataSource db, HttpRequest request, CancellationToken ct)
@@ -326,7 +549,7 @@ public static class SbomEndpoints
         return ApiResult.Ok(new { deleted = true });
     }
 
-    private static async Task<IResult> Export(NpgsqlDataSource db, VulnerabilityDetailSnapshotStore snapshots, Guid id, CancellationToken ct)
+    private static async Task<IResult> Export(NpgsqlDataSource db, DuckDbEvidenceStore duckDb, VulnerabilityDetailSnapshotStore snapshots, Guid id, CancellationToken ct)
     {
         var exportRows = new List<SbomExportRow>();
         await using var cmd = db.CreateCommand("""
@@ -373,7 +596,13 @@ public static class SbomEndpoints
                 string.IsNullOrWhiteSpace(SnapshotWeaknesses(detail)) ||
                 string.IsNullOrWhiteSpace(SnapshotReferenceUrls(detail)))
             .ToArray();
-        var fallbackDetails = await LoadSbomExportFallbackDetailsAsync(db, fallbackIds, ct);
+        var fallbackKeys = exportRows
+            .Where(row => row.VulnerabilityId.HasValue && fallbackIds.Contains(row.VulnerabilityId.Value) && !string.IsNullOrWhiteSpace(row.Cve))
+            .GroupBy(row => row.VulnerabilityId!.Value)
+            .ToDictionary(group => group.Key, group => group.First().Cve);
+        var fallbackDetails = duckDb.Enabled
+            ? await LoadSbomExportDuckDbFallbackDetailsAsync(duckDb, fallbackKeys, ct)
+            : await LoadSbomExportFallbackDetailsAsync(db, fallbackIds, ct);
 
         var rows = new StringBuilder();
         rows.AppendLine("""
@@ -487,6 +716,39 @@ public static class SbomEndpoints
         return details;
     }
 
+    private static async Task<IReadOnlyDictionary<Guid, SbomExportDetail>> LoadSbomExportDuckDbFallbackDetailsAsync(
+        DuckDbEvidenceStore duckDb,
+        IReadOnlyDictionary<Guid, string> vulnerabilityKeys,
+        CancellationToken ct)
+    {
+        var details = new Dictionary<Guid, SbomExportDetail>();
+        if (vulnerabilityKeys.Count == 0) return details;
+
+        var keys = vulnerabilityKeys.Values.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var weaknessesTask = duckDb.QueryWeaknessesManyAsync(keys, 80, ct);
+        var referencesTask = duckDb.QueryReferencesManyAsync(keys, 20, ct);
+        await Task.WhenAll(weaknessesTask, referencesTask);
+
+        var weaknesses = await weaknessesTask;
+        var references = await referencesTask;
+        foreach (var (vulnerabilityId, key) in vulnerabilityKeys)
+        {
+            weaknesses.TryGetValue(key, out var weaknessRows);
+            references.TryGetValue(key, out var referenceRows);
+            details[vulnerabilityId] = new SbomExportDetail(
+                string.Join("; ", (weaknessRows ?? [])
+                    .Select(row => row.GetValueOrDefault("weakness_id")?.ToString())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)),
+                string.Join("; ", (referenceRows ?? [])
+                    .Select(row => row.GetValueOrDefault("url")?.ToString())
+                    .Where(value => !string.IsNullOrWhiteSpace(value))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)));
+        }
+
+        return details;
+    }
+
     private static void AppendCells(StringBuilder rows, params string?[] values)
     {
         rows.Append("<tr>");
@@ -583,8 +845,7 @@ public static class SbomEndpoints
     }
 
     private static string? StripVersion(string purl) =>
-        purl.Contains('@') && purl.LastIndexOf('@') > "pkg:".Length
-            ? purl[..purl.LastIndexOf('@')] : purl;
+        PurlIdentity.WithoutVersionAndQualifiers(purl);
 
     private static SbomComponentDraft ToSbomComponent(JsonNode? c)
     {
@@ -639,7 +900,10 @@ public static class SbomEndpoints
     private static bool IsPossibleSbomMatch(string? version, string? range, string? basis)
     {
         if (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(range)) return false;
-        if (!EcosystemVersionComparer.IsCommitLikeVersion(version)) return false;
+        var commitRange = System.Text.RegularExpressions.Regex.Matches(range, @"(?:<=|>=|==|=|<|>)\s*([^\s,]+)")
+            .Select(match => match.Groups[1].Value)
+            .Any(EcosystemVersionComparer.IsCommitLikeVersion);
+        if (!EcosystemVersionComparer.IsCommitLikeVersion(version) && !commitRange) return false;
         return basis is not null && (
             basis.Equals("purl", StringComparison.OrdinalIgnoreCase) ||
             basis.Equals("source-package", StringComparison.OrdinalIgnoreCase) ||

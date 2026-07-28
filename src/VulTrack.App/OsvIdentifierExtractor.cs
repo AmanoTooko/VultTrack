@@ -18,6 +18,7 @@ internal static class OsvIdentifierExtractor
         return values
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .SelectMany(value => Identifier.ExpandWithEmbeddedCves(value!))
+            .Where(Identifier.IsVulnerabilityId)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
@@ -38,8 +39,10 @@ internal static class OsvIdentifierExtractor
                 foreach (var (name, value) in obj)
                 {
                     if (value is null) continue;
-                    var childSelected = selected || IsIdentifierProperty(name);
-                    CollectSemanticIdentifiers(value, childSelected, values);
+                    if (IsIdentifierProperty(name))
+                        CollectIdentifierValues(value, values);
+                    else if (!selected)
+                        CollectSemanticIdentifiers(value, selected: false, values);
                 }
                 break;
             case JsonArray array:
@@ -55,12 +58,31 @@ internal static class OsvIdentifierExtractor
         }
     }
 
+    private static void CollectIdentifierValues(JsonNode node, List<string?> values)
+    {
+        switch (node)
+        {
+            case JsonValue value when value.TryGetValue<string>(out var text):
+                values.Add(text);
+                break;
+            case JsonArray array:
+                foreach (var item in array)
+                    if (item is not null)
+                        CollectIdentifierValues(item, values);
+                break;
+            case JsonObject obj:
+                foreach (var name in new[] { "id", "value", "cve", "alias", "upstream" })
+                    if (obj[name] is { } value)
+                        CollectIdentifierValues(value, values);
+                break;
+        }
+    }
+
     private static bool IsIdentifierProperty(string name)
     {
         var lower = name.ToLowerInvariant();
         return lower.Contains("alias", StringComparison.Ordinal)
             || lower.Contains("upstream", StringComparison.Ordinal)
-            || lower.Contains("related", StringComparison.Ordinal)
             || lower.Contains("cve", StringComparison.Ordinal);
     }
 }

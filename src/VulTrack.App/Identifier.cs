@@ -6,6 +6,16 @@ public static partial class Identifier
 {
     public static string Normalize(string value) => value.Trim().ToUpperInvariant();
 
+    public static bool IsVulnerabilityId(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var normalized = Normalize(value);
+        if (normalized.Length is < 4 or > 160) return false;
+        if (normalized.StartsWith("CVE-", StringComparison.Ordinal))
+            return ExactCveRegex().IsMatch(normalized);
+        return AdvisoryIdRegex().IsMatch(normalized);
+    }
+
     public static string[] ExpandWithEmbeddedCves(string value)
     {
         var normalized = Normalize(value);
@@ -51,6 +61,12 @@ public static partial class Identifier
 
     [GeneratedRegex("^CWE-[0-9]+$")]
     private static partial Regex CweRegex();
+
+    [GeneratedRegex("^CVE-[0-9]{4}-[0-9]{4,}$", RegexOptions.IgnoreCase)]
+    private static partial Regex ExactCveRegex();
+
+    [GeneratedRegex("^[A-Z][A-Z0-9_.]*-[A-Z0-9][A-Z0-9_.:-]*$", RegexOptions.IgnoreCase)]
+    private static partial Regex AdvisoryIdRegex();
 
     [GeneratedRegex(@"\bCVE-\d{4}-\d{4,}\b", RegexOptions.IgnoreCase)]
     private static partial Regex CveRegex();

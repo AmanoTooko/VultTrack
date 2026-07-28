@@ -21,6 +21,11 @@ public sealed class SourceScheduler(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (string.Equals(Environment.GetEnvironmentVariable("VULTRACK_STORAGE_BACKEND"), "duckdb", StringComparison.OrdinalIgnoreCase))
+        {
+            logger.LogInformation("Legacy PostgreSQL scheduler is disabled in DuckDB-primary mode.");
+            return;
+        }
         if (!EnvBool("VULTRACK_SCHEDULER_ENABLED", Options.Enabled))
         {
             logger.LogInformation("VulTrack scheduler is disabled.");
@@ -30,12 +35,19 @@ public sealed class SourceScheduler(
         var normalizeInterval = TimeSpan.FromSeconds(EnvInt("SCHEDULER_INTERVAL_SECONDS", Options.NormalizeIntervalSeconds, 1));
         var fetchInterval = TimeSpan.FromHours(Math.Max(1, Options.FetchIntervalHours));
 
-        await CloseInterruptedRunsAsync(stoppingToken);
-        await Task.WhenAll(
-            RunFetchLoopAsync(fetchInterval, stoppingToken),
+        await WaitForDatabaseAndCloseInterruptedRunsAsync(stoppingToken);
+        var workers = new List<Task>
+        {
             RunNormalizeLoopAsync(normalizeInterval, stoppingToken),
             RunDuckDbProjectionLoopAsync(stoppingToken),
-            RunDetailSnapshotLoopAsync(stoppingToken));
+            RunDetailSnapshotLoopAsync(stoppingToken)
+        };
+        if (EnvBool("SCHEDULER_FETCH_ENABLED", Options.FetchEnabled))
+            workers.Add(RunFetchLoopAsync(fetchInterval, stoppingToken));
+        else
+            logger.LogInformation("Fetcher scheduling is disabled; normalization and projection queues remain active.");
+
+        await Task.WhenAll(workers);
     }
 
     private async Task CloseInterruptedRunsAsync(CancellationToken ct)
@@ -51,6 +63,29 @@ public sealed class SourceScheduler(
         var count = await cmd.ExecuteNonQueryAsync(ct);
         if (count > 0)
             logger.LogWarning("Closed {Count} interrupted source sync runs left by an earlier scheduler process.", count);
+    }
+
+    private async Task WaitForDatabaseAndCloseInterruptedRunsAsync(CancellationToken ct)
+    {
+        var delay = TimeSpan.FromSeconds(2);
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await CloseInterruptedRunsAsync(ct);
+                return;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Database is not ready for the scheduler; retrying in {DelaySeconds} seconds.", delay.TotalSeconds);
+                await Task.Delay(delay, ct);
+                delay = TimeSpan.FromSeconds(Math.Min(30, delay.TotalSeconds * 2));
+            }
+        }
     }
 
     private async Task RunNormalizeLoopAsync(TimeSpan interval, CancellationToken ct)
@@ -675,6 +710,7 @@ public sealed class SourceScheduler(
 public sealed class VulTrackSchedulerOptions
 {
     public bool Enabled { get; init; }
+    public bool FetchEnabled { get; init; } = true;
     public int NormalizeIntervalSeconds { get; init; } = 15;
     public int FetchIntervalHours { get; init; } = 12;
     public int NormalizeLimit { get; init; } = 500;

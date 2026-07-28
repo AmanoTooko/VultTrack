@@ -9,6 +9,9 @@ public sealed class DefaultAffectedComponentHook(DuckDbEvidenceStore duckDb, ILo
         duckDb.Enabled &&
         !string.Equals(Environment.GetEnvironmentVariable("VULTRACK_AFFECTED_COMPONENTS_BACKEND"), "pgsql", StringComparison.OrdinalIgnoreCase);
 
+    private static bool DuckDbEvidenceOnly =>
+        string.Equals(Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_EVIDENCE_ONLY"), "true", StringComparison.OrdinalIgnoreCase);
+
     public Task OnAffectedFactsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid vulnerabilityRecordId, IReadOnlyList<AffectedFactDraft> facts, CancellationToken ct) =>
         OnAffectedFactsBatchAsync(connection, [new AffectedFactBatchItem(vulnerabilityId, vulnerabilityRecordId, Guid.Empty, Guid.Empty, facts)], ct);
 
@@ -109,6 +112,7 @@ public sealed class DefaultAffectedComponentHook(DuckDbEvidenceStore duckDb, ILo
         {
             if (UseDuckDbProjectionOnly)
             {
+                if (DuckDbEvidenceOnly) continue;
                 await UpdateVulnerabilitySummariesFromFactsAsync(connection, batch, ct);
                 var inlineLimit = DuckDbProjectionInlineLimit();
                 if (inlineLimit > 0 && batch.Length < inlineLimit)

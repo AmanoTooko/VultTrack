@@ -26,8 +26,13 @@ public sealed record DuckDbEvidenceNormalizeResult(
     IReadOnlyList<DuckDbEvidenceSourceResult> sources,
     DuckDbEvidenceStats stats);
 
-public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidenceStore store, ILogger<DuckDbEvidenceNormalizer> logger)
+public sealed partial class DuckDbEvidenceNormalizer(
+    IServiceProvider services,
+    DuckDbEvidenceStore store,
+    ILogger<DuckDbEvidenceNormalizer> logger)
 {
+    private NpgsqlDataSource db => services.GetRequiredService<NpgsqlDataSource>();
+
     private static readonly string[] DefaultSources =
     [
         "debian-security-tracker",
@@ -62,6 +67,9 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
 
     public async Task<DuckDbEvidenceNormalizeResult> NormalizeAsync(DuckDbEvidenceNormalizeRequest request, CancellationToken ct)
     {
+        if (string.Equals(Environment.GetEnvironmentVariable("VULTRACK_STORAGE_BACKEND"), "duckdb", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("PostgreSQL staging normalization is unavailable in a DuckDB-primary deployment. Ingest DuckDB spool files instead.");
+
         if (request.Reset) await store.ResetAsync(ct);
         else await store.InitializeAsync(ct);
 
@@ -71,6 +79,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         var limit = Math.Clamp(request.Limit <= 0 ? 5000000 : request.Limit, 1, 5000000);
         if (rawIndexIds is { Length: > 0 })
             limit = Math.Min(limit, rawIndexIds.Length);
+        var replaceWholeSource = rawIndexIds is null && (request.Limit <= 0 || request.Limit >= 5000000);
         var batchSize = Math.Clamp(request.BatchSize <= 0 ? 10000 : request.BatchSize, 1, limit);
         var sourceCodes = string.IsNullOrWhiteSpace(request.SourceCode)
             ? DefaultSources
@@ -79,6 +88,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
 
         foreach (var sourceCode in sourceCodes)
         {
+            var evidenceSourceCode = CanonicalEvidenceSourceCode(sourceCode);
             var watch = Stopwatch.StartNew();
             var recordsRead = 0;
             var affectedFacts = 0;
@@ -96,18 +106,41 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 continue;
             }
 
+            await using var sourceReplace = replaceWholeSource && SupportsSourceBulkReplace(sourceCode)
+                ? await store.BeginSourceEvidenceReplaceAsync(evidenceSourceCode, ct)
+                : null;
+            Guid? nvdAfterRawIndexId = null;
             for (var offset = 0; offset < limit; offset += batchSize)
             {
                 var take = Math.Min(batchSize, limit - offset);
-                var records = await LoadSourceAsync(sourceCode, take, offset, rawIndexIds, ct);
+                var records = evidenceSourceCode.Equals("nvd-cve", StringComparison.OrdinalIgnoreCase) && rawIndexIds is null
+                    ? await LoadNvdAfterAsync(sourceCode, evidenceSourceCode, take, nvdAfterRawIndexId, ct)
+                    : await LoadSourceAsync(sourceCode, take, offset, rawIndexIds, ct);
                 if (records.Count == 0) break;
-                await store.ReplaceRecordsAsync(records, ct);
+                if (evidenceSourceCode.Equals("nvd-cve", StringComparison.OrdinalIgnoreCase) && rawIndexIds is null)
+                    nvdAfterRawIndexId = records[^1].RawIndexId;
+                if (IsNucleiSource(sourceCode))
+                {
+                    // LoadExploitAsync already upserts the supplemental projection.
+                }
+                else if (sourceReplace is null)
+                    await store.ReplaceRecordsAsync(records, ct);
+                else
+                    await sourceReplace.AppendAsync(records, ct);
                 recordsRead += records.Count;
                 affectedFacts += records.Sum(x => x.AffectedFacts.Count);
                 severityScores += records.Sum(x => x.SeverityScores.Count);
                 references += records.Sum(x => x.References.Count);
                 weaknesses += records.Sum(x => x.Weaknesses.Count);
+                if (recordsRead % 50_000 < records.Count)
+                {
+                    logger.LogInformation(
+                        "DuckDB evidence progress {SourceCode}: records={Records}, facts={Facts}, refs={References}, elapsed={Elapsed}ms.",
+                        sourceCode, recordsRead, affectedFacts, references, watch.ElapsedMilliseconds);
+                }
             }
+            if (sourceReplace is not null)
+                await sourceReplace.CompleteAsync(ct);
             watch.Stop();
             var result = new DuckDbEvidenceSourceResult(
                 sourceCode,
@@ -129,15 +162,20 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         sourceCode.ToLowerInvariant() switch
         {
             "debian-security-tracker" => LoadDebianAsync(limit, offset, rawIndexIds, ct),
-            "osv" => LoadOsvAsync("osv", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
-            "ubuntu-osv" => LoadOsvAsync("ubuntu-osv", "stg_ubuntu_osv", limit, offset, rawIndexIds, ct),
-            "android-osv" => LoadOsvAsync("android-osv", "stg_android_osv", limit, offset, rawIndexIds, ct),
+            "osv" => LoadOsvAsync("osv", "osv", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "osv-init" => LoadOsvAsync("osv-init", "osv", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "ubuntu-osv" => LoadOsvAsync("ubuntu-osv", "ubuntu-osv", "stg_ubuntu_osv", limit, offset, rawIndexIds, ct),
+            "android-osv" => LoadOsvAsync("android-osv", "android-osv", "stg_android_osv", limit, offset, rawIndexIds, ct),
+            "android-osv-init" => LoadOsvAsync("android-osv-init", "android-osv", "stg_android_osv", limit, offset, rawIndexIds, ct),
             "google-osv" => LoadGoogleOsvAsync(limit, offset, rawIndexIds, ct),
+            "google-osv-init" => LoadOsvAsync("google-osv-init", "google-osv", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
             "ghsa" => LoadGhsaAsync("ghsa", limit, offset, rawIndexIds, ct),
-            "maven-osv" => LoadOsvAsync("maven-osv", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "maven-osv" => LoadOsvAsync("maven-osv", "maven-osv", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "maven-osv-init" => LoadOsvAsync("maven-osv-init", "maven-osv", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
             "maven-advisory" => LoadEcosystemAsync("maven-advisory", "osv-maven-query", limit, offset, rawIndexIds, ct),
             "cve-list-v5" => LoadCveListAsync(limit, offset, rawIndexIds, ct),
-            "nvd-cve" => LoadNvdAsync(limit, offset, rawIndexIds, ct),
+            "nvd-cve" => LoadNvdAsync("nvd-cve", "nvd-cve", limit, offset, rawIndexIds, ct),
+            "nvd-cve-init" => LoadNvdAsync("nvd-cve-init", "nvd-cve", limit, offset, rawIndexIds, ct),
             "suse-csaf" => LoadCsafAsync("suse-csaf", limit, offset, rawIndexIds, ct),
             "alpine-secdb" => LoadAlpineAsync(limit, offset, rawIndexIds, ct),
             "redhat-csaf" => LoadCsafAsync("redhat-csaf", limit, offset, rawIndexIds, ct),
@@ -145,8 +183,8 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             "npm-advisory" => LoadNpmAdvisoryAsync("npm-advisory", limit, offset, rawIndexIds, ct),
             "npm-audit" => LoadNpmAdvisoryAsync("npm-audit", limit, offset, rawIndexIds, ct),
             "pypi-advisory" => LoadPypiAdvisoryAsync(limit, offset, rawIndexIds, ct),
-            "go-advisory" => LoadOsvAsync("go-advisory", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
-            "cargo-advisory" => LoadOsvAsync("cargo-advisory", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "go-advisory" => LoadOsvAsync("go-advisory", "go-advisory", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
+            "cargo-advisory" => LoadOsvAsync("cargo-advisory", "cargo-advisory", "stg_osv_vulnerabilities", limit, offset, rawIndexIds, ct),
             "first-epss" => LoadThreatIntelAsync("first-epss", limit, offset, rawIndexIds, ct),
             "cisa-kev" => LoadThreatIntelAsync("cisa-kev", limit, offset, rawIndexIds, ct),
             "exploitdb" => LoadExploitAsync("exploitdb", limit, offset, rawIndexIds, ct),
@@ -158,7 +196,27 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             _ => Task.FromResult<IReadOnlyList<DuckDbEvidenceRecord>>([])
         };
 
+    private static string CanonicalEvidenceSourceCode(string sourceCode) => sourceCode.ToLowerInvariant() switch
+    {
+        "nvd-cve-init" => "nvd-cve",
+        "osv-init" => "osv",
+        "android-osv-init" => "android-osv",
+        "google-osv-init" => "google-osv",
+        "maven-osv-init" => "maven-osv",
+        _ => sourceCode.ToLowerInvariant()
+    };
+
     private static bool HasRawFilter(Guid[]? rawIndexIds) => rawIndexIds is { Length: > 0 };
+
+    private static bool SupportsSourceBulkReplace(string sourceCode) => sourceCode.ToLowerInvariant() switch
+    {
+        "nvd-cpe" or "first-epss" or "cisa-kev" or
+        "exploitdb" or "poc-in-github" or "nuclei-templates" or "metasploit" or "trickest-cve" => false,
+        _ => true
+    };
+
+    private static bool IsNucleiSource(string sourceCode) =>
+        string.Equals(sourceCode, "nuclei-templates", StringComparison.OrdinalIgnoreCase);
 
     private static string RawFilterSql(string column, int parameterIndex, Guid[]? rawIndexIds) =>
         HasRawFilter(rawIndexIds) ? $" and {column} = any(${parameterIndex}::uuid[])" : "";
@@ -218,7 +276,14 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         }
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadOsvAsync(string sourceCode, string tableName, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadOsvAsync(
+        string inputSourceCode,
+        string evidenceSourceCode,
+        string tableName,
+        int limit,
+        int offset,
+        Guid[]? rawIndexIds,
+        CancellationToken ct)
     {
         await using var command = db.CreateCommand($"""
             with source_record_ids as (
@@ -239,7 +304,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             order by s.raw_index_id
             """);
         command.CommandTimeout = 300;
-        command.Parameters.AddWithValue(sourceCode);
+        command.Parameters.AddWithValue(inputSourceCode);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
         AddRawFilterParameter(command, rawIndexIds);
@@ -253,7 +318,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             var aliases = reader.GetFieldValue<string[]>(2);
             var payload = JsonNode.Parse(reader.GetString(3));
             var key = OsvIdentifierExtractor.Preferred(osvId, aliases, payload);
-            records.Add(EmptyRecord(sourceCode, rawIndexId, key, osvId) with
+            records.Add(EmptyRecord(evidenceSourceCode, rawIndexId, key, osvId) with
             {
                 AffectedFacts = ExtractOsvFacts(payload?["affected"]).ToList(),
                 SeverityScores = ExtractOsvSeverity(payload?["severity"]).ToList(),
@@ -269,14 +334,14 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         if (offset < androidRows)
         {
             var firstTake = Math.Min(limit, androidRows - offset);
-            var records = (await LoadOsvAsync("google-osv", "stg_android_osv", firstTake, offset, rawIndexIds, ct)).ToList();
+            var records = (await LoadOsvAsync("google-osv", "google-osv", "stg_android_osv", firstTake, offset, rawIndexIds, ct)).ToList();
             var remaining = limit - firstTake;
             if (remaining > 0)
-                records.AddRange(await LoadOsvAsync("google-osv", "stg_osv_vulnerabilities", remaining, 0, rawIndexIds, ct));
+                records.AddRange(await LoadOsvAsync("google-osv", "google-osv", "stg_osv_vulnerabilities", remaining, 0, rawIndexIds, ct));
             return records;
         }
 
-        return await LoadOsvAsync("google-osv", "stg_osv_vulnerabilities", limit, offset - androidRows, rawIndexIds, ct);
+        return await LoadOsvAsync("google-osv", "google-osv", "stg_osv_vulnerabilities", limit, offset - androidRows, rawIndexIds, ct);
     }
 
     private async Task<int> CountOsvRowsAsync(string sourceCode, string tableName, Guid[]? rawIndexIds, CancellationToken ct)
@@ -342,19 +407,28 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         return records;
     }
 
-    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadNvdAsync(int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadNvdAsync(
+        string inputSourceCode,
+        string evidenceSourceCode,
+        int limit,
+        int offset,
+        Guid[]? rawIndexIds,
+        CancellationToken ct)
     {
         await using var command = db.CreateCommand($"""
             select raw_index_id, cve_id, configurations::text, metrics::text, weaknesses::text, references_json::text
             from stg_nvd_cves s
             join source_raw_index r on r.id = s.raw_index_id
-            where r.normalize_status <> 'superseded'
-              {RawFilterSql("s.raw_index_id", 3, rawIndexIds)}
+            join sources src on src.id = r.source_id
+            where src.code = $1
+              and r.normalize_status <> 'superseded'
+              {RawFilterSql("s.raw_index_id", 4, rawIndexIds)}
             order by s.raw_index_id
-            limit $1
-            offset $2
+            limit $2
+            offset $3
             """);
         command.CommandTimeout = 300;
+        command.Parameters.AddWithValue(inputSourceCode);
         command.Parameters.AddWithValue(limit);
         command.Parameters.AddWithValue(offset);
         AddRawFilterParameter(command, rawIndexIds);
@@ -365,7 +439,70 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         {
             var rawIndexId = reader.GetGuid(0);
             var cveId = reader.GetString(1);
-            records.Add(EmptyRecord("nvd-cve", rawIndexId, cveId, cveId) with
+            records.Add(EmptyRecord(evidenceSourceCode, rawIndexId, cveId, cveId) with
+            {
+                AffectedFacts = ExtractNvdFacts(JsonNode.Parse(reader.GetString(2))).ToList(),
+                SeverityScores = ExtractNvdSeverity(JsonNode.Parse(reader.GetString(3))).ToList(),
+                Weaknesses = ExtractNvdWeaknesses(JsonNode.Parse(reader.GetString(4))).ToList(),
+                References = ExtractReferences(JsonNode.Parse(reader.GetString(5))).ToList()
+            });
+        }
+        return records;
+    }
+
+    private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadNvdAfterAsync(
+        string inputSourceCode,
+        string evidenceSourceCode,
+        int limit,
+        Guid? afterRawIndexId,
+        CancellationToken ct)
+    {
+        var sql = afterRawIndexId is null
+            ? """
+                select s.raw_index_id, s.cve_id, s.configurations::text, s.metrics::text,
+                       s.weaknesses::text, s.references_json::text
+                from stg_nvd_cves s
+                join source_raw_index r on r.id = s.raw_index_id
+                join sources src on src.id = r.source_id
+                where src.code = $1
+                  and r.normalize_status <> 'superseded'
+                order by s.raw_index_id
+                limit $2
+                """
+            : """
+                select s.raw_index_id, s.cve_id, s.configurations::text, s.metrics::text,
+                       s.weaknesses::text, s.references_json::text
+                from stg_nvd_cves s
+                join source_raw_index r on r.id = s.raw_index_id
+                join sources src on src.id = r.source_id
+                where src.code = $1
+                  and r.normalize_status <> 'superseded'
+                  and s.raw_index_id > $2
+                order by s.raw_index_id
+                limit $3
+                """;
+        await using var command = db.CreateCommand(sql);
+        // Full NVD maintenance may legitimately spend several minutes producing
+        // the first ordered keyset batch. Cancellation remains request-scoped.
+        command.CommandTimeout = 0;
+        command.Parameters.AddWithValue(inputSourceCode);
+        if (afterRawIndexId is null)
+        {
+            command.Parameters.AddWithValue(limit);
+        }
+        else
+        {
+            command.Parameters.AddWithValue(afterRawIndexId.Value);
+            command.Parameters.AddWithValue(limit);
+        }
+
+        var records = new List<DuckDbEvidenceRecord>(limit);
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            var rawIndexId = reader.GetGuid(0);
+            var cveId = reader.GetString(1);
+            records.Add(EmptyRecord(evidenceSourceCode, rawIndexId, cveId, cveId) with
             {
                 AffectedFacts = ExtractNvdFacts(JsonNode.Parse(reader.GetString(2))).ToList(),
                 SeverityScores = ExtractNvdSeverity(JsonNode.Parse(reader.GetString(3))).ToList(),
@@ -454,15 +591,29 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             var ecosystem = package?["ecosystem"]?.GetValue<string>();
             var name = package?["name"]?.GetValue<string>();
             var purl = package?["purl"]?.GetValue<string>() ?? ToPurl(ecosystem, name);
-            var hadRange = false;
-            var rangesNode = item?["ranges"];
-            foreach (var range in ArrayItems(rangesNode))
+            var emitted = false;
+            foreach (var range in ArrayItems(item?["ranges"]))
             {
-                hadRange = true;
-                yield return new DuckDbAffectedFact("package", ecosystem, name, purl, null, OsvRange(range), range?["type"]?.GetValue<string>(), true);
+                var rangeType = range?["type"]?.GetValue<string>();
+                foreach (var expression in OsvRanges(range))
+                {
+                    emitted = true;
+                    yield return new DuckDbAffectedFact("package", ecosystem, name, purl, null, expression, rangeType, true);
+                }
             }
 
-            if (!hadRange && rangesNode is null && !string.IsNullOrWhiteSpace(name))
+            if (!emitted)
+            {
+                foreach (var version in ArrayItems(item?["versions"])
+                    .Select(node => node?.GetValue<string>())
+                    .Where(value => !string.IsNullOrWhiteSpace(value)))
+                {
+                    emitted = true;
+                    yield return new DuckDbAffectedFact("package", ecosystem, name, purl, null, $"= {version}", "versions", true);
+                }
+            }
+
+            if (!emitted && !string.IsNullOrWhiteSpace(name))
                 yield return new DuckDbAffectedFact("package", ecosystem, name, purl, null, null, null, true);
         }
     }
@@ -601,6 +752,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 var vector = data?["vectorString"]?.GetValue<string>();
                 var score = DecimalValue(data?["baseScore"]);
                 var label = data?["baseSeverity"]?.GetValue<string>() ?? item?["baseSeverity"]?.GetValue<string>();
+                if (version is null && vector is null && score is null && label is null) continue;
                 yield return new DuckDbSeverityScore("cvss", version, "base", vector, score, label);
             }
         }
@@ -677,15 +829,40 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
             yield return match;
     }
 
-    private static string? OsvRange(JsonNode? range)
+    private static IEnumerable<string> OsvRanges(JsonNode? range)
     {
-        var events = ArrayItems(range?["events"]).ToArray();
-        var introduced = events.FirstOrDefault(x => x?["introduced"] is not null)?["introduced"]?.GetValue<string>();
-        var fixedVersion = events.FirstOrDefault(x => x?["fixed"] is not null)?["fixed"]?.GetValue<string>();
-        if (introduced is not null && fixedVersion is not null) return $">= {introduced}, < {fixedVersion}";
-        if (fixedVersion is not null) return $"< {fixedVersion}";
-        if (introduced is not null) return $">= {introduced}";
-        return range?.ToJsonString();
+        string? introduced = null;
+        var emitted = false;
+        foreach (var item in ArrayItems(range?["events"]))
+        {
+            var nextIntroduced = item?["introduced"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(nextIntroduced))
+            {
+                introduced = nextIntroduced;
+                continue;
+            }
+
+            var fixedVersion = item?["fixed"]?.GetValue<string>();
+            var lastAffected = item?["last_affected"]?.GetValue<string>();
+            var limit = item?["limit"]?.GetValue<string>();
+            var upper = fixedVersion ?? limit ?? lastAffected;
+            if (string.IsNullOrWhiteSpace(upper)) continue;
+
+            var upperOperator = lastAffected is null ? "<" : "<=";
+            emitted = true;
+            yield return string.IsNullOrWhiteSpace(introduced)
+                ? $"{upperOperator} {upper}"
+                : $">= {introduced}, {upperOperator} {upper}";
+            introduced = null;
+        }
+
+        if (!string.IsNullOrWhiteSpace(introduced))
+        {
+            emitted = true;
+            yield return $">= {introduced}";
+        }
+        if (!emitted && range is not null)
+            yield return range.ToJsonString();
     }
 
     private static string? CpeRange(JsonNode? cpeMatch)
@@ -806,7 +983,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
     private static string? ParseCpeProduct(string cpe23Uri)
     {
         var parts = cpe23Uri.Split(':');
-        return parts.Length > 5 ? parts[5].Replace("\\:", ":") : null;
+        return parts.Length > 4 ? parts[4].Replace("\\:", ":") : null;
     }
 
     private static DuckDbEvidenceRecord EmptyRecord(string sourceCode, Guid rawIndexId, string vulnerabilityKey, string sourceRecordId) =>
@@ -1202,7 +1379,7 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
     {
         await using var command = db.CreateCommand($"""
             select s.raw_index_id, s.source_key, s.identifiers, s.title, s.source_url, s.artifact_type, s.exploit_type,
-                   s.maturity, s.verification_status, s.published_at, s.modified_at
+                   s.maturity, s.verification_status, s.published_at, s.modified_at, s.artifact_url
             from stg_exploit_pocs s
             join source_raw_index r on r.id = s.raw_index_id
             where provider = $1
@@ -1217,22 +1394,19 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
         command.Parameters.AddWithValue(offset);
         AddRawFilterParameter(command, rawIndexIds);
         command.CommandTimeout = 300;
-        var rows = new List<string>();
         var records = new List<DuckDbEvidenceRecord>();
-        var rawIds = new List<string>();
+        var exploits = new List<DuckDbExploit>();
         await using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
         {
             var rawId = reader.GetGuid(0);
             var sourceKey = reader.GetString(1);
-            rawIds.Add(rawId.ToString("D"));
             var identifierValues = reader.IsDBNull(2) ? [] : reader.GetFieldValue<string[]>(2);
-            var identifiers = System.Text.Json.JsonSerializer.Serialize(identifierValues);
-            rows.Add(CsvRow(
+            exploits.Add(new DuckDbExploit(
                 sourceCode,
-                rawId.ToString("D"),
+                rawId,
                 sourceKey,
-                identifiers,
+                identifierValues,
                 reader.IsDBNull(3) ? null : reader.GetString(3),
                 reader.IsDBNull(4) ? null : reader.GetString(4),
                 reader.IsDBNull(5) ? null : reader.GetString(5),
@@ -1242,26 +1416,14 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 reader.IsDBNull(9) ? null : reader.GetDateTime(9).ToString("O"),
                 reader.IsDBNull(10) ? null : reader.GetDateTime(10).ToString("O")));
             var key = identifierValues.FirstOrDefault(x => x.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase)) ?? sourceKey;
-            var references = reader.IsDBNull(4)
-                ? []
-                : new[] { new DuckDbReference(reader.GetString(4), "exploit", []) };
+            var references = new List<DuckDbReference>();
+            if (!reader.IsDBNull(4))
+                references.Add(new DuckDbReference(reader.GetString(4), "exploit", []));
+            if (!reader.IsDBNull(11))
+                references.Add(new DuckDbReference(reader.GetString(11), "exploit-artifact", []));
             records.Add(EmptyRecord(sourceCode, rawId, key, sourceKey) with { References = references });
         }
-        if (rows.Count > 0)
-        {
-            var tempFile = Path.GetTempFileName() + ".csv";
-            await File.WriteAllLinesAsync(tempFile, rows, ct);
-            try
-            {
-                using var conn = new DuckDB.NET.Data.DuckDBConnection($"Data Source={store.DatabasePath}");
-                conn.Open();
-                DeleteDuckRows(conn, "exploits", sourceCode, rawIds);
-                using var cmd = conn.CreateCommand();
-                cmd.CommandText = $"copy exploits (source_code, raw_index_id, source_key, identifiers, title, source_url, artifact_type, exploit_type, maturity, verification_status, published_at, modified_at) from {DuckSqlString(tempFile)} (header false, delim ',', quote '\"', escape '\"', null '\\N')";
-                cmd.ExecuteNonQuery();
-            }
-            finally { try { File.Delete(tempFile); } catch { } }
-        }
+        await store.UpsertExploitProjectionAsync(exploits, ct);
         return records;
     }
 
@@ -1483,7 +1645,8 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
     private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadNpmAdvisoryAsync(string sourceCode, int limit, int offset, Guid[]? rawIndexIds, CancellationToken ct)
     {
         await using var command = db.CreateCommand($"""
-            select s.raw_index_id, s.ghsa_id, s.cve_id, s.package_name, s.vulnerable_ranges::text, s.cvss::text, s.cwes::text
+            select s.raw_index_id, s.ghsa_id, s.cve_id, s.package_name, s.vulnerable_ranges::text,
+                   s.cvss::text, s.cwes::text, s.references_json::text
             from stg_npm_advisories s
             join source_raw_index r on r.id = s.raw_index_id
             join sources src on src.id = r.source_id
@@ -1522,11 +1685,13 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 facts.Add(new DuckDbAffectedFact("package", "npm", pkgName, $"pkg:npm/{Uri.EscapeDataString(pkgName)}", null, null, "vendor", true));
             var cvss = reader.IsDBNull(5) ? null : JsonNode.Parse(reader.GetString(5));
             var cwes = reader.IsDBNull(6) ? null : JsonNode.Parse(reader.GetString(6));
+            var references = reader.IsDBNull(7) ? null : JsonNode.Parse(reader.GetString(7));
             records.Add(EmptyRecord(sourceCode, rawId, key, ghsaId) with
             {
                 AffectedFacts = facts,
                 SeverityScores = ExtractGhsaSeverity(cvss).ToList(),
-                Weaknesses = ExtractGhsaWeaknesses(cwes).ToList()
+                Weaknesses = ExtractGhsaWeaknesses(cwes).ToList(),
+                References = ExtractReferences(references).ToList()
             });
         }
         return records;
@@ -1563,8 +1728,8 @@ public sealed class DuckDbEvidenceNormalizer(NpgsqlDataSource db, DuckDbEvidence
                 var affected = JsonNode.Parse(reader.GetString(4))?.AsArray() ?? [];
                 foreach (var a in affected)
                 {
-                    var rawRange = OsvRange(a);
-                    facts.Add(new DuckDbAffectedFact("package", "PyPI", pkgName, $"pkg:pypi/{Uri.EscapeDataString(pkgName.ToLowerInvariant())}", null, rawRange, a?["type"]?.GetValue<string>(), true));
+                    foreach (var rawRange in OsvRanges(a))
+                        facts.Add(new DuckDbAffectedFact("package", "PyPI", pkgName, $"pkg:pypi/{Uri.EscapeDataString(pkgName.ToLowerInvariant())}", null, rawRange, a?["type"]?.GetValue<string>(), true));
                 }
             }
             if (facts.Count == 0 && !string.IsNullOrWhiteSpace(pkgName))

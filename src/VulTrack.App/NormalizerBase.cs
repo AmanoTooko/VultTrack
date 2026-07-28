@@ -10,6 +10,10 @@ public abstract class NormalizerBase(
 {
     protected IVulnerabilityCanonicalizer Canonicalizer { get; } = canonicalizer;
 
+    // DuckDB owns high-cardinality evidence; PostgreSQL retains only canonical metadata.
+    protected static bool DuckDbEvidenceOnly =>
+        string.Equals(Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_EVIDENCE_ONLY"), "true", StringComparison.OrdinalIgnoreCase);
+
     protected Task<Guid> UpsertVulnerabilityAsync(NpgsqlConnection connection, Guid sourceId, Guid rawIndexId, string primaryIdentifier, string? title, string? description, string? status, DateTimeOffset? publishedAt, DateTimeOffset? modifiedAt, string[] identifiers, CancellationToken ct) =>
         Canonicalizer.UpsertCanonicalAsync(
             connection,
@@ -91,6 +95,7 @@ public abstract class NormalizerBase(
 
     protected async Task InsertAffectedFactsAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, Guid rawIndexId, IReadOnlyList<AffectedFactDraft> facts, CancellationToken ct)
     {
+        if (DuckDbEvidenceOnly) return;
         if (facts.Count == 0)
         {
             await DispatchAffectedHooksAsync(connection, vulnerabilityId, recordId, facts, ct);
@@ -269,6 +274,17 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertSeverityScoresAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, Guid rawIndexId, IReadOnlyList<SeverityScoreDraft> scores, CancellationToken ct)
     {
+        if (DuckDbEvidenceOnly)
+        {
+            var summary = scores
+                .Where(x => x.Score is not null)
+                .OrderByDescending(x => x.Score)
+                .FirstOrDefault();
+            if (summary is not null)
+                await UpdateSeveritySummaryAsync(connection, vulnerabilityId, summary, ct);
+            return;
+        }
+
         // Delete existing scores for this record to avoid duplicates on re-normalize
         await using (var delCmd = new NpgsqlCommand(
             "delete from vulnerability_severity_scores where vulnerability_record_id = $1", connection))
@@ -317,6 +333,7 @@ public abstract class NormalizerBase(
                     severity_label = coalesce(severity_label, $5),
                     updated_at = now()
                 where id = $1
+                  and (max_cvss_score is null or max_cvss_score < $2 or (severity_label is null and $5 is not null))
                 """, connection);
             update.Parameters.AddWithValue(vulnerabilityId);
             update.Parameters.AddWithValue(selectedScore);
@@ -330,6 +347,19 @@ public abstract class NormalizerBase(
     protected static async Task InsertSeverityScoresBatchAsync(NpgsqlConnection connection, IReadOnlyList<SeverityScoreBatchItem> items, CancellationToken ct)
     {
         if (items.Count == 0) return;
+        if (DuckDbEvidenceOnly)
+        {
+            var summaries = items
+                .SelectMany(item => item.Scores
+                    .Where(score => score.Score is not null)
+                    .Select(score => new { item.VulnerabilityId, Score = score }))
+                .GroupBy(x => x.VulnerabilityId)
+                .Select(group => group.OrderByDescending(x => x.Score.Score).First())
+                .ToList();
+            await UpdateSeveritySummariesBatchAsync(connection, summaries.Select(x => (x.VulnerabilityId, x.Score)).ToList(), ct);
+            return;
+        }
+
         await DeleteRecordRowsBatchAsync(connection, "vulnerability_severity_scores", items.Select(x => x.VulnerabilityRecordId).ToArray(), ct);
 
         var rows = items.SelectMany(item =>
@@ -414,6 +444,70 @@ public abstract class NormalizerBase(
                     updated_at = now()
                 from (values {string.Join(",", values)}) as incoming(id, score, version, vector, label)
                 where v.id = incoming.id
+                  and (v.max_cvss_score is null or v.max_cvss_score < incoming.score
+                       or (v.severity_label is null and incoming.label is not null))
+                """, connection);
+            update.CommandTimeout = 300;
+            foreach (var parameter in parameters) update.Parameters.AddWithValue(parameter);
+            await update.ExecuteNonQueryAsync(ct);
+        }
+    }
+
+    private static async Task UpdateSeveritySummaryAsync(
+        NpgsqlConnection connection,
+        Guid vulnerabilityId,
+        SeverityScoreDraft score,
+        CancellationToken ct)
+    {
+        await using var update = new NpgsqlCommand("""
+            update vulnerabilities
+            set max_cvss_score = case when max_cvss_score is null or max_cvss_score < $2 then $2 else max_cvss_score end,
+                max_cvss_version = case when max_cvss_score is null or max_cvss_score < $2 then $3 else max_cvss_version end,
+                max_cvss_vector = case when max_cvss_score is null or max_cvss_score < $2 then $4 else max_cvss_vector end,
+                severity_label = coalesce(severity_label, $5),
+                updated_at = now()
+            where id = $1
+              and (max_cvss_score is null or max_cvss_score < $2 or (severity_label is null and $5 is not null))
+            """, connection);
+        update.Parameters.AddWithValue(vulnerabilityId);
+        update.Parameters.AddWithValue(score.Score!.Value);
+        update.Parameters.AddWithValue((object?)score.ScoringVersion ?? DBNull.Value);
+        update.Parameters.AddWithValue((object?)score.VectorString ?? DBNull.Value);
+        update.Parameters.AddWithValue((object?)score.SeverityLabel ?? DBNull.Value);
+        await update.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task UpdateSeveritySummariesBatchAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<(Guid VulnerabilityId, SeverityScoreDraft Score)> summaries,
+        CancellationToken ct)
+    {
+        foreach (var batch in summaries.Chunk(1000))
+        {
+            var values = new List<string>();
+            var parameters = new List<object>();
+            var parameterIndex = 1;
+            foreach (var row in batch)
+            {
+                values.Add($"(${parameterIndex++}::uuid,${parameterIndex++}::numeric,${parameterIndex++},${parameterIndex++},${parameterIndex++})");
+                parameters.Add(row.VulnerabilityId);
+                parameters.Add(row.Score.Score!.Value);
+                parameters.Add((object?)row.Score.ScoringVersion ?? DBNull.Value);
+                parameters.Add((object?)row.Score.VectorString ?? DBNull.Value);
+                parameters.Add((object?)row.Score.SeverityLabel ?? DBNull.Value);
+            }
+
+            await using var update = new NpgsqlCommand($"""
+                update vulnerabilities v
+                set max_cvss_score = case when v.max_cvss_score is null or v.max_cvss_score < incoming.score then incoming.score else v.max_cvss_score end,
+                    max_cvss_version = case when v.max_cvss_score is null or v.max_cvss_score < incoming.score then incoming.version else v.max_cvss_version end,
+                    max_cvss_vector = case when v.max_cvss_score is null or v.max_cvss_score < incoming.score then incoming.vector else v.max_cvss_vector end,
+                    severity_label = coalesce(v.severity_label, incoming.label),
+                    updated_at = now()
+                from (values {string.Join(",", values)}) as incoming(id, score, version, vector, label)
+                where v.id = incoming.id
+                  and (v.max_cvss_score is null or v.max_cvss_score < incoming.score
+                       or (v.severity_label is null and incoming.label is not null))
                 """, connection);
             update.CommandTimeout = 300;
             foreach (var parameter in parameters) update.Parameters.AddWithValue(parameter);
@@ -423,6 +517,7 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertReferencesAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, IReadOnlyList<ReferenceDraft> references, CancellationToken ct)
     {
+        if (DuckDbEvidenceOnly) return;
         var valid = references.Where(x => !string.IsNullOrWhiteSpace(x.Url)).DistinctBy(x => x.Url).ToList();
         if (valid.Count == 0) return;
 
@@ -477,6 +572,7 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertReferencesBatchAsync(NpgsqlConnection connection, IReadOnlyList<ReferenceBatchItem> items, CancellationToken ct)
     {
+        if (DuckDbEvidenceOnly) return;
         if (items.Count == 0) return;
         await DeleteRecordRowsBatchAsync(connection, "vulnerability_references", items.Select(x => x.VulnerabilityRecordId).ToArray(), ct);
 
@@ -519,6 +615,7 @@ public abstract class NormalizerBase(
     protected async Task InsertAffectedFactsBatchAsync(NpgsqlConnection connection, IReadOnlyList<AffectedFactBatchItem> items, CancellationToken ct)
     {
         if (items.Count == 0) return;
+        if (DuckDbEvidenceOnly) return;
         await DeleteRecordRowsBatchAsync(connection, "vulnerability_affected_facts", items.Select(x => x.VulnerabilityRecordId).ToArray(), ct);
 
         var rows = items
@@ -536,6 +633,7 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertWeaknessesAsync(NpgsqlConnection connection, Guid vulnerabilityId, Guid recordId, Guid sourceId, IReadOnlyList<WeaknessDraft> weaknesses, CancellationToken ct)
     {
+        if (DuckDbEvidenceOnly) return;
         var valid = weaknesses
             .Where(x => !string.IsNullOrWhiteSpace(x.WeaknessId) || !string.IsNullOrWhiteSpace(x.Description))
             .GroupBy(x => string.IsNullOrWhiteSpace(x.WeaknessId) ? "" : x.WeaknessId.Trim(), StringComparer.OrdinalIgnoreCase)
@@ -584,6 +682,7 @@ public abstract class NormalizerBase(
 
     protected static async Task InsertWeaknessesBatchAsync(NpgsqlConnection connection, IReadOnlyList<WeaknessBatchItem> items, CancellationToken ct)
     {
+        if (DuckDbEvidenceOnly) return;
         var rows = items
             .SelectMany(item => item.Weaknesses
                 .Where(x => !string.IsNullOrWhiteSpace(x.WeaknessId) || !string.IsNullOrWhiteSpace(x.Description))

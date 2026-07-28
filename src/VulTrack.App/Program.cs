@@ -4,48 +4,59 @@ using Npgsql;
 using VulTrack.App;
 
 var builder = WebApplication.CreateBuilder(args);
-
-var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL")
-    ?? builder.Configuration.GetConnectionString("Default")
-    ?? "Host=localhost;Port=5432;Database=vultrack;Username=vultrack;Password=vultrack";
-
-builder.Services.AddSingleton(NpgsqlDataSource.Create(ToNpgsqlConnectionString(databaseUrl)));
-builder.Services.Configure<VulTrackSchedulerOptions>(builder.Configuration.GetSection("VulTrack:Scheduler"));
-builder.Services.AddSingleton<NvdRawProcessor>();
-builder.Services.AddSingleton<IVulnerabilityCanonicalizer, VulnerabilityCanonicalizer>();
-builder.Services.AddSingleton<IAffectedComponentHook, DefaultAffectedComponentHook>();
-builder.Services.AddSingleton<IRawNormalizer, NvdRawNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, OsvRawNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, GhsaRawNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, EcosystemAdvisoryNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, PypiRawNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, CveListRawNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, ThreatIntelRawNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, ExploitPocRawNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, ExternalAdvisoryRawNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, DistroRawNormalizer>();
-builder.Services.AddSingleton<IRawNormalizer, ComponentCatalogNormalizer>();
-builder.Services.AddSingleton<RawNormalizationService>();
-var normalizerBackend = Environment.GetEnvironmentVariable("VULTRACK_NORMALIZER_BACKEND")
-    ?? builder.Configuration["VulTrack:NormalizerBackend"]
+var storageBackend = Environment.GetEnvironmentVariable("VULTRACK_STORAGE_BACKEND")
+    ?? builder.Configuration["VulTrack:StorageBackend"]
     ?? "postgres";
-if (string.Equals(normalizerBackend, "duckdb", StringComparison.OrdinalIgnoreCase))
-    builder.Services.AddSingleton<IRawNormalizationService, DuckDbRawNormalizationService>();
-else
-    builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>();
+var duckDbPrimary = string.Equals(storageBackend, "duckdb", StringComparison.OrdinalIgnoreCase);
+
+if (!duckDbPrimary)
+{
+    var databaseUrl = Environment.GetEnvironmentVariable("DATABASE_URL")
+        ?? builder.Configuration.GetConnectionString("Default")
+        ?? "Host=localhost;Port=5432;Database=vultrack;Username=vultrack;Password=vultrack";
+    builder.Services.AddSingleton(NpgsqlDataSource.Create(ToNpgsqlConnectionString(databaseUrl)));
+}
+builder.Services.Configure<VulTrackSchedulerOptions>(builder.Configuration.GetSection("VulTrack:Scheduler"));
 builder.Services.AddSingleton<ComponentVulnerabilitySearchService>();
 builder.Services.AddSingleton<AdminAuthService>();
-builder.Services.AddSingleton<SourceScheduler>();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<DuckDbEvidenceStore>();
 builder.Services.AddSingleton<DuckDbEvidenceNormalizer>();
-builder.Services.AddSingleton<StagingPayloadCompactor>();
-builder.Services.AddSingleton<DuckDbAffectedComponentProjector>();
-builder.Services.AddSingleton<VulnerabilityDetailService>();
+builder.Services.AddSingleton<DuckDbFirstScheduler>();
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<DuckDbFirstScheduler>());
 builder.Services.AddSingleton<VulnerabilityDetailSnapshotStore>();
-builder.Services.AddSingleton<VulnerabilityDetailSnapshotBuilder>();
-builder.Services.AddHttpClient<AiVulnerabilitySummaryService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<SourceScheduler>());
+if (!duckDbPrimary)
+{
+    builder.Services.AddSingleton<NvdRawProcessor>();
+    builder.Services.AddSingleton<IVulnerabilityCanonicalizer, VulnerabilityCanonicalizer>();
+    builder.Services.AddSingleton<IAffectedComponentHook, DefaultAffectedComponentHook>();
+    builder.Services.AddSingleton<IRawNormalizer, NvdRawNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, OsvRawNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, GhsaRawNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, EcosystemAdvisoryNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, PypiRawNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, CveListRawNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, ThreatIntelRawNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, ExploitPocRawNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, ExternalAdvisoryRawNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, DistroRawNormalizer>();
+    builder.Services.AddSingleton<IRawNormalizer, ComponentCatalogNormalizer>();
+    builder.Services.AddSingleton<RawNormalizationService>();
+    var normalizerBackend = Environment.GetEnvironmentVariable("VULTRACK_NORMALIZER_BACKEND")
+        ?? builder.Configuration["VulTrack:NormalizerBackend"]
+        ?? "postgres";
+    if (string.Equals(normalizerBackend, "duckdb", StringComparison.OrdinalIgnoreCase))
+        builder.Services.AddSingleton<IRawNormalizationService, DuckDbRawNormalizationService>();
+    else
+        builder.Services.AddSingleton<IRawNormalizationService, RawNormalizationService>();
+    builder.Services.AddSingleton<StagingPayloadCompactor>();
+    builder.Services.AddSingleton<DuckDbAffectedComponentProjector>();
+    builder.Services.AddSingleton<VulnerabilityDetailService>();
+    builder.Services.AddSingleton<VulnerabilityDetailSnapshotBuilder>();
+    builder.Services.AddHttpClient<AiVulnerabilitySummaryService>();
+    builder.Services.AddSingleton<SourceScheduler>();
+    builder.Services.AddHostedService(sp => sp.GetRequiredService<SourceScheduler>());
+}
 
 var app = builder.Build();
 
@@ -54,17 +65,21 @@ app.UseStaticFiles();
 
 app.MapGet("/", () => Results.Redirect("/index.html"));
 
-var runtimeDb = app.Services.GetRequiredService<NpgsqlDataSource>();
-await EnsureRuntimeIndexesAsync(runtimeDb);
-try
+var startupMaintenanceEnabled = string.Equals(
+    Environment.GetEnvironmentVariable("VULTRACK_STARTUP_MAINTENANCE"),
+    "true",
+    StringComparison.OrdinalIgnoreCase);
+if (startupMaintenanceEnabled && !duckDbPrimary)
 {
+    var runtimeDb = app.Services.GetRequiredService<NpgsqlDataSource>();
+    await EnsureRuntimeIndexesAsync(runtimeDb);
     await EnsureDetailSnapshotQueueAsync(runtimeDb);
+    await BackfillCvssScoresAsync(runtimeDb);
 }
-catch (Exception ex) when (ex is NpgsqlException or TimeoutException)
+else
 {
-    app.Logger.LogWarning(ex, "Detail snapshot queue initialization was skipped because the database was busy.");
+    app.Logger.LogInformation("Startup database maintenance is disabled; using the existing schema, indexes, and queues.");
 }
-await BackfillCvssScoresAsync(runtimeDb);
 
 app.MapGet("/api/v1/system.health", () => ApiResult.Ok(new
 {
@@ -73,8 +88,14 @@ app.MapGet("/api/v1/system.health", () => ApiResult.Ok(new
     dotnet = Environment.Version.ToString()
 }));
 
-app.MapGet("/api/v1/system.ready", async (NpgsqlDataSource db, CancellationToken ct) =>
+app.MapGet("/api/v1/system.ready", async (DuckDbEvidenceStore duckDb, CancellationToken ct) =>
 {
+    if (duckDbPrimary)
+    {
+        await duckDb.InitializeAsync(ct);
+        return ApiResult.Ok(new { status = "ready", storageBackend = "duckdb", path = duckDb.DatabasePath });
+    }
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     await using var cmd = db.CreateCommand("select 1");
     await cmd.ExecuteScalarAsync(ct);
     return ApiResult.Ok(new { status = "ready" });
@@ -98,8 +119,10 @@ app.MapPost("/api/v1/auth.logout", (HttpContext context, AdminAuthService auth) 
     return ApiResult.Ok(new { authenticated = false });
 });
 
-app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken ct) =>
+app.MapGet("/api/v1/source.list", async (CancellationToken ct) =>
 {
+    if (duckDbPrimary) return ApiResult.Ok(DuckDbConfiguredSources());
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     var rows = new List<object>();
     await using var cmd = db.CreateCommand("""
         select code, name, kind, enabled, plugin_name, schedule_cron
@@ -125,11 +148,13 @@ app.MapGet("/api/v1/source.list", async (NpgsqlDataSource db, CancellationToken 
 var systemStatusCache = new StatusCache();
 var systemStatusFastCache = new StatusCache();
 
-app.MapGet("/api/v1/system.status", async (HttpContext context, AdminAuthService auth, NpgsqlDataSource db, bool? fast, CancellationToken ct) =>
+app.MapGet("/api/v1/system.status", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore duckDb, bool? fast, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary) return ApiResult.Ok(await duckDb.GetPrimaryStatusAsync(ct));
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     if (fast == true)
-        return ApiResult.Ok(await GetFastSystemStatusAsync(db, systemStatusFastCache, ct));
+        return ApiResult.Ok(await GetFastSystemStatusAsync(db, duckDb, systemStatusFastCache, ct));
 
     var now = DateTimeOffset.UtcNow;
     if (systemStatusCache.Value is not null && systemStatusCache.ExpiresAt > now)
@@ -274,20 +299,20 @@ app.MapGet("/api/v1/system.status", async (HttpContext context, AdminAuthService
 
         var totals = await CountTablesAsync(db, [
             "vulnerabilities",
-        "vulnerability_records",
-        "vulnerability_exploits",
-        "vulnerability_affected_components",
-        "components",
-        "registry_packages",
-        "cpe_entries"
+            "vulnerability_records",
+            "vulnerability_exploits",
+            "components",
+            "registry_packages",
+            "cpe_entries"
         ], ct);
+        var affectedComponents = await GetAffectedComponentCountAsync(db, duckDb, ct);
 
         var status = new
         {
             vulnerabilities = totals["vulnerabilities"],
             vulnerabilityRecords = totals["vulnerability_records"],
             vulnerabilityExploits = totals["vulnerability_exploits"],
-            affectedComponents = totals["vulnerability_affected_components"],
+            affectedComponents,
             components = totals["components"],
             registryPackages = totals["registry_packages"],
             cpeEntries = totals["cpe_entries"],
@@ -310,31 +335,42 @@ app.MapGet("/api/v1/system.status", async (HttpContext context, AdminAuthService
     }
 });
 
-app.MapPost("/api/v1/nvd.processPending", async (HttpContext context, AdminAuthService auth, NvdRawProcessor processor, ProcessPendingRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/nvd.processPending", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer duckNormalizer, ProcessPendingRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary)
+        return ApiResult.Ok(await duckNormalizer.IngestSpoolAsync(new DuckDbSpoolIngestRequest(BatchSize: Math.Max(100, request.Limit), MaxFiles: 100), ct));
+    var processor = app.Services.GetRequiredService<NvdRawProcessor>();
     var result = await processor.ProcessPendingAsync(request.Limit <= 0 ? 100 : request.Limit, ct);
     return ApiResult.Ok(result);
 });
 
-app.MapPost("/api/v1/raw.normalizePending", async (HttpContext context, AdminAuthService auth, IRawNormalizationService processor, NormalizePendingRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/raw.normalizePending", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer duckNormalizer, NormalizePendingRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary)
+        return ApiResult.Ok(await duckNormalizer.IngestSpoolAsync(new DuckDbSpoolIngestRequest(BatchSize: Math.Max(100, request.LimitPerSource), MaxFiles: 100), ct));
+    var processor = app.Services.GetRequiredService<IRawNormalizationService>();
     var result = await processor.ProcessPendingAsync(request.LimitPerSource <= 0 ? 100 : request.LimitPerSource, ct);
     return ApiResult.Ok(result);
 });
 
-app.MapPost("/api/v1/raw.normalizeSource", async (HttpContext context, AdminAuthService auth, IRawNormalizationService processor, NormalizeSourceRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/raw.normalizeSource", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer duckNormalizer, NormalizeSourceRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     var limit = request.Limit <= 0 ? 100 : request.Limit;
+    if (duckDbPrimary)
+        return ApiResult.Ok(await duckNormalizer.IngestSpoolAsync(new DuckDbSpoolIngestRequest(BatchSize: Math.Max(100, limit), MaxFiles: 100), ct));
+    var processor = app.Services.GetRequiredService<IRawNormalizationService>();
     var result = await processor.ProcessSourcePendingAsync(request.SourceCode, limit, ct);
     return ApiResult.Ok(result);
 });
 
-app.MapGet("/api/v1/admin.source.list", async (HttpContext context, AdminAuthService auth, NpgsqlDataSource db, CancellationToken ct) =>
+app.MapGet("/api/v1/admin.source.list", async (HttpContext context, AdminAuthService auth, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary) return ApiResult.Ok(DuckDbConfiguredSources());
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     var rows = new List<object>();
     await using var cmd = db.CreateCommand("""
         select s.code, s.name, s.kind, s.enabled, s.plugin_name, s.schedule_cron,
@@ -379,9 +415,11 @@ app.MapGet("/api/v1/admin.source.list", async (HttpContext context, AdminAuthSer
     return ApiResult.Ok(rows);
 });
 
-app.MapPost("/api/v1/admin.source.update", async (HttpContext context, AdminAuthService auth, NpgsqlDataSource db, AdminSourceUpdateRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/admin.source.update", async (HttpContext context, AdminAuthService auth, AdminSourceUpdateRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary) return ApiResult.Error("ENV_CONFIGURATION_REQUIRED", "Set DUCKDB_FETCH_SOURCES and restart the API to change DuckDB-first scheduled sources.");
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     if (!IsValidSourceCode(request.SourceCode)) return ApiResult.Error("INVALID_SOURCE", "Invalid source code.");
     var runMode = string.IsNullOrWhiteSpace(request.RunMode) ? null : request.RunMode.Trim().ToLowerInvariant();
     if (runMode is not null and not "manual" and not "init") return ApiResult.Error("INVALID_RUN_MODE", "Run mode must be manual, init, or empty.");
@@ -402,24 +440,32 @@ app.MapPost("/api/v1/admin.source.update", async (HttpContext context, AdminAuth
         : ApiResult.Ok(new { sourceCode = request.SourceCode, request.Enabled, scheduleCron = request.ScheduleCron, runMode });
 });
 
-app.MapPost("/api/v1/admin.source.fetch", async (HttpContext context, AdminAuthService auth, SourceScheduler scheduler, AdminSourceActionRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/admin.source.fetch", async (HttpContext context, AdminAuthService auth, DuckDbFirstScheduler duckScheduler, AdminSourceActionRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
     if (!IsValidSourceCode(request.SourceCode)) return ApiResult.Error("INVALID_SOURCE", "Invalid source code.");
-    await scheduler.RunSourceNowAsync(request.SourceCode, request.Force, ct);
+    if (duckDbPrimary)
+        await duckScheduler.RunSourceAsync(request.SourceCode, request.Force, ct);
+    else
+        await app.Services.GetRequiredService<SourceScheduler>().RunSourceNowAsync(request.SourceCode, request.Force, ct);
     return ApiResult.Ok(new { sourceCode = request.SourceCode, fetched = true, request.Force });
 });
 
-app.MapPost("/api/v1/admin.source.normalize", async (HttpContext context, AdminAuthService auth, IRawNormalizationService processor, AdminSourceActionRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/admin.source.normalize", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer duckNormalizer, AdminSourceActionRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary)
+        return ApiResult.Ok(await duckNormalizer.IngestSpoolAsync(new DuckDbSpoolIngestRequest(BatchSize: 5000, MaxFiles: 100), ct));
+    var processor = app.Services.GetRequiredService<IRawNormalizationService>();
     var result = await processor.ProcessSourcePendingAsync(request.SourceCode, request.Limit <= 0 ? 100 : request.Limit, ct);
     return ApiResult.Ok(result);
 });
 
-app.MapPost("/api/v1/admin.source.reprocess", async (HttpContext context, AdminAuthService auth, NpgsqlDataSource db, AdminSourceActionRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/admin.source.reprocess", async (HttpContext context, AdminAuthService auth, AdminSourceActionRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary) return ApiResult.Error("REFETCH_REQUIRED", "DuckDB-first records are idempotent; force the fetcher checkpoint and refetch the source instead.");
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     if (!IsValidSourceCode(request.SourceCode)) return ApiResult.Error("INVALID_SOURCE", "Invalid source code.");
     await using var cmd = db.CreateCommand("""
         update source_raw_index raw
@@ -432,18 +478,35 @@ app.MapPost("/api/v1/admin.source.reprocess", async (HttpContext context, AdminA
     return ApiResult.Ok(new { sourceCode = request.SourceCode, queued = rows });
 });
 
-app.MapPost("/api/v1/admin.scheduler.runDue", async (HttpContext context, AdminAuthService auth, SourceScheduler scheduler, CancellationToken ct) =>
+app.MapPost("/api/v1/admin.scheduler.runDue", async (HttpContext context, AdminAuthService auth, DuckDbFirstScheduler duckScheduler, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
-    await scheduler.RunDueSourcesAsync(ct);
+    if (duckDbPrimary)
+        await duckScheduler.RunCycleAsync(ct);
+    else
+        await app.Services.GetRequiredService<SourceScheduler>().RunDueSourcesAsync(ct);
     return ApiResult.Ok(new { completed = true });
 });
 
 app.MapPost("/api/v1/admin.duckdbEvidence.normalize", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer normalizer, DuckDbEvidenceNormalizeRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary)
+        return ApiResult.Ok(await normalizer.IngestSpoolAsync(new DuckDbSpoolIngestRequest(BatchSize: request.BatchSize <= 0 ? 5000 : request.BatchSize, MaxFiles: 100), ct));
     var result = await normalizer.NormalizeAsync(request, ct);
     return ApiResult.Ok(result);
+});
+
+app.MapPost("/api/v1/admin.duckdbSpool.ingest", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer normalizer, DuckDbSpoolIngestRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await normalizer.IngestSpoolAsync(request, ct));
+});
+
+app.MapPost("/api/v1/admin.duckdbAi.import", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore duckDb, DuckDbAiImportRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await duckDb.ImportAiAnalysesAsync(request.Path, ct));
 });
 
 app.MapGet("/api/v1/admin.duckdbEvidence.stats", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, CancellationToken ct) =>
@@ -452,35 +515,73 @@ app.MapGet("/api/v1/admin.duckdbEvidence.stats", async (HttpContext context, Adm
     return ApiResult.Ok(await store.StatsAsync(ct));
 });
 
-app.MapPost("/api/v1/admin.duckdbAffectedComponents.rebuild", async (HttpContext context, AdminAuthService auth, DuckDbAffectedComponentProjector projector, DuckDbAffectedComponentRebuildRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/admin.duckdbCatalog.rebuild", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await store.RebuildCatalogAsync(ct));
+});
+
+app.MapPost("/api/v1/admin.duckdbAffectedComponents.rebuild", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, DuckDbAffectedComponentRebuildRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary) return ApiResult.Ok(new { affectedComponents = await store.RebuildAffectedComponentsFromCatalogAsync(ct), source = "duckdb" });
+    var projector = app.Services.GetRequiredService<DuckDbAffectedComponentProjector>();
     return ApiResult.Ok(await projector.RebuildAsync(request, ct));
 });
 
-app.MapPost("/api/v1/admin.duckdbAffectedComponents.processQueue", async (HttpContext context, AdminAuthService auth, DuckDbAffectedComponentProjector projector, DuckDbAffectedComponentQueueRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/admin.duckdbAffectedComponents.rebuildFromEvidence", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary) return ApiResult.Ok(new { affectedComponents = await store.RebuildAffectedComponentsFromCatalogAsync(ct), source = "duckdb" });
+    var projector = app.Services.GetRequiredService<DuckDbAffectedComponentProjector>();
+    return ApiResult.Ok(await projector.RebuildFromDuckDbEvidenceAsync(ct));
+});
+
+app.MapPost("/api/v1/admin.duckdbAffectedComponents.processQueue", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, DuckDbAffectedComponentQueueRequest request, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary) return ApiResult.Ok(new { affectedComponents = await store.RebuildAffectedComponentsFromCatalogAsync(ct), queued = 0, source = "duckdb" });
+    var projector = app.Services.GetRequiredService<DuckDbAffectedComponentProjector>();
     return ApiResult.Ok(await projector.ProcessQueueAsync(request, ct));
 });
 
-app.MapPost("/api/v1/admin.detailSnapshot.rebuild", async (HttpContext context, AdminAuthService auth, VulnerabilityDetailSnapshotBuilder builder, DetailSnapshotBuildRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/admin.detailSnapshot.rebuild", async (HttpContext context, AdminAuthService auth, DetailSnapshotBuildRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary) return ApiResult.Ok(new { rebuilt = 0, source = "duckdb-live", message = "DuckDB-primary detail responses are assembled directly; no PostgreSQL snapshot queue is required." });
+    var builder = app.Services.GetRequiredService<VulnerabilityDetailSnapshotBuilder>();
     var result = await builder.RebuildAsync(request, ct);
     return ApiResult.Ok(result);
 });
 
-app.MapGet("/api/v1/vulnerability.aiSummary", async (AiVulnerabilitySummaryService summaries, Guid id, CancellationToken ct) =>
+app.MapGet("/api/v1/vulnerability.aiSummary", async (Guid id, CancellationToken ct) =>
 {
+    if (duckDbPrimary)
+    {
+        var duckDb = app.Services.GetRequiredService<DuckDbEvidenceStore>();
+        var analysis = await duckDb.GetAiAnalysisAsync(id, ct);
+        return analysis is null
+            ? ApiResult.Ok(new { status = "not_analyzed", analyzed = false, message = "No AI analysis exists for this vulnerability." })
+            : ApiResult.Ok(analysis);
+    }
+    var summaries = app.Services.GetRequiredService<AiVulnerabilitySummaryService>();
     var result = await summaries.GetAsync(id, generate: false, force: false, ct);
     return result is null
         ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString())
         : ApiResult.Ok(result);
 });
 
-app.MapGet("/api/v1/vulnerability.aiAnalysis", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
+app.MapGet("/api/v1/vulnerability.aiAnalysis", async (Guid id, CancellationToken ct) =>
 {
+    if (duckDbPrimary)
+    {
+        var duckDb = app.Services.GetRequiredService<DuckDbEvidenceStore>();
+        var analysis = await duckDb.GetAiAnalysisAsync(id, ct);
+        return analysis is null
+            ? ApiResult.Ok(new { status = "not_analyzed", analyzed = false, message = "No AI analysis exists for this vulnerability." })
+            : ApiResult.Ok(analysis);
+    }
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     await using var command = db.CreateCommand("""
         select vulnerability_id, model, prompt_version, evidence_hash, analysis_json::text,
                input_chars, output_chars, source_url, updated_at
@@ -514,26 +615,44 @@ app.MapGet("/api/v1/vulnerability.aiAnalysis", async (NpgsqlDataSource db, Guid 
     });
 });
 
-app.MapPost("/api/v1/admin.vulnerability.aiSummary", async (HttpContext context, AdminAuthService auth, AiVulnerabilitySummaryService summaries, AiSummaryRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/admin.vulnerability.aiSummary", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore duckDb, AiSummaryRequest request, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary)
+    {
+        var cached = await duckDb.GetAiAnalysisAsync(request.Id, ct);
+        return cached is null
+            ? ApiResult.Error("AI_BATCH_REQUIRED", "DuckDB-primary AI analyses are generated by the standalone batch process and then imported.")
+            : ApiResult.Ok(cached);
+    }
+    var summaries = app.Services.GetRequiredService<AiVulnerabilitySummaryService>();
     var result = await summaries.GetAsync(request.Id, generate: true, force: request.Force, ct);
     return result is null
         ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", request.Id.ToString())
         : ApiResult.Ok(result);
 });
 
-app.MapGet("/api/v1/admin.vulnerability.aiSummaryInput", async (HttpContext context, AdminAuthService auth, AiVulnerabilitySummaryService summaries, Guid id, CancellationToken ct) =>
+app.MapGet("/api/v1/admin.vulnerability.aiSummaryInput", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore duckDb, Guid id, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    if (duckDbPrimary)
+    {
+        var detail = await duckDb.GetCatalogDetailAsync(id, ct);
+        return detail is null ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString()) : ApiResult.Ok(detail);
+    }
+    var summaries = app.Services.GetRequiredService<AiVulnerabilitySummaryService>();
     var result = await summaries.GetInputAsync(id, ct);
     return result is null
         ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString())
         : ApiResult.Ok(result);
 });
 
-app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, VulnerabilitySearchRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/vulnerability.search", async (DuckDbEvidenceStore duckDb, VulnerabilitySearchRequest request, CancellationToken ct) =>
 {
+    if (duckDbPrimary)
+        return ApiResult.Ok(await duckDb.SearchCatalogAsync(request, ct));
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
+
     var rows = new List<object>();
     var rawQuery = (request.Query ?? "").Trim();
     var pattern = $"%{rawQuery}%";
@@ -556,21 +675,37 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
 
     if (ecosystemVersion is not null)
     {
-        await using var cmd = db.CreateCommand($"""
-            select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
-                   v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
-                   v.identifiers, v.aliases
-            from vulnerabilities v
-            where v.id in (
-                select c.vulnerability_id
-                from vulnerability_affected_components c
-                where lower(c.ecosystem) = lower($1)
-                  and (c.display_name is not null or c.package_name is not null)
-            )
-            order by {orderBy}
-            limit $2 offset $3
-            """);
-        cmd.Parameters.AddWithValue(ecosystemVersion.Value.Ecosystem);
+        var candidateIds = duckDb.Enabled
+            ? await duckDb.QueryAffectedVulnerabilityIdsByEcosystemAsync(ecosystemVersion.Value.Ecosystem, fetchLimit + offset, 0, ct)
+            : [];
+        await using var cmd = duckDb.Enabled
+            ? db.CreateCommand($"""
+                select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                       v.identifiers, v.aliases
+                from vulnerabilities v
+                where v.id = any($1)
+                order by {orderBy}
+                limit $2 offset $3
+                """)
+            : db.CreateCommand($"""
+                select v.id, v.primary_identifier, v.title, v.severity_label, v.max_cvss_score,
+                       v.affected_component_count, v.affected_component_names, v.published_at, v.modified_at,
+                       v.identifiers, v.aliases
+                from vulnerabilities v
+                where v.id in (
+                    select c.vulnerability_id
+                    from vulnerability_affected_components c
+                    where lower(c.ecosystem) = lower($1)
+                      and (c.display_name is not null or c.package_name is not null)
+                )
+                order by {orderBy}
+                limit $2 offset $3
+                """);
+        if (duckDb.Enabled)
+            cmd.Parameters.AddWithValue(candidateIds.ToArray());
+        else
+            cmd.Parameters.AddWithValue(ecosystemVersion.Value.Ecosystem);
         cmd.Parameters.AddWithValue(fetchLimit);
         cmd.Parameters.AddWithValue(offset);
         await using var reader = await cmd.ExecuteReaderAsync(ct);
@@ -749,8 +884,17 @@ app.MapPost("/api/v1/vulnerability.search", async (NpgsqlDataSource db, Vulnerab
     return ApiResult.Ok(new { items = rows, page, pageSize, sort, hasMore });
 });
 
-app.MapGet("/api/v1/vulnerability.getByIdentifier", async (NpgsqlDataSource db, string identifier, CancellationToken ct) =>
+app.MapGet("/api/v1/vulnerability.getByIdentifier", async (string identifier, CancellationToken ct) =>
 {
+    if (duckDbPrimary)
+    {
+        var duckDb = app.Services.GetRequiredService<DuckDbEvidenceStore>();
+        var vulnerability = await duckDb.GetCatalogByIdentifierAsync(identifier, ct);
+        return vulnerability is null
+            ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", identifier)
+            : ApiResult.Ok(vulnerability);
+    }
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     var normalized = Identifier.Normalize(identifier);
     await using var cmd = db.CreateCommand("""
         with matched as (
@@ -787,8 +931,17 @@ app.MapGet("/api/v1/vulnerability.getByIdentifier", async (NpgsqlDataSource db, 
     });
 });
 
-app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, CancellationToken ct) =>
+app.MapGet("/api/v1/vulnerability.get", async (Guid id, CancellationToken ct) =>
 {
+    if (duckDbPrimary)
+    {
+        var duckDb = app.Services.GetRequiredService<DuckDbEvidenceStore>();
+        var vulnerability = await duckDb.GetCatalogByIdAsync(id, ct);
+        return vulnerability is null
+            ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString())
+            : ApiResult.Ok(vulnerability);
+    }
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     await using var cmd = db.CreateCommand("""
         select id, primary_identifier, title, description, severity_label, max_cvss_score,
                affected_component_count, affected_component_names, identifiers
@@ -815,14 +968,23 @@ app.MapGet("/api/v1/vulnerability.get", async (NpgsqlDataSource db, Guid id, Can
     });
 });
 
-app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvidenceStore duckDb, VulnerabilityDetailSnapshotStore snapshots, string? source, bool? snapshot, Guid id, CancellationToken ct) =>
+app.MapGet("/api/v1/vulnerability.detail", async (DuckDbEvidenceStore duckDb, VulnerabilityDetailSnapshotStore snapshots, string? source, bool? snapshot, Guid id, CancellationToken ct) =>
 {
-    if (snapshot != false && !string.Equals(source, "pgsql", StringComparison.OrdinalIgnoreCase))
+    if (!duckDbPrimary && snapshot != false && !string.Equals(source, "pgsql", StringComparison.OrdinalIgnoreCase))
     {
         var snapshotDetail = await snapshots.TryGetAsync(id, ct);
         if (snapshotDetail is JsonElement detail)
             return ApiResult.Ok(detail);
     }
+
+    if (duckDbPrimary)
+    {
+        var detail = await duckDb.GetCatalogDetailAsync(id, ct);
+        return detail is null
+            ? ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString())
+            : ApiResult.Ok(detail);
+    }
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
 
     await using var cmd = db.CreateCommand("""
         select v.id, v.primary_identifier, coalesce(preferred_title.value, v.title), coalesce(preferred_description.value, v.description),
@@ -832,7 +994,13 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
                v.affected_ecosystems, v.affected_component_names, v.identifiers, v.aliases,
                coalesce(nvd_dates.published_at, v.published_at),
                coalesce(nvd_dates.modified_at, v.modified_at),
-               v.updated_at, v.published_at, v.modified_at
+               v.updated_at, v.published_at, v.modified_at,
+               coalesce((
+                 select array_agg(distinct upper(i.normalized_value))
+                 from vulnerability_identifier_index i
+                 where i.canonical_vulnerability_id = v.id
+                   and nullif(i.normalized_value, '') is not null
+               ), '{}'::text[]) as evidence_identifiers
         from vulnerabilities v
         left join lateral (
           select nullif(trim(vr.title), '') as value
@@ -896,6 +1064,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
     await using var reader = await cmd.ExecuteReaderAsync(ct);
     if (!await reader.ReadAsync(ct)) return ApiResult.NotFound("VULNERABILITY_NOT_FOUND", id.ToString());
 
+    var evidenceIdentifiers = reader.GetFieldValue<string[]>(24);
     var vulnerability = new
     {
         id = reader.GetGuid(0),
@@ -939,6 +1108,13 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
 
     var queryId = actualId;
     var useDuckDb = source == "duckdb" || (duckDb.Enabled && source != "pgsql");
+    var evidenceKeys = evidenceIdentifiers
+        .Concat(vulnerability.identifiers)
+        .Concat(vulnerability.aliases)
+        .Prepend(vulnerability.primaryIdentifier)
+        .Where(value => !string.IsNullOrWhiteSpace(value))
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .ToArray();
 
     return ApiResult.Ok(new
     {
@@ -969,7 +1145,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
                 limit 60
                 """, queryId, ct),
         affectedExpressions = useDuckDb
-            ? (await duckDb.QueryAffectedFactsAsync(vulnerability.primaryIdentifier, 250, ct))
+            ? (await duckDb.QueryAffectedFactsForKeysAsync(evidenceKeys, 250, ct))
             : await QueryRowsAsync(db, """
             select s.code, f.fact_type, f.ecosystem, f.package_name, f.purl,
                    f.purl_without_version, f.cpe23_uri, f.version_range_raw,
@@ -1004,7 +1180,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
             limit 16
             """, queryId, ct),
         severities = useDuckDb
-            ? (await duckDb.QuerySeverityScoresAsync(vulnerability.primaryIdentifier, 20, ct))
+            ? (await duckDb.QuerySeverityScoresForKeysAsync(evidenceKeys, 20, ct))
             : await QueryRowsAsync(db, """
             select s.code, scoring_system, scoring_version, score_type, vector_string,
                    score, severity_label, is_selected
@@ -1016,7 +1192,7 @@ app.MapGet("/api/v1/vulnerability.detail", async (NpgsqlDataSource db, DuckDbEvi
             limit 20
             """, queryId, ct),
         references = useDuckDb
-            ? (await duckDb.QueryReferencesAsync(vulnerability.primaryIdentifier, 160, ct))
+            ? (await duckDb.QueryReferencesForKeysAsync(evidenceKeys, 160, ct))
             : await QueryRowsAsync(db, """
             with ranked as (
               select s.code, url, ref_type, tags,
@@ -1079,11 +1255,27 @@ app.MapPost("/api/v1/component.vulnerabilitySearch", async (ComponentVulnerabili
     return ApiResult.Ok(result);
 });
 
-app.MapPost("/api/v1/component.search", async (NpgsqlDataSource db, ComponentSearchRequest request, CancellationToken ct) =>
+app.MapPost("/api/v1/component.search", async (DuckDbEvidenceStore duckDb, ComponentSearchRequest request, CancellationToken ct) =>
 {
     var pageSize = request.PageSize <= 0 ? 50 : Math.Min(request.PageSize, 200);
     var lookup = ComponentQuery.Normalize(request.Name ?? request.Query, request.Vendor, request.Purl, request.Ecosystem);
     var queryText = request.Query?.Trim() ?? request.Name?.Trim() ?? "";
+    if (duckDbPrimary)
+    {
+        var duckComponents = await duckDb.SearchComponentCatalogAsync(queryText, lookup, pageSize, ct);
+        var componentItems = duckComponents.Select(item => new
+        {
+            id = item.Id,
+            canonicalName = item.CanonicalName,
+            componentType = item.ComponentType,
+            primaryPurl = item.PrimaryPurl,
+            primaryCpe23Uri = item.PrimaryCpe23Uri,
+            primaryRepositoryUrl = (string?)null,
+            identities = item.Identities
+        });
+        return ApiResult.Ok(new { components = componentItems, registryPackages = Array.Empty<object>(), source = "duckdb" });
+    }
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
     var query = $"%{queryText}%";
 
     var components = new List<object>();
@@ -1175,10 +1367,33 @@ app.MapPost("/api/v1/component.search", async (NpgsqlDataSource db, ComponentSea
 
     return ApiResult.Ok(new { components, registryPackages });
 });
-SbomEndpoints.Map(app);
+SbomEndpoints.Map(app, duckDbPrimary);
 
-app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (NpgsqlDataSource db, string? ecosystem, string? package, string? version, CancellationToken ct) =>
+app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (DuckDbEvidenceStore duckDb, string? ecosystem, string? package, string? version, CancellationToken ct) =>
 {
+    if (duckDb.Enabled)
+    {
+        var duckRows = await duckDb.QueryAffectedEcosystemPackageSummaryAsync(ecosystem ?? "go", package, 50, ct);
+        var duckItems = duckRows.Select(row =>
+        {
+            int? affectedIfVersion = null;
+            int? notAffectedIfVersion = null;
+            if (!string.IsNullOrWhiteSpace(version))
+                notAffectedIfVersion = null;
+            return new
+            {
+                ecosystem = row.Ecosystem,
+                package = row.PackageName,
+                totalCves = row.TotalCves,
+                affectedIfVersion,
+                notAffectedIfVersion,
+                factCount = row.FactCount
+            };
+        }).ToList<object>();
+        return ApiResult.Ok(new { items = duckItems, source = "duckdb" });
+    }
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
+
     string whereFilter, limitClause = "LIMIT 50";
     var parameters = new List<object> { (object?)ecosystem ?? "go" };
 
@@ -1228,11 +1443,20 @@ app.MapGet("/api/v1/benchmark.ecosystemCveCount", async (NpgsqlDataSource db, st
         }
         items.Add(new { ecosystem = eco, package = pkg, totalCves, affectedIfVersion, notAffectedIfVersion, factCount });
     }
-    return ApiResult.Ok(new { items });
+    return ApiResult.Ok(new { items, source = "pgsql" });
 });
 
-app.MapGet("/api/v1/benchmark.packageCves", async (NpgsqlDataSource db, string name, CancellationToken ct) =>
+app.MapGet("/api/v1/benchmark.packageCves", async (DuckDbEvidenceStore duckDb, string name, CancellationToken ct) =>
 {
+    if (duckDb.Enabled)
+    {
+        var summary = await duckDb.QueryAffectedPackageSummaryAsync(name, ct);
+        return summary is null
+            ? ApiResult.Ok(new { name, cves = 0, source = "duckdb" })
+            : ApiResult.Ok(new { name, cves = summary.TotalCves, facts = summary.FactCount, ecosystems = summary.Ecosystem, source = "duckdb" });
+    }
+    var db = app.Services.GetRequiredService<NpgsqlDataSource>();
+
     await using var cmd = db.CreateCommand("""
         SELECT lower(display_name), count(DISTINCT vulnerability_id) as cves,
                count(*) as facts, string_agg(DISTINCT ecosystem, ', ') as ecosystems
@@ -1243,16 +1467,77 @@ app.MapGet("/api/v1/benchmark.packageCves", async (NpgsqlDataSource db, string n
     cmd.Parameters.AddWithValue(name);
     await using var r = await cmd.ExecuteReaderAsync(ct);
     if (await r.ReadAsync(ct))
-        return ApiResult.Ok(new { name, cves = r.GetInt32(1), facts = r.GetInt32(2), ecosystems = r.GetString(3) });
-    return ApiResult.Ok(new { name, cves = 0 });
+        return ApiResult.Ok(new { name, cves = r.GetInt32(1), facts = r.GetInt32(2), ecosystems = r.GetString(3), source = "pgsql" });
+    return ApiResult.Ok(new { name, cves = 0, source = "pgsql" });
 });
 
-app.MapGet("/api/v1/benchmark.matchingQuality", async (NpgsqlDataSource db, string? ecosystem, string? packageName, Guid? sbomId, CancellationToken ct) =>
+app.MapGet("/api/v1/benchmark.matchingQuality", async (DuckDbEvidenceStore duckDb, string? ecosystem, string? packageName, Guid? sbomId, CancellationToken ct) =>
 {
+    var db = duckDbPrimary ? null : app.Services.GetRequiredService<NpgsqlDataSource>();
     var affectedSummary = new List<object>();
     var useSbomScope = sbomId is not null && string.IsNullOrWhiteSpace(ecosystem) && string.IsNullOrWhiteSpace(packageName);
-    await using (var cmd = useSbomScope
-        ? db.CreateCommand("""
+    if (duckDbPrimary && useSbomScope)
+    {
+        var findings = await duckDb.GetSbomFindingsAsync(sbomId!.Value, 10000, 0, ct);
+        foreach (var group in findings.GroupBy(item => item.Ecosystem ?? "unknown", StringComparer.OrdinalIgnoreCase))
+        {
+            affectedSummary.Add(new
+            {
+                ecosystem = group.Key,
+                facts = group.LongCount(),
+                vulnerabilities = group.Select(item => item.VulnerabilityId).Distinct().LongCount(),
+                purlFacts = group.Count(item => string.Equals(item.MatchBasis, "purl", StringComparison.OrdinalIgnoreCase)),
+                cpeFacts = group.Count(item => string.Equals(item.MatchBasis, "cpe-exact", StringComparison.OrdinalIgnoreCase)),
+                noRange = group.Count(item => string.IsNullOrWhiteSpace(item.VersionRange)),
+                openLowerBound = 0,
+                unparseableRange = group.Count(item => item.VersionMatched is null && !string.IsNullOrWhiteSpace(item.VersionRange)),
+                actionableRangeRatio = group.Any() ? Math.Round((double)group.Count(item => item.VersionMatched is not null) / group.Count(), 4) : 0,
+                source = "duckdb-sbom"
+            });
+        }
+        var summary = new
+        {
+            sbomId,
+            findings = findings.Count,
+            affected = findings.Count(item => item.VersionMatched == true),
+            notAffected = findings.Count(item => item.VersionMatched == false),
+            unknown = findings.Count(item => item.VersionMatched is null),
+            noRange = findings.Count(item => string.IsNullOrWhiteSpace(item.VersionRange)),
+            componentsWithFindings = findings.Select(item => item.ComponentId).Distinct().Count()
+        };
+        return ApiResult.Ok(new
+        {
+            filters = new { ecosystem, packageName, sbomId },
+            affectedSummary,
+            sbomSummary = summary,
+            source = "duckdb"
+        });
+    }
+    if (duckDb.Enabled && !useSbomScope)
+    {
+        var summaries = await duckDb.QueryAffectedMatchingQualitySummaryAsync(ecosystem, packageName, 50, ct);
+        foreach (var row in summaries)
+        {
+            var actionable = row.Facts - row.NoRange - row.UnparseableRange;
+            affectedSummary.Add(new
+            {
+                ecosystem = row.Ecosystem,
+                facts = row.Facts,
+                vulnerabilities = row.Vulnerabilities,
+                purlFacts = row.PurlFacts,
+                cpeFacts = row.CpeFacts,
+                noRange = row.NoRange,
+                openLowerBound = row.OpenLowerBound,
+                unparseableRange = row.UnparseableRange,
+                actionableRangeRatio = row.Facts == 0 ? 0 : Math.Round((double)actionable / row.Facts, 4),
+                source = "duckdb"
+            });
+        }
+    }
+    else
+    {
+        await using var cmd = useSbomScope
+            ? db!.CreateCommand("""
             with sbom_names as (
               select distinct lower(coalesce(ecosystem, '')) as ecosystem, lower(name) as name
               from sbom_components
@@ -1283,7 +1568,7 @@ app.MapGet("/api/v1/benchmark.matchingQuality", async (NpgsqlDataSource db, stri
             order by facts desc
             limit 50
             """)
-        : db.CreateCommand("""
+            : db!.CreateCommand("""
             select
               coalesce(nullif(lower(ecosystem), ''), 'unknown') as ecosystem,
               count(*) as facts,
@@ -1299,8 +1584,7 @@ app.MapGet("/api/v1/benchmark.matchingQuality", async (NpgsqlDataSource db, stri
             group by coalesce(nullif(lower(ecosystem), ''), 'unknown')
             order by facts desc
             limit 50
-            """))
-    {
+            """);
         if (useSbomScope)
         {
             cmd.Parameters.AddWithValue(sbomId!.Value);
@@ -1334,7 +1618,23 @@ app.MapGet("/api/v1/benchmark.matchingQuality", async (NpgsqlDataSource db, stri
     object? sbomSummary = null;
     if (sbomId is not null)
     {
-        await using var cmd = db.CreateCommand("""
+        if (duckDbPrimary)
+        {
+            var findings = await duckDb.GetSbomFindingsAsync(sbomId.Value, 10000, 0, ct);
+            sbomSummary = new
+            {
+                sbomId,
+                findings = findings.Count,
+                affected = findings.Count(item => item.VersionMatched == true),
+                notAffected = findings.Count(item => item.VersionMatched == false),
+                unknown = findings.Count(item => item.VersionMatched is null),
+                noRange = findings.Count(item => string.IsNullOrWhiteSpace(item.VersionRange)),
+                componentsWithFindings = findings.Select(item => item.ComponentId).Distinct().Count()
+            };
+        }
+        else
+        {
+            await using var cmd = db!.CreateCommand("""
             select
               count(*) as findings,
               count(*) filter (where sv.version_matched = true) as affected,
@@ -1346,20 +1646,21 @@ app.MapGet("/api/v1/benchmark.matchingQuality", async (NpgsqlDataSource db, stri
             join sbom_components sc on sc.id = sv.sbom_component_id
             where sc.sbom_id = $1
             """);
-        cmd.Parameters.AddWithValue(sbomId.Value);
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (await reader.ReadAsync(ct))
-        {
-            sbomSummary = new
+            cmd.Parameters.AddWithValue(sbomId.Value);
+            await using var reader = await cmd.ExecuteReaderAsync(ct);
+            if (await reader.ReadAsync(ct))
             {
-                sbomId,
-                findings = reader.GetInt64(0),
-                affected = reader.GetInt64(1),
-                notAffected = reader.GetInt64(2),
-                unknown = reader.GetInt64(3),
-                noRange = reader.GetInt64(4),
-                componentsWithFindings = reader.GetInt64(5)
-            };
+                sbomSummary = new
+                {
+                    sbomId,
+                    findings = reader.GetInt64(0),
+                    affected = reader.GetInt64(1),
+                    notAffected = reader.GetInt64(2),
+                    unknown = reader.GetInt64(3),
+                    noRange = reader.GetInt64(4),
+                    componentsWithFindings = reader.GetInt64(5)
+                };
+            }
         }
     }
 
@@ -2046,7 +2347,14 @@ static async Task<IReadOnlyDictionary<string, long>> CountTablesAsync(NpgsqlData
     return rows.ToDictionary(x => x.TableName, x => x.Count, StringComparer.Ordinal);
 }
 
-static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCache cache, CancellationToken ct)
+static async Task<long> GetAffectedComponentCountAsync(NpgsqlDataSource db, DuckDbEvidenceStore duckDb, CancellationToken ct)
+{
+    if (duckDb.Enabled)
+        return await duckDb.CountAffectedComponentsAsync(ct);
+    return await CountTableAsync(db, "vulnerability_affected_components", ct);
+}
+
+static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, DuckDbEvidenceStore duckDb, StatusCache cache, CancellationToken ct)
 {
     var now = DateTimeOffset.UtcNow;
     if (cache.Value is not null && cache.ExpiresAt > now)
@@ -2067,12 +2375,12 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
             "vulnerabilities",
             "vulnerability_records",
             "vulnerability_exploits",
-            "vulnerability_affected_components",
             "components",
             "registry_packages",
             "cpe_entries",
             "source_raw_index"
         ], ct);
+        var affectedComponents = await GetAffectedComponentCountAsync(db, duckDb, ct);
 
         await using (var rawSampleCmd = db.CreateCommand("""
             with sample_counts as (
@@ -2222,7 +2530,7 @@ static async Task<object> GetFastSystemStatusAsync(NpgsqlDataSource db, StatusCa
             vulnerabilities = tables["vulnerabilities"],
             vulnerabilityRecords = tables["vulnerability_records"],
             vulnerabilityExploits = tables["vulnerability_exploits"],
-            affectedComponents = tables["vulnerability_affected_components"],
+            affectedComponents,
             components = tables["components"],
             registryPackages = tables["registry_packages"],
             cpeEntries = tables["cpe_entries"],
@@ -2397,6 +2705,36 @@ static (string Ecosystem, string? Version)? ParseEcosystemVersion(string query)
 
     if (foundEcosystem is null) return null;
     return (foundEcosystem, version);
+}
+
+static object[] DuckDbConfiguredSources()
+{
+    var spoolRoot = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH")
+        ?? Path.Combine(Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT") ?? Directory.GetCurrentDirectory(), "data", "spool");
+    return (Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES") ?? "nvd-cve,osv,cisa-kev,exploitdb,nuclei-templates")
+        .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+        .Distinct(StringComparer.OrdinalIgnoreCase)
+        .Select(code =>
+        {
+            JsonNode? state = null;
+            var statePath = Path.Combine(spoolRoot, "state", $"{code}.json");
+            try { if (File.Exists(statePath)) state = JsonNode.Parse(File.ReadAllText(statePath)); }
+            catch { }
+            return (object)new
+            {
+                code,
+                name = code,
+                kind = "vulnerability",
+                enabled = true,
+                pluginName = code,
+                scheduleCron = (string?)null,
+                runMode = "incremental",
+                storageBackend = "duckdb",
+                checkpoint = state?["checkpoint"],
+                latestRun = state?["lastRun"]
+            };
+        })
+        .ToArray();
 }
 
 sealed class StatusCache

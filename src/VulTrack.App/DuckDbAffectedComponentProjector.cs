@@ -13,11 +13,96 @@ public sealed record DuckDbAffectedComponentRebuildResult(
     double elapsedSeconds,
     double rowsPerSecond);
 
+public sealed record DuckDbAffectedEvidenceSyncResult(
+    int RawIndexes,
+    int VulnerabilityKeys,
+    int MappedVulnerabilities,
+    long AffectedComponents);
+
+public sealed record DuckDbAffectedEvidenceRebuildResult(
+    int VulnerabilityKeys,
+    int KeyMappings,
+    int Vulnerabilities,
+    long AffectedComponents,
+    double ElapsedSeconds);
+
 public sealed class DuckDbAffectedComponentProjector(
     NpgsqlDataSource db,
     DuckDbEvidenceStore store,
     ILogger<DuckDbAffectedComponentProjector> logger)
 {
+    private static bool DuckDbEvidenceOnly =>
+        string.Equals(Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_EVIDENCE_ONLY"), "true", StringComparison.OrdinalIgnoreCase);
+
+    public async Task<DuckDbAffectedEvidenceSyncResult> QueueEvidenceForRawIndexesAsync(IReadOnlyCollection<Guid> rawIndexIds, CancellationToken ct)
+    {
+        if (!store.Enabled || rawIndexIds.Count == 0)
+            return new DuckDbAffectedEvidenceSyncResult(rawIndexIds.Count, 0, 0, 0);
+
+        var keys = await store.QueryAffectedVulnerabilityKeysByRawIndexIdsAsync(rawIndexIds, ct);
+        if (keys.Count == 0)
+            return new DuckDbAffectedEvidenceSyncResult(rawIndexIds.Count, 0, 0, 0);
+
+        await using var connection = await db.OpenConnectionAsync(ct);
+        var mappings = await ResolveVulnerabilityKeysAsync(connection, keys, ct);
+        await EnqueueProjectionIdsAsync(connection, mappings.Select(x => x.VulnerabilityId).Distinct().ToArray(), ct);
+        return new DuckDbAffectedEvidenceSyncResult(rawIndexIds.Count, keys.Count, mappings.Select(x => x.VulnerabilityId).Distinct().Count(), 0);
+    }
+
+    public async Task<DuckDbAffectedEvidenceSyncResult> SyncEvidenceForRawIndexesAsync(IReadOnlyCollection<Guid> rawIndexIds, CancellationToken ct)
+    {
+        if (!store.Enabled || rawIndexIds.Count == 0)
+            return new DuckDbAffectedEvidenceSyncResult(rawIndexIds.Count, 0, 0, 0);
+
+        var keys = await store.QueryAffectedVulnerabilityKeysByRawIndexIdsAsync(rawIndexIds, ct);
+        if (keys.Count == 0)
+            return new DuckDbAffectedEvidenceSyncResult(rawIndexIds.Count, 0, 0, 0);
+
+        await using var connection = await db.OpenConnectionAsync(ct);
+        var mappings = await ResolveVulnerabilityKeysAsync(connection, keys, ct);
+        if (mappings.Count == 0)
+            return new DuckDbAffectedEvidenceSyncResult(rawIndexIds.Count, keys.Count, 0, 0);
+
+        var rows = await store.ReplaceAffectedComponentsFromEvidenceAsync(mappings, ct);
+        await UpdateVulnerabilitySummariesAsync(connection, mappings.Select(x => x.VulnerabilityId).Distinct().ToArray(), ct);
+        return new DuckDbAffectedEvidenceSyncResult(rawIndexIds.Count, keys.Count, mappings.Select(x => x.VulnerabilityId).Distinct().Count(), rows.Count);
+    }
+
+    public async Task<DuckDbAffectedEvidenceRebuildResult> RebuildFromDuckDbEvidenceAsync(CancellationToken ct)
+    {
+        if (!store.Enabled)
+            return new DuckDbAffectedEvidenceRebuildResult(0, 0, 0, 0, 0);
+
+        var startedAt = DateTimeOffset.UtcNow;
+        var keys = await store.QueryAllAffectedVulnerabilityKeysAsync(ct);
+        var mappings = new List<DuckDbVulnerabilityKeyMapping>();
+        await using var connection = await db.OpenConnectionAsync(ct);
+        // Keep the PostgreSQL lookup set small enough to stay entirely index-driven.
+        // The DuckDB scan is the bulk operation; PG only maps stable identifiers to IDs.
+        foreach (var batch in keys.Chunk(1000))
+            mappings.AddRange(await ResolveVulnerabilityKeysAsync(connection, batch, ct));
+
+        var affectedComponents = await store.RebuildAffectedComponentsFromEvidenceAsync(mappings, ct);
+        await UpdateAllVulnerabilitySummariesAsync(
+            connection,
+            mappings.Select(x => x.VulnerabilityId).Distinct().ToArray(),
+            ct);
+        var elapsed = Math.Max(0.001, (DateTimeOffset.UtcNow - startedAt).TotalSeconds);
+        logger.LogInformation(
+            "DuckDB-native affected component rebuild completed: keys={Keys}, mappings={Mappings}, vulnerabilities={Vulnerabilities}, components={Components}, elapsed_seconds={ElapsedSeconds:F1}.",
+            keys.Count,
+            mappings.Count,
+            mappings.Select(x => x.VulnerabilityId).Distinct().Count(),
+            affectedComponents,
+            elapsed);
+        return new DuckDbAffectedEvidenceRebuildResult(
+            keys.Count,
+            mappings.Count,
+            mappings.Select(x => x.VulnerabilityId).Distinct().Count(),
+            affectedComponents,
+            elapsed);
+    }
+
     public async Task<DuckDbAffectedComponentQueueResult> ProcessQueueAsync(DuckDbAffectedComponentQueueRequest request, CancellationToken ct)
     {
         if (!store.Enabled)
@@ -35,9 +120,11 @@ public sealed class DuckDbAffectedComponentProjector(
         var ids = await DequeueProjectionIdsAsync(connection, limit, ct);
         if (ids.Count == 0)
         {
-            var emptyStats = await store.StatsAsync(ct);
-            return new DuckDbAffectedComponentQueueResult(true, limit, batchSize, 0, 0, 0, emptyStats.affectedComponents, 0, 0);
+            return new DuckDbAffectedComponentQueueResult(true, limit, batchSize, 0, 0, 0, 0, 0, 0);
         }
+
+        if (DuckDbEvidenceOnly)
+            return await ProcessEvidenceQueueAsync(connection, ids, limit, batchSize, startedAt, ct);
 
         foreach (var batch in ids.Chunk(batchSize))
         {
@@ -55,7 +142,6 @@ public sealed class DuckDbAffectedComponentProjector(
                 processedRows / elapsed);
         }
 
-        var stats = await store.StatsAsync(ct);
         var totalElapsed = Math.Max(0.001, (DateTimeOffset.UtcNow - startedAt).TotalSeconds);
         return new DuckDbAffectedComponentQueueResult(
             true,
@@ -64,7 +150,7 @@ public sealed class DuckDbAffectedComponentProjector(
             ids.Count,
             processedRows,
             processedVulnerabilities,
-            stats.affectedComponents,
+            processedRows,
             totalElapsed,
             processedRows / totalElapsed);
     }
@@ -147,6 +233,221 @@ public sealed class DuckDbAffectedComponentProjector(
         while (await reader.ReadAsync(ct))
             ids.Add(reader.GetGuid(0));
         return ids;
+    }
+
+    private async Task<DuckDbAffectedComponentQueueResult> ProcessEvidenceQueueAsync(
+        NpgsqlConnection connection,
+        IReadOnlyList<Guid> ids,
+        int limit,
+        int batchSize,
+        DateTimeOffset startedAt,
+        CancellationToken ct)
+    {
+        var processedRows = 0L;
+        var processedVulnerabilities = 0L;
+        foreach (var batch in ids.Chunk(batchSize))
+        {
+            var mappings = await ResolveVulnerabilityIdsToEvidenceKeysAsync(connection, batch, ct);
+            var rows = await store.ReplaceAffectedComponentsFromEvidenceAsync(mappings, ct);
+            await UpdateVulnerabilitySummariesAsync(connection, batch, ct);
+            await DeleteProjectionQueueRowsAsync(connection, batch, ct);
+            processedRows += rows.Count;
+            processedVulnerabilities += batch.Length;
+        }
+
+        var elapsed = Math.Max(0.001, (DateTimeOffset.UtcNow - startedAt).TotalSeconds);
+        return new DuckDbAffectedComponentQueueResult(
+            true,
+            limit,
+            batchSize,
+            ids.Count,
+            processedRows,
+            processedVulnerabilities,
+            processedRows,
+            elapsed,
+            processedRows / elapsed);
+    }
+
+    private static async Task EnqueueProjectionIdsAsync(NpgsqlConnection connection, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)
+    {
+        if (vulnerabilityIds.Count == 0) return;
+        await using var command = new NpgsqlCommand("""
+            insert into duckdb_affected_component_queue(vulnerability_id, queued_at)
+            select distinct id, now()
+            from unnest($1::uuid[]) as ids(id)
+            on conflict (vulnerability_id) do update set queued_at = excluded.queued_at
+            """, connection);
+        command.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<IReadOnlyList<DuckDbVulnerabilityKeyMapping>> ResolveVulnerabilityIdsToEvidenceKeysAsync(
+        NpgsqlConnection connection,
+        IReadOnlyCollection<Guid> vulnerabilityIds,
+        CancellationToken ct)
+    {
+        if (vulnerabilityIds.Count == 0) return Array.Empty<DuckDbVulnerabilityKeyMapping>();
+        await using var command = new NpgsqlCommand("""
+            select distinct canonical_vulnerability_id, normalized_value
+            from vulnerability_identifier_index
+            where canonical_vulnerability_id = any($1)
+              and normalized_value is not null
+              and normalized_value <> ''
+            union
+            select id, upper(primary_identifier)
+            from vulnerabilities
+            where id = any($1)
+            """, connection);
+        command.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+        var mappings = new List<DuckDbVulnerabilityKeyMapping>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            mappings.Add(new DuckDbVulnerabilityKeyMapping(reader.GetGuid(0), reader.GetString(1)));
+        return mappings;
+    }
+
+    private static async Task<IReadOnlyList<DuckDbVulnerabilityKeyMapping>> ResolveVulnerabilityKeysAsync(
+        NpgsqlConnection connection,
+        IReadOnlyCollection<string> vulnerabilityKeys,
+        CancellationToken ct)
+    {
+        var keys = vulnerabilityKeys
+            .Select(Identifier.Normalize)
+            .Where(key => !string.IsNullOrWhiteSpace(key))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (keys.Length == 0) return Array.Empty<DuckDbVulnerabilityKeyMapping>();
+
+        await using var command = new NpgsqlCommand("""
+            with requested as (
+              select distinct upper(keys.vulnerability_key) as vulnerability_key
+              from unnest($1::text[]) as keys(vulnerability_key)
+            ),
+            candidates as (
+              select requested.vulnerability_key,
+                     identifier.canonical_vulnerability_id as vulnerability_id,
+                     identifier.confidence,
+                     0 as source_rank
+              from requested
+              join vulnerability_identifier_index identifier
+                on identifier.normalized_value = requested.vulnerability_key
+              where identifier.canonical_vulnerability_id is not null
+              union all
+              select requested.vulnerability_key,
+                     vulnerability.id as vulnerability_id,
+                     null::numeric as confidence,
+                     1 as source_rank
+              from requested
+              join vulnerabilities vulnerability
+                on vulnerability.primary_identifier = requested.vulnerability_key
+            )
+            select distinct on (vulnerability_key) vulnerability_id, vulnerability_key
+            from candidates
+            order by vulnerability_key, source_rank, confidence desc nulls last
+            """, connection);
+        command.CommandTimeout = 120;
+        command.Parameters.AddWithValue(keys);
+        var mappings = new List<DuckDbVulnerabilityKeyMapping>();
+        await using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+            mappings.Add(new DuckDbVulnerabilityKeyMapping(reader.GetGuid(0), reader.GetString(1)));
+        return mappings;
+    }
+
+    private async Task UpdateVulnerabilitySummariesAsync(NpgsqlConnection connection, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)
+    {
+        if (vulnerabilityIds.Count == 0) return;
+        var summaries = await store.QueryAffectedComponentSummariesAsync(vulnerabilityIds, ct);
+        var summaryIds = summaries.Select(summary => summary.VulnerabilityId).ToHashSet();
+        await ResetVulnerabilitySummariesAsync(connection, vulnerabilityIds.Where(id => !summaryIds.Contains(id)).ToArray(), ct);
+        await UpdateSummaryRowsAsync(connection, summaries, ct);
+    }
+
+    private async Task UpdateAllVulnerabilitySummariesAsync(
+        NpgsqlConnection connection,
+        IReadOnlyCollection<Guid> vulnerabilityIds,
+        CancellationToken ct)
+    {
+        var summaryIds = new HashSet<Guid>();
+        await store.StreamAffectedComponentSummaryBatchesAsync(1000, async summaries =>
+        {
+            foreach (var summary in summaries)
+                summaryIds.Add(summary.VulnerabilityId);
+            await UpdateSummaryRowsAsync(connection, summaries, ct);
+        }, ct);
+
+        foreach (var batch in vulnerabilityIds.Where(id => !summaryIds.Contains(id)).Chunk(1000))
+            await ResetVulnerabilitySummariesAsync(connection, batch, ct);
+    }
+
+    private static async Task ResetVulnerabilitySummariesAsync(
+        NpgsqlConnection connection,
+        IReadOnlyCollection<Guid> vulnerabilityIds,
+        CancellationToken ct)
+    {
+        if (vulnerabilityIds.Count == 0) return;
+        await using var reset = new NpgsqlCommand("""
+            update vulnerabilities
+            set affected_component_count = 0,
+                affected_ecosystems = '{}',
+                affected_component_names = '{}',
+                search_text = to_tsvector('simple',
+                    coalesce(primary_identifier,'') || ' ' ||
+                    coalesce(title,'') || ' ' ||
+                    coalesce(description,'')),
+                updated_at = now()
+            where id = any($1)
+              and (
+                affected_component_count <> 0
+                or affected_ecosystems <> '{}'
+                or affected_component_names <> '{}'
+              )
+            """, connection);
+        reset.Parameters.AddWithValue(vulnerabilityIds.ToArray());
+        await reset.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task UpdateSummaryRowsAsync(
+        NpgsqlConnection connection,
+        IReadOnlyCollection<DuckDbAffectedComponentSummary> summaries,
+        CancellationToken ct)
+    {
+        foreach (var batch in summaries.Chunk(500))
+        {
+            var values = new List<string>();
+            var parameters = new List<object>();
+            var index = 1;
+            foreach (var summary in batch)
+            {
+                values.Add($"(${index++},${index++},${index++},${index++})");
+                parameters.Add(summary.VulnerabilityId);
+                parameters.Add(summary.Count);
+                parameters.Add(summary.Ecosystems);
+                parameters.Add(summary.Names);
+            }
+
+            await using var update = new NpgsqlCommand($"""
+                update vulnerabilities v
+                set affected_component_count = incoming.component_count,
+                    affected_ecosystems = incoming.ecosystems,
+                    affected_component_names = incoming.names,
+                    search_text = to_tsvector('simple',
+                        coalesce(v.primary_identifier,'') || ' ' ||
+                        coalesce(v.title,'') || ' ' ||
+                        coalesce(v.description,'') || ' ' ||
+                        coalesce(replace(array_to_string(incoming.names, ' '), '/', ''))),
+                    updated_at = now()
+                from (values {string.Join(",", values)}) as incoming(id, component_count, ecosystems, names)
+                where v.id = incoming.id
+                  and (
+                    v.affected_component_count is distinct from incoming.component_count
+                    or v.affected_ecosystems is distinct from incoming.ecosystems
+                    or v.affected_component_names is distinct from incoming.names
+                  )
+                """, connection);
+            foreach (var parameter in parameters) update.Parameters.AddWithValue(parameter);
+            await update.ExecuteNonQueryAsync(ct);
+        }
     }
 
     private static async Task DeleteProjectionQueueRowsAsync(NpgsqlConnection connection, IReadOnlyCollection<Guid> vulnerabilityIds, CancellationToken ct)

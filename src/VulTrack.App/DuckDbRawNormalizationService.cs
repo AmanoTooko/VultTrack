@@ -6,6 +6,7 @@ public sealed class DuckDbRawNormalizationService(
     NpgsqlDataSource db,
     RawNormalizationService postgresNormalizer,
     DuckDbEvidenceNormalizer normalizer,
+    DuckDbAffectedComponentProjector affectedProjector,
     StagingPayloadCompactor payloadCompactor,
     IConfiguration configuration,
     ILogger<DuckDbRawNormalizationService> logger) : IRawNormalizationService
@@ -26,6 +27,9 @@ public sealed class DuckDbRawNormalizationService(
     public async Task<NormalizeBatchResult> ProcessSourcePendingAsync(string sourceCode, int limit, CancellationToken ct)
     {
         await using var connection = await db.OpenConnectionAsync(ct);
+        if (IsDuckDbOnlySource(sourceCode))
+            return await ProcessDuckDbOnlySourceAsync(connection, sourceCode, limit, ct);
+
         var rawIndexIds = await LoadPendingRawIdsAsync(connection, sourceCode, limit, ct);
         if (rawIndexIds.Length == 0)
             return new NormalizeBatchResult(sourceCode, 0, 0);
@@ -54,6 +58,13 @@ public sealed class DuckDbRawNormalizationService(
             var source = result.sources.FirstOrDefault(x => string.Equals(x.sourceCode, sourceCode, StringComparison.OrdinalIgnoreCase));
             if (source is not null)
             {
+                var componentSync = await affectedProjector.QueueEvidenceForRawIndexesAsync(rawIndexIds, ct);
+                logger.LogInformation(
+                    "DuckDB evidence projection queued for {SourceCode}: raw_indexes={RawIndexes}, keys={Keys}, vulnerabilities={Vulnerabilities}.",
+                    sourceCode,
+                    componentSync.RawIndexes,
+                    componentSync.VulnerabilityKeys,
+                    componentSync.MappedVulnerabilities);
                 await payloadCompactor.CompactAsync(rawIndexIds, ct);
             }
             return source is null
@@ -63,7 +74,50 @@ public sealed class DuckDbRawNormalizationService(
         catch (Exception ex)
         {
             logger.LogError(ex, "DuckDB evidence projection failed after PostgreSQL normalization for {SourceCode}.", sourceCode);
+            await MarkForDuckDbRetryAsync(rawIndexIds, ct);
             return new NormalizeBatchResult(sourceCode, pgResult.Processed, pgResult.Failed + 1);
+        }
+    }
+
+    private async Task<NormalizeBatchResult> ProcessDuckDbOnlySourceAsync(
+        NpgsqlConnection lockConnection,
+        string sourceCode,
+        int limit,
+        CancellationToken ct)
+    {
+        if (!await TryAcquireSourceNormalizeLockAsync(lockConnection, sourceCode, ct))
+        {
+            logger.LogInformation("DuckDB-only normalizer {SourceCode} is already running.", sourceCode);
+            return new NormalizeBatchResult(sourceCode, 0, 0);
+        }
+
+        try
+        {
+            var rawIndexIds = await LoadPendingRawIdsAsync(lockConnection, sourceCode, limit, ct);
+            if (rawIndexIds.Length == 0)
+                return new NormalizeBatchResult(sourceCode, 0, 0);
+
+            var request = new DuckDbEvidenceNormalizeRequest(
+                sourceCode,
+                rawIndexIds.Length,
+                Reset: false,
+                BatchSize: Math.Min(DuckDbBatchSize(), rawIndexIds.Length),
+                RawIndexIds: rawIndexIds);
+            await normalizer.NormalizeAsync(request, ct);
+            await MarkSucceededAsync(lockConnection, rawIndexIds, ct);
+            await payloadCompactor.CompactAsync(rawIndexIds, ct);
+            logger.LogInformation("DuckDB-only normalization completed for {SourceCode}: raw_indexes={Count}.",
+                sourceCode, rawIndexIds.Length);
+            return new NormalizeBatchResult(sourceCode, rawIndexIds.Length, 0);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "DuckDB-only normalization failed for {SourceCode}.", sourceCode);
+            return new NormalizeBatchResult(sourceCode, 0, 1);
+        }
+        finally
+        {
+            await ReleaseSourceNormalizeLockAsync(lockConnection, sourceCode, CancellationToken.None);
         }
     }
 
@@ -88,6 +142,50 @@ public sealed class DuckDbRawNormalizationService(
             ids.Add(reader.GetGuid(0));
         return ids.ToArray();
     }
+
+    private async Task MarkForDuckDbRetryAsync(IReadOnlyCollection<Guid> rawIndexIds, CancellationToken ct)
+    {
+        if (rawIndexIds.Count == 0) return;
+        await using var connection = await db.OpenConnectionAsync(ct);
+        await using var command = new NpgsqlCommand("""
+            update source_raw_index
+            set normalize_status = 'failed', updated_at = now()
+            where id = any($1)
+              and normalize_status = 'succeeded'
+            """, connection);
+        command.Parameters.AddWithValue(rawIndexIds.ToArray());
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task MarkSucceededAsync(NpgsqlConnection connection, Guid[] rawIndexIds, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("""
+            update source_raw_index
+            set normalize_status = 'succeeded', updated_at = now()
+            where id = any($1)
+              and normalize_status in ('pending', 'failed')
+            """, connection);
+        command.Parameters.AddWithValue(rawIndexIds);
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task<bool> TryAcquireSourceNormalizeLockAsync(NpgsqlConnection connection, string sourceCode, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("select pg_try_advisory_lock(hashtext($1), 0)", connection);
+        command.Parameters.AddWithValue($"normalize:{sourceCode.ToLowerInvariant()}");
+        return (bool)(await command.ExecuteScalarAsync(ct) ?? false);
+    }
+
+    private static async Task ReleaseSourceNormalizeLockAsync(NpgsqlConnection connection, string sourceCode, CancellationToken ct)
+    {
+        await using var command = new NpgsqlCommand("select pg_advisory_unlock(hashtext($1), 0)", connection);
+        command.Parameters.AddWithValue($"normalize:{sourceCode.ToLowerInvariant()}");
+        await command.ExecuteNonQueryAsync(ct);
+    }
+
+    private static bool IsDuckDbOnlySource(string sourceCode) =>
+        string.Equals(Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_EVIDENCE_ONLY"), "true", StringComparison.OrdinalIgnoreCase)
+        && sourceCode.Equals("nvd-cpe", StringComparison.OrdinalIgnoreCase);
 
     private int DuckDbLimit(int schedulerLimit)
     {

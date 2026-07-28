@@ -51,7 +51,11 @@ public sealed class RawNormalizationService(
                 .FirstOrDefault(x => x.SupportedSourceCodes.Any(code => string.Equals(code, sourceCode, StringComparison.OrdinalIgnoreCase)));
             if (scoped is not null)
             {
-                return await scoped.ProcessSourcePendingAsync(connection, sourceCode, limit, ct);
+                return await ExecuteBatchAsync(
+                    connection,
+                    sourceCode,
+                    () => scoped.ProcessSourcePendingAsync(connection, sourceCode, limit, ct),
+                    ct);
             }
 
             var normalizer = normalizers.FirstOrDefault(x => string.Equals(x.SourceCode, sourceCode, StringComparison.OrdinalIgnoreCase));
@@ -62,7 +66,11 @@ public sealed class RawNormalizationService(
 
             try
             {
-                var result = await normalizer.ProcessPendingAsync(connection, limit, ct);
+                var result = await ExecuteBatchAsync(
+                    connection,
+                    sourceCode,
+                    () => normalizer.ProcessPendingAsync(connection, limit, ct),
+                    ct);
                 return result.SourceCode.Equals(sourceCode, StringComparison.OrdinalIgnoreCase)
                     ? result
                     : new NormalizeBatchResult(sourceCode, result.Processed, result.Failed);
@@ -110,10 +118,18 @@ public sealed class RawNormalizationService(
             {
                 if (normalizer is ISourceScopedRawNormalizer scoped)
                 {
-                    return await scoped.ProcessSourcePendingAsync(connection, sourceCode, limit, ct);
+                    return await ExecuteBatchAsync(
+                        connection,
+                        sourceCode,
+                        () => scoped.ProcessSourcePendingAsync(connection, sourceCode, limit, ct),
+                        ct);
                 }
 
-                var result = await normalizer.ProcessPendingAsync(connection, limit, ct);
+                var result = await ExecuteBatchAsync(
+                    connection,
+                    sourceCode,
+                    () => normalizer.ProcessPendingAsync(connection, limit, ct),
+                    ct);
                 return result.SourceCode.Equals(sourceCode, StringComparison.OrdinalIgnoreCase)
                     ? result
                     : new NormalizeBatchResult(sourceCode, result.Processed, result.Failed);
@@ -128,6 +144,22 @@ public sealed class RawNormalizationService(
         {
             await ReleaseSourceNormalizeLockAsync(connection, sourceCode, CancellationToken.None);
         }
+    }
+
+    private static async Task<NormalizeBatchResult> ExecuteBatchAsync(
+        NpgsqlConnection connection,
+        string sourceCode,
+        Func<Task<NormalizeBatchResult>> action,
+        CancellationToken ct)
+    {
+        // NVD already uses explicit transactions for its optimized batch paths.
+        if (sourceCode is "nvd-cve" or "nvd-cve-init")
+            return await action();
+
+        await using var transaction = await connection.BeginTransactionAsync(ct);
+        var result = await action();
+        await transaction.CommitAsync(ct);
+        return result;
     }
 
     private static async Task<HashSet<string>> LoadEnabledAutomaticSourceCodesAsync(NpgsqlConnection connection, CancellationToken ct)

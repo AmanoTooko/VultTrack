@@ -329,6 +329,7 @@ public sealed class NvdRawProcessor(
         IReadOnlyList<NvdAffectedFactRow> rows,
         CancellationToken ct)
     {
+        if (DuckDbEvidenceOnly) return;
         await DeleteRecordRowsBatchAsync(connection, "vulnerability_affected_facts", recordIds, ct);
 
         var deduped = rows
@@ -672,7 +673,8 @@ public sealed class NvdRawProcessor(
 
     private static async Task<IReadOnlyList<AffectedFactDraft>> UpsertAffectedFactsAsync(NpgsqlConnection conn, Guid vulnerabilityId, Guid recordId, NvdStagingRecord record, CancellationToken ct)
     {
-        await DeleteRecordRowsAsync(conn, "vulnerability_affected_facts", recordId, ct);
+        if (!DuckDbEvidenceOnly)
+            await DeleteRecordRowsAsync(conn, "vulnerability_affected_facts", recordId, ct);
 
         var facts = new List<AffectedFactDraft>();
         var extracted = new List<NvdCpeFact>();
@@ -692,35 +694,38 @@ public sealed class NvdRawProcessor(
             }
         }
 
-        foreach (var batch in extracted.Chunk(1000))
+        if (!DuckDbEvidenceOnly)
         {
-            var values = new List<string>();
-            var parameters = new List<object>();
-            var parameterIndex = 1;
-            foreach (var fact in batch)
+            foreach (var batch in extracted.Chunk(1000))
             {
-                values.Add($"(${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++},'cpe','cpe',${parameterIndex++},${parameterIndex++},lower(${parameterIndex - 1}),${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++}::jsonb)");
-                parameters.Add(vulnerabilityId);
-                parameters.Add(recordId);
-                parameters.Add(record.SourceId);
-                parameters.Add(record.RawIndexId);
-                parameters.Add(fact.Criteria);
-                parameters.Add(fact.Product);
-                parameters.Add((object?)fact.VersionRange ?? DBNull.Value);
-                parameters.Add(fact.RangeType);
-                parameters.Add(fact.Vulnerable);
-                parameters.Add(fact.SourceSpecificJson);
-            }
+                var values = new List<string>();
+                var parameters = new List<object>();
+                var parameterIndex = 1;
+                foreach (var fact in batch)
+                {
+                    values.Add($"(${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++},'cpe','cpe',${parameterIndex++},${parameterIndex++},lower(${parameterIndex - 1}),${parameterIndex++},${parameterIndex++},${parameterIndex++},${parameterIndex++}::jsonb)");
+                    parameters.Add(vulnerabilityId);
+                    parameters.Add(recordId);
+                    parameters.Add(record.SourceId);
+                    parameters.Add(record.RawIndexId);
+                    parameters.Add(fact.Criteria);
+                    parameters.Add(fact.Product);
+                    parameters.Add((object?)fact.VersionRange ?? DBNull.Value);
+                    parameters.Add(fact.RangeType);
+                    parameters.Add(fact.Vulnerable);
+                    parameters.Add(fact.SourceSpecificJson);
+                }
 
-            await using var cmd = new NpgsqlCommand($"""
-                insert into vulnerability_affected_facts
-                  (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
-                   cpe23_uri, package_name, normalized_package_name, version_range_raw, range_type, vulnerable,
-                   source_specific)
-                values {string.Join(",", values)}
-                """, conn);
-            foreach (var parameter in parameters) cmd.Parameters.AddWithValue(parameter);
-            await cmd.ExecuteNonQueryAsync(ct);
+                await using var cmd = new NpgsqlCommand($"""
+                    insert into vulnerability_affected_facts
+                      (vulnerability_id, vulnerability_record_id, source_id, raw_index_id, fact_type, ecosystem,
+                       cpe23_uri, package_name, normalized_package_name, version_range_raw, range_type, vulnerable,
+                       source_specific)
+                    values {string.Join(",", values)}
+                    """, conn);
+                foreach (var parameter in parameters) cmd.Parameters.AddWithValue(parameter);
+                await cmd.ExecuteNonQueryAsync(ct);
+            }
         }
 
         return facts;

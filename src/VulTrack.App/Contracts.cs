@@ -58,6 +58,8 @@ public sealed record DuckDbAffectedComponentQueueResult(
     double elapsedSeconds,
     double rowsPerSecond);
 
+public sealed record DuckDbAiImportRequest(string Path);
+
 public sealed record AiSummaryRequest(
     Guid Id,
     bool Force = false);
