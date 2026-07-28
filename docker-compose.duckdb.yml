@@ -7,6 +7,8 @@ services:
     restart: unless-stopped
     working_dir: /app
     env_file:
+      - path: .env
+        required: false
       - path: .env.production
         required: false
     environment:

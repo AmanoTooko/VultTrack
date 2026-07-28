@@ -9,9 +9,9 @@ if [[ ! -f .env ]]; then
   echo "Created .env from .env.example"
 fi
 
-mkdir -p data/duckdb data/vulnerability-details data/logs
+mkdir -p data/duckdb data/spool/incoming data/spool/state
 
-docker compose up -d --build postgres api frontend adminer
+docker compose up -d --build --remove-orphans api frontend
 
 echo "Waiting for API readiness..."
 for _ in $(seq 1 120); do
@@ -31,6 +31,5 @@ echo
 echo "VulTrack is running:"
 echo "  Frontend: http://localhost:3000"
 echo "  API:      http://localhost:5099"
-echo "  Adminer:  http://localhost:8081"
 echo
 node scripts/status-local.mjs

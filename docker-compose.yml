@@ -1,131 +1,41 @@
 services:
-  postgres:
-    image: postgres:16-alpine
-    container_name: vultrack-postgres
-    restart: unless-stopped
-    command:
-      - postgres
-      - -c
-      - shared_buffers=2GB
-      - -c
-      - effective_cache_size=5GB
-      - -c
-      - work_mem=16MB
-      - -c
-      - maintenance_work_mem=512MB
-      - -c
-      - checkpoint_timeout=15min
-      - -c
-      - random_page_cost=1.1
-      - -c
-      - effective_io_concurrency=100
-      - -c
-      - autovacuum_vacuum_scale_factor=0.05
-      - -c
-      - autovacuum_analyze_scale_factor=0.05
-      - -c
-      - autovacuum_vacuum_cost_limit=2000
-      - -c
-      - max_wal_size=4GB
-      - -c
-      - max_worker_processes=4
-      - -c
-      - max_parallel_workers=2
-      - -c
-      - max_parallel_workers_per_gather=1
-    shm_size: '1g'
-    environment:
-      POSTGRES_DB: vultrack
-      POSTGRES_USER: vultrack
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vultrack}
-    ports:
-      - "5432:5432"
-    volumes:
-      - ./pgdata:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U vultrack -d vultrack"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
   api:
     build:
       context: .
       dockerfile: src/VulTrack.App/Dockerfile
-    container_name: vultrack-api
+    container_name: ${VULTRACK_API_CONTAINER:-vultrack-api}
     restart: unless-stopped
-    working_dir: /workspace/src/VulTrack.App
-    dns:
-      - 223.5.5.5
-      - 1.1.1.1
+    working_dir: /app
+    env_file:
+      - path: .env
+        required: false
+      - path: .env.production
+        required: false
     environment:
-      ASPNETCORE_URLS: http://0.0.0.0:8080
-      DATABASE_URL: ${API_DATABASE_URL:-postgres://vultrack:${POSTGRES_PASSWORD:-vultrack}@vultrack-postgres:5432/vultrack}
-      VULTRACK_ADMIN_USERNAME: ${VULTRACK_ADMIN_USERNAME:-admin}
-      VULTRACK_ADMIN_PASSWORD: ${VULTRACK_ADMIN_PASSWORD:-admin}
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_SYSTEM_NET_DISABLEIPV6: "1"
       VULTRACK_REPO_ROOT: /workspace
-      RAW_OBJECT_STORE: ${RAW_OBJECT_STORE:-pgsql}
-      VULTRACK_NORMALIZER_BACKEND: ${VULTRACK_NORMALIZER_BACKEND:-duckdb}
-      VULTRACK_DUCKDB_ENABLED: ${VULTRACK_DUCKDB_ENABLED:-true}
-      VULTRACK_DUCKDB_PATH: ${VULTRACK_DUCKDB_PATH:-/workspace/data/duckdb/vultrack-evidence.duckdb}
-      VULTRACK_DUCKDB_NORMALIZE_LIMIT: ${VULTRACK_DUCKDB_NORMALIZE_LIMIT:-5000}
-      VULTRACK_DUCKDB_NORMALIZE_BATCH_SIZE: ${VULTRACK_DUCKDB_NORMALIZE_BATCH_SIZE:-1000}
-      VULTRACK_DUCKDB_INLINE_NORMALIZE_LIMIT: ${VULTRACK_DUCKDB_INLINE_NORMALIZE_LIMIT:-5000}
-      VULTRACK_AI_ENABLED: ${VULTRACK_AI_ENABLED:-false}
-      VULTRACK_AI_BASE_URL: ${VULTRACK_AI_BASE_URL:-}
-      VULTRACK_AI_API_KEY: ${VULTRACK_AI_API_KEY:-}
-      VULTRACK_AI_MODEL: ${VULTRACK_AI_MODEL:-openai/gpt-5.5}
-      VULTRACK_AI_LANGUAGE: ${VULTRACK_AI_LANGUAGE:-en-US}
-      VULTRACK_AI_MAX_INPUT_CHARS: ${VULTRACK_AI_MAX_INPUT_CHARS:-12000}
-      VULTRACK_AI_MAX_OUTPUT_TOKENS: ${VULTRACK_AI_MAX_OUTPUT_TOKENS:-1400}
-      VULTRACK_AI_ANALYSIS_PROMPT_VERSION: ${VULTRACK_AI_ANALYSIS_PROMPT_VERSION:-vultrack-ai-analysis-automotive-v4}
-      VULTRACK_AI_ANALYSIS_SYSTEM_PROMPT_PATH: ${VULTRACK_AI_ANALYSIS_SYSTEM_PROMPT_PATH:-prompts/vulnerability-analysis-batch.system.md}
-      VULTRACK_AI_PROMPT_CACHE_KEY: ${VULTRACK_AI_PROMPT_CACHE_KEY:-}
-      VULTRACK_AI_PROMPT_CACHE_RETENTION: ${VULTRACK_AI_PROMPT_CACHE_RETENTION:-}
-      VULTRACK_SCHEDULER_ENABLED: ${VULTRACK_SCHEDULER_ENABLED:-false}
-      SCHEDULER_INTERVAL_SECONDS: ${SCHEDULER_INTERVAL_SECONDS:-15}
-      SCHEDULER_FETCH_TIMEOUT_SECONDS: ${SCHEDULER_FETCH_TIMEOUT_SECONDS:-7200}
-      SCHEDULER_FETCH_PARALLELISM: ${SCHEDULER_FETCH_PARALLELISM:-2}
-      SCHEDULER_FETCH_LIMIT: ${SCHEDULER_FETCH_LIMIT:-}
-      SCHEDULER_NORMALIZE_LIMIT: ${SCHEDULER_NORMALIZE_LIMIT:-5000}
-      SCHEDULER_NORMALIZE_PARALLELISM: ${SCHEDULER_NORMALIZE_PARALLELISM:-1}
-      SCHEDULER_SOURCE_CODES: ${SCHEDULER_SOURCE_CODES:-}
-      SCHEDULER_INCLUDE_INIT_SOURCES: ${SCHEDULER_INCLUDE_INIT_SOURCES:-false}
-      SCHEDULER_DETAIL_SNAPSHOT_QUEUE_ENABLED: ${SCHEDULER_DETAIL_SNAPSHOT_QUEUE_ENABLED:-true}
-      SCHEDULER_DETAIL_SNAPSHOT_QUEUE_INTERVAL_SECONDS: ${SCHEDULER_DETAIL_SNAPSHOT_QUEUE_INTERVAL_SECONDS:-60}
-      SCHEDULER_DETAIL_SNAPSHOT_QUEUE_LIMIT: ${SCHEDULER_DETAIL_SNAPSHOT_QUEUE_LIMIT:-5000}
-      SCHEDULER_DETAIL_SNAPSHOT_QUEUE_CONCURRENCY: ${SCHEDULER_DETAIL_SNAPSHOT_QUEUE_CONCURRENCY:-8}
-      SCHEDULER_DUCKDB_AFFECTED_QUEUE_LIMIT: ${SCHEDULER_DUCKDB_AFFECTED_QUEUE_LIMIT:-1000}
-      SCHEDULER_DETAIL_SNAPSHOT_GZIP_LEVEL: ${SCHEDULER_DETAIL_SNAPSHOT_GZIP_LEVEL:-4}
-    volumes:
-      - .:/workspace
-    command: ["dotnet", "bin/Debug/net10.0/VulTrack.App.dll", "--urls", "http://0.0.0.0:8080"]
+      VULTRACK_STORAGE_BACKEND: duckdb
+      VULTRACK_DUCKDB_ENABLED: "true"
+      VULTRACK_DUCKDB_PATH: /workspace/data/duckdb/vultrack.duckdb
+      VULTRACK_SPOOL_PATH: /workspace/data/spool
+      VULTRACK_STARTUP_MAINTENANCE: "false"
+    mem_limit: "5g"
     ports:
-      - "5099:8080"
-    depends_on:
-      postgres:
-        condition: service_healthy
+      - "${VULTRACK_API_PORT:-5099}:8080"
+    volumes:
+      - ./data:/workspace/data
+      - ./import:/workspace/import:ro
+    command: ["dotnet", "/app/VulTrack.App.dll"]
 
   frontend:
     build:
       context: .
       dockerfile: frontend/Dockerfile
-    container_name: vultrack-frontend
+    container_name: ${VULTRACK_FRONTEND_CONTAINER:-vultrack-frontend}
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "${VULTRACK_HTTP_PORT:-3000}:80"
+    mem_limit: "128m"
     depends_on:
       - api
-
-  adminer:
-    image: adminer:4
-    container_name: vultrack-adminer
-    restart: unless-stopped
-    ports:
-      - "8081:8080"
-    environment:
-      ADMINER_DEFAULT_SERVER: postgres
-      ADMINER_DESIGN: dracula
-    depends_on:
-      - postgres
