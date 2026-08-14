@@ -38,3 +38,4 @@ coverage/
 *~
 /bin/
 /obj/
+/.deploy-publish/
