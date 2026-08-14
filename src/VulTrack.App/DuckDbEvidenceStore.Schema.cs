@@ -21,6 +21,7 @@ public sealed partial class DuckDbEvidenceStore
     private static readonly string[] ResetTables =
     [
         "vulnerability_identifiers",
+        "vulnerability_search_tokens",
         "vulnerability_latest",
         "vulnerabilities",
         "source_record_identifiers",
@@ -122,6 +123,12 @@ public sealed partial class DuckDbEvidenceStore
           identifier varchar,
           vulnerability_id varchar,
           vulnerability_key varchar
+        )
+        """,
+        """
+        create table if not exists vulnerability_search_tokens (
+          vulnerability_id varchar,
+          token varchar
         )
         """,
         """
@@ -310,6 +317,9 @@ public sealed partial class DuckDbEvidenceStore
         create index if not exists ix_duck_vulnerability_identifiers_value on vulnerability_identifiers(identifier)
         """,
         """
+        create index if not exists ix_duck_vulnerability_search_tokens_token on vulnerability_search_tokens(token)
+        """,
+        """
         create index if not exists ix_duck_source_record_relations_vulnerability_id on source_record_relations(vulnerability_id)
         """,
         """
@@ -390,13 +400,15 @@ public sealed partial class DuckDbEvidenceStore
     [
         "create index if not exists ix_duck_vulnerabilities_primary on vulnerabilities(primary_identifier)",
         "create index if not exists ix_duck_vulnerabilities_id on vulnerabilities(id)",
-        "create index if not exists ix_duck_vulnerability_identifiers_value on vulnerability_identifiers(identifier)"
+        "create index if not exists ix_duck_vulnerability_identifiers_value on vulnerability_identifiers(identifier)",
+        "create index if not exists ix_duck_vulnerability_search_tokens_token on vulnerability_search_tokens(token)"
     ];
 
     private static readonly string[] CatalogDropIndexStatements =
     [
         "drop index if exists ix_duck_vulnerabilities_primary",
         "drop index if exists ix_duck_vulnerabilities_id",
-        "drop index if exists ix_duck_vulnerability_identifiers_value"
+        "drop index if exists ix_duck_vulnerability_identifiers_value",
+        "drop index if exists ix_duck_vulnerability_search_tokens_token"
     ];
 }

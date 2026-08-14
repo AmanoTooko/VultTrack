@@ -228,6 +228,7 @@ public sealed partial class DuckDbEvidenceStore
                     where a.primary_identifier = v.primary_identifier
                       and a.vulnerability_id <> v.id
                     """);
+                RebuildSearchTokens(connection);
                 RefreshLatestCatalog(connection);
                 Execute(connection, "commit");
             }
@@ -277,6 +278,13 @@ public sealed partial class DuckDbEvidenceStore
             Execute(connection, "begin transaction");
             try
             {
+                // Drop tokens before vulnerabilities so the delete can still resolve the old ids.
+                Execute(connection, $"""
+                    delete from vulnerability_search_tokens
+                    where vulnerability_id in (
+                      select id from vulnerabilities where primary_identifier in ({keyList})
+                    )
+                    """);
                 Execute(connection, $"delete from vulnerability_identifiers where vulnerability_key in ({keyList})");
                 Execute(connection, $"delete from vulnerabilities where primary_identifier in ({keyList})");
                 Execute(connection, $$"""
@@ -378,6 +386,7 @@ public sealed partial class DuckDbEvidenceStore
                       and a.primary_identifier in ({keyList})
                       and a.vulnerability_id <> v.id
                     """);
+                InsertSearchTokensForKeys(connection, keyList);
                 RefreshLatestCatalog(connection);
                 Execute(connection, "commit");
             }
@@ -547,6 +556,10 @@ public sealed partial class DuckDbEvidenceStore
             "severityDesc" => "severityDesc",
             _ => "modifiedDesc"
         };
+        // Deep OFFSET pages re-scan and re-sort the full match set on every request;
+        // cap pagination instead of paying an unbounded cost per page.
+        if (offset > MaxSearchOffset)
+            return new DuckDbCatalogSearchResult([], page, pageSize, sort, false);
         if (System.Text.RegularExpressions.Regex.IsMatch(
                 normalized,
                 @"^CVE-\d{4}-\d{4,}$",
@@ -610,33 +623,80 @@ public sealed partial class DuckDbEvidenceStore
         }
         else
         {
-            command.CommandText = $"""
-                select id, primary_identifier, title, severity_label, max_cvss_score,
-                       affected_component_count, affected_component_names_json,
-                       published_at, modified_at
-                from vulnerabilities v
-                where primary_identifier = $1
-                   or lower(primary_identifier) like lower($2)
-                   or lower(coalesce(title, '')) like lower($2)
-                   or lower(coalesce(identifiers_json, '')) like lower($2)
-                   or exists (
-                     select 1
-                     from source_record_relations relation
-                     where relation.vulnerability_id = v.id
-                       and (relation.related_identifier = $1
-                            or lower(relation.related_identifier) like lower($2))
-                   )
-                order by
-                  case
-                    when primary_identifier = $1 then 0
-                    else 1
-                  end,
-                  {orderBy}
-                limit {pageSize + 1}
-                offset {offset}
-                """;
-            command.Parameters.Add(new DuckDBParameter(normalized));
-            command.Parameters.Add(new DuckDBParameter($"%{query}%"));
+            var tokens = TokenizeSearchText(query);
+            if (tokens.Length > 0)
+            {
+                var tokenList = string.Join(", ", tokens.Select(SqlValue));
+                var tokenMatch = $"""
+                    select vulnerability_id
+                    from vulnerability_search_tokens
+                    where token in ({tokenList})
+                    group by vulnerability_id
+                    having count(distinct token) = {tokens.Length}
+                    """;
+                long candidateCount;
+                using (var countCommand = searchConnection.CreateCommand())
+                {
+                    countCommand.CommandText = $"select count(*) from ({tokenMatch}) candidates";
+                    candidateCount = Convert.ToInt64(await countCommand.ExecuteScalarAsync(ct));
+                }
+                if (candidateCount > 0)
+                {
+                    command.CommandText = $"""
+                        select id, primary_identifier, title, severity_label, max_cvss_score,
+                               affected_component_count, affected_component_names_json,
+                               published_at, modified_at
+                        from vulnerabilities v
+                        where v.id in ({tokenMatch})
+                           or v.id in (
+                             select vulnerability_id
+                             from source_record_relations
+                             where related_identifier = $1
+                           )
+                        order by
+                          case
+                            when primary_identifier = $1 then 0
+                            else 1
+                          end,
+                          {orderBy}
+                        limit {pageSize + 1}
+                        offset {offset}
+                        """;
+                    command.Parameters.Add(new DuckDBParameter(normalized));
+                }
+            }
+            if (string.IsNullOrEmpty(command.CommandText))
+            {
+                // LIKE fallback: covers substring queries with no exact token hit
+                // (e.g. "openss") and queries that tokenize to nothing (e.g. "++").
+                command.CommandText = $"""
+                    select id, primary_identifier, title, severity_label, max_cvss_score,
+                           affected_component_count, affected_component_names_json,
+                           published_at, modified_at
+                    from vulnerabilities v
+                    where primary_identifier = $1
+                       or lower(primary_identifier) like lower($2)
+                       or lower(coalesce(title, '')) like lower($2)
+                       or lower(coalesce(identifiers_json, '')) like lower($2)
+                       or exists (
+                         select 1
+                         from source_record_relations relation
+                         where relation.vulnerability_id = v.id
+                           and (relation.related_identifier = $1
+                                or lower(relation.related_identifier) like lower($2))
+                       )
+                    order by
+                      case
+                        when primary_identifier = $1 then 0
+                        else 1
+                      end,
+                      {orderBy}
+                    limit {pageSize + 1}
+                    offset {offset}
+                    """;
+                command.Parameters.Add(new DuckDBParameter(normalized));
+                command.Parameters.Add(new DuckDBParameter($"%{query}%"));
+            }
         }
         var rows = await ReadCatalogListRowsAsync(command, ct);
         var hasMore = rows.Count > pageSize;
@@ -1003,4 +1063,53 @@ public sealed partial class DuckDbEvidenceStore
             limit 5000
             """);
     }
+
+    private const int MaxSearchOffset = 100_000;
+    private const int MaxSearchTokens = 8;
+
+    private static string[] TokenizeSearchText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return [];
+        var tokens = new List<string>();
+        var current = new System.Text.StringBuilder();
+        foreach (var ch in value.ToLowerInvariant())
+        {
+            if (char.IsLetterOrDigit(ch))
+            {
+                current.Append(ch);
+                continue;
+            }
+            if (current.Length >= 2) tokens.Add(current.ToString());
+            current.Clear();
+        }
+        if (current.Length >= 2) tokens.Add(current.ToString());
+        return tokens.Distinct().Take(MaxSearchTokens).ToArray();
+    }
+
+    // Token source: primary_identifier + title + identifiers_json (identifiers_json is built
+    // from the same rows as vulnerability_identifiers). Description is deliberately excluded:
+    // it would grow the token table by ~10x for terms the LIKE path never matched either.
+    private static string SearchTokenSelect(string vulnerabilityFilter) => $"""
+        select distinct id, token
+        from (
+          select v.id as id,
+                 unnest(regexp_split_to_array(
+                   lower(concat_ws(' ', v.primary_identifier, coalesce(v.title, ''), coalesce(v.identifiers_json, ''))),
+                   '[^a-z0-9]+')) as token
+          from vulnerabilities v
+          {vulnerabilityFilter}
+        ) flattened
+        where length(token) >= 2
+        """;
+
+    private static void RebuildSearchTokens(DuckDBConnection connection)
+    {
+        Execute(connection, "delete from vulnerability_search_tokens");
+        Execute(connection, $"insert into vulnerability_search_tokens {SearchTokenSelect("")}");
+    }
+
+    private static void InsertSearchTokensForKeys(DuckDBConnection connection, string keyList) =>
+        Execute(connection, $"""
+            insert into vulnerability_search_tokens {SearchTokenSelect($"where v.primary_identifier in ({keyList})")}
+            """);
 }

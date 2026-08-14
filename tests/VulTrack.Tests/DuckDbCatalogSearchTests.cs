@@ -235,4 +235,149 @@ public sealed class DuckDbCatalogSearchTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task TokenSearch_MatchesLikeResults_AndNarrowsWithAndSemantics()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-token-search-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "catalog.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            await store.ReplaceCatalogRecordsAsync(
+                [
+                    Catalog("CVE-2024-1001", "OpenSSL buffer overflow regression"),
+                    Catalog("CVE-2024-1002", "OpenSSL certificate parsing flaw"),
+                    Catalog("CVE-2024-1003", "Kernel scheduler regression"),
+                    Catalog("CVE-2024-1004", "Unrelated vim issue")
+                ],
+                CancellationToken.None);
+            await store.RebuildCatalogAsync(CancellationToken.None);
+
+            var single = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("openssl", 1, 25, "identifierAsc"),
+                CancellationToken.None);
+            Assert.Equal(
+                ["CVE-2024-1001", "CVE-2024-1002"],
+                single.Items.Select(item => item.PrimaryIdentifier).ToArray());
+
+            var multi = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("openssl regression", 1, 25, "identifierAsc"),
+                CancellationToken.None);
+            var narrowed = Assert.Single(multi.Items);
+            Assert.Equal("CVE-2024-1001", narrowed.PrimaryIdentifier);
+
+            var identifierTokens = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("CVE 2024 1003", 1, 25, "identifierAsc"),
+                CancellationToken.None);
+            var identifierMatch = Assert.Single(identifierTokens.Items);
+            Assert.Equal("CVE-2024-1003", identifierMatch.PrimaryIdentifier);
+
+            var substringFallback = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("openss", 1, 25, "identifierAsc"),
+                CancellationToken.None);
+            Assert.Equal(
+                ["CVE-2024-1001", "CVE-2024-1002"],
+                substringFallback.Items.Select(item => item.PrimaryIdentifier).ToArray());
+
+            var noTokens = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("++", 1, 25, "modifiedDesc"),
+                CancellationToken.None);
+            Assert.Empty(noTokens.Items);
+            Assert.False(noTokens.HasMore);
+
+            var deepPage = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("openssl", 502, 200, "modifiedDesc"),
+                CancellationToken.None);
+            Assert.Empty(deepPage.Items);
+            Assert.False(deepPage.HasMore);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        static DuckDbCatalogRecord Catalog(string key, string title) => new(
+            "test-source",
+            key,
+            Guid.NewGuid(),
+            key,
+            title,
+            $"Description for {key}",
+            "active",
+            "2024-01-01T00:00:00Z",
+            "2024-01-02T00:00:00Z",
+            $"https://example.test/{key}",
+            $"hash-{key}",
+            [key]);
+    }
+
+    [Fact]
+    public async Task RebuildCatalogForKeys_RefreshesSearchTokens()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-token-refresh-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var id = Guid.NewGuid();
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "catalog.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            await store.ReplaceCatalogRecordsAsync(
+                [Catalog("Initial alpha weakness", "hash-1")],
+                CancellationToken.None);
+            await store.RebuildCatalogAsync(CancellationToken.None);
+
+            var before = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("alpha", 1, 25, "modifiedDesc"),
+                CancellationToken.None);
+            Assert.Single(before.Items);
+
+            await store.ReplaceCatalogRecordsAsync(
+                [Catalog("Patched beta fix", "hash-2")],
+                CancellationToken.None);
+            await store.RebuildCatalogForKeysAsync(["CVE-2024-2001"], CancellationToken.None);
+
+            var added = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("beta", 1, 25, "modifiedDesc"),
+                CancellationToken.None);
+            var addedMatch = Assert.Single(added.Items);
+            Assert.Equal("CVE-2024-2001", addedMatch.PrimaryIdentifier);
+
+            var removed = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("alpha", 1, 25, "modifiedDesc"),
+                CancellationToken.None);
+            Assert.Empty(removed.Items);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        DuckDbCatalogRecord Catalog(string title, string hash) => new(
+            "test-source",
+            "CVE-2024-2001",
+            id,
+            "CVE-2024-2001",
+            title,
+            "Description",
+            "active",
+            "2024-02-01T00:00:00Z",
+            "2024-02-02T00:00:00Z",
+            "https://example.test/CVE-2024-2001",
+            hash,
+            ["CVE-2024-2001"]);
+    }
 }
