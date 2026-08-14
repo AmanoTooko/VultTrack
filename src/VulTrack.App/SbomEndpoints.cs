@@ -1039,40 +1039,5 @@ public static class SbomEndpoints
     };
 
     private static string? PurlToEcosystem(string? purl)
-    {
-        if (purl is null || !purl.StartsWith("pkg:", StringComparison.OrdinalIgnoreCase)) return null;
-        var slash = purl.IndexOf('/');
-        if (slash < 0) return null;
-        return purl["pkg:".Length..slash].ToLowerInvariant() switch
-        {
-            "deb" => DistroEcosystem("debian", PurlQualifier(purl, "distro")),
-            "apk" => DistroEcosystem("alpine", PurlQualifier(purl, "distro")),
-            "golang" => "go",
-            "rpm" => "rpm",
-            var x => x
-        };
-    }
-
-    private static string? PurlQualifier(string purl, string key)
-    {
-        var query = purl.Split('?', 2).ElementAtOrDefault(1);
-        if (string.IsNullOrWhiteSpace(query)) return null;
-        foreach (var pair in query.Split('&', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var parts = pair.Split('=', 2);
-            if (parts.Length == 2 && string.Equals(parts[0], key, StringComparison.OrdinalIgnoreCase))
-                return Uri.UnescapeDataString(parts[1]);
-        }
-        return null;
-    }
-
-    private static string DistroEcosystem(string ecosystem, string? distro)
-    {
-        if (string.IsNullOrWhiteSpace(distro)) return ecosystem;
-        var pattern = string.Equals(ecosystem, "alpine", StringComparison.OrdinalIgnoreCase)
-            ? @"(?:^|[-_])(\d+\.\d+)(?:[._-]|$)"
-            : @"(?:^|[-_])(\d+)(?:[._-]|$)";
-        var match = System.Text.RegularExpressions.Regex.Match(distro, pattern);
-        return match.Success ? $"{ecosystem}:{match.Groups[1].Value}" : ecosystem;
-    }
+        => PurlIdentity.EcosystemFromPurl(purl);
 }

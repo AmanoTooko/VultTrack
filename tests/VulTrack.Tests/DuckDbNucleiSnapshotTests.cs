@@ -5,6 +5,7 @@ using VulTrack.App;
 
 namespace VulTrack.Tests;
 
+[Collection("DuckDbSpoolEnvironment")]
 public sealed class DuckDbNucleiSnapshotTests
 {
     [Fact]

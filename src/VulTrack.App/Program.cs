@@ -515,6 +515,12 @@ app.MapGet("/api/v1/admin.duckdbEvidence.stats", async (HttpContext context, Adm
     return ApiResult.Ok(await store.StatsAsync(ct));
 });
 
+app.MapGet("/api/v1/admin.duckdbEvidence.coverage", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, CancellationToken ct) =>
+{
+    if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+    return ApiResult.Ok(await store.CoverageStatusAsync(ct));
+});
+
 app.MapPost("/api/v1/admin.duckdbCatalog.rebuild", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, CancellationToken ct) =>
 {
     if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
@@ -1745,6 +1751,21 @@ static async Task<List<object>> QueryRecordsGroupedAsync(NpgsqlDataSource db, Gu
     return rows;
 }
 
+if (duckDbPrimary)
+{
+    try
+    {
+        await app.Services.GetRequiredService<DuckDbEvidenceStore>().SearchCatalogAsync(
+            new VulnerabilitySearchRequest("", 1, 25, "modifiedDesc"),
+            CancellationToken.None);
+        app.Logger.LogInformation("DuckDB vulnerability list cache pages are warm.");
+    }
+    catch (Exception ex)
+    {
+        app.Logger.LogWarning(ex, "DuckDB vulnerability list warm-up failed; requests will warm the cache on demand.");
+    }
+}
+
 app.Run();
 
 static async Task EnsureRuntimeIndexesAsync(NpgsqlDataSource db)
@@ -2711,7 +2732,7 @@ static object[] DuckDbConfiguredSources()
 {
     var spoolRoot = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH")
         ?? Path.Combine(Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT") ?? Directory.GetCurrentDirectory(), "data", "spool");
-    return (Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES") ?? "nvd-cve,osv,cisa-kev,exploitdb,nuclei-templates")
+    return (Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES") ?? "nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory")
         .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
         .Distinct(StringComparer.OrdinalIgnoreCase)
         .Select(code =>

@@ -27,7 +27,18 @@ public sealed class DuckDbFirstScheduler(
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            await RunCycleAsync(stoppingToken);
+            try
+            {
+                await RunCycleAsync(stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "DuckDB-first scheduler cycle failed; the next cycle will retry.");
+            }
             await Task.Delay(interval, stoppingToken);
         }
     }
@@ -40,17 +51,28 @@ public sealed class DuckDbFirstScheduler(
             foreach (var source in SourceCodes())
             {
                 ct.ThrowIfCancellationRequested();
-                var fetchSource = await ResolveScheduledSourceAsync(source, ct);
-                await RunFetcherAsync(fetchSource, force: false, ct);
-                await ConsumeReadyFilesAsync(ct);
-                if (fetchSource.Equals("osv", StringComparison.OrdinalIgnoreCase))
+                try
                 {
-                    var maxPendingBatches = Math.Clamp(EnvInt("OSV_PENDING_MAX_BATCHES_PER_CYCLE", 3, 1), 1, 12);
-                    for (var batch = 1; batch < maxPendingBatches && HasOsvPending(); batch++)
+                    var fetchSource = await ResolveScheduledSourceAsync(source, ct);
+                    await RunFetcherAsync(fetchSource, force: false, ct);
+                    await ConsumeReadyFilesAsync(ct);
+                    if (fetchSource.Equals("osv", StringComparison.OrdinalIgnoreCase))
                     {
-                        await RunFetcherAsync("osv", force: false, ct);
-                        await ConsumeReadyFilesAsync(ct);
+                        var maxPendingBatches = Math.Clamp(EnvInt("OSV_PENDING_MAX_BATCHES_PER_CYCLE", 3, 1), 1, 12);
+                        for (var batch = 1; batch < maxPendingBatches && HasOsvPending(); batch++)
+                        {
+                            await RunFetcherAsync("osv", force: false, ct);
+                            await ConsumeReadyFilesAsync(ct);
+                        }
                     }
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "DuckDB-first scheduled source {SourceCode} failed; continuing with the remaining sources.", source);
                 }
             }
         }
@@ -77,7 +99,17 @@ public sealed class DuckDbFirstScheduler(
 
     private async Task ConsumeReadyFilesAsync(CancellationToken ct)
     {
-        while (Directory.Exists(SpoolIncomingPath()) && Directory.EnumerateFiles(SpoolIncomingPath(), "*.ndjson.ready").Any())
+        var epss = await normalizer.IngestFirstEpssSnapshotsAsync(maxFiles: 10, ct);
+        if (epss.Files.Count > 0)
+        {
+            logger.LogInformation(
+                "DuckDB-first scheduler committed {Files} FIRST EPSS snapshots; rows={Rows}, inserted={Inserted}, updated={Updated}.",
+                epss.Files.Count,
+                epss.Files.Sum(file => file.InputRows),
+                epss.Files.Sum(file => file.InsertedRows),
+                epss.Files.Sum(file => file.UpdatedRows));
+        }
+        while (Directory.Exists(SpoolIncomingPath()) && HasGenericReadyFiles())
         {
             var result = await normalizer.IngestSpoolAsync(new DuckDbSpoolIngestRequest(BatchSize: 5000, MaxFiles: 1000), ct);
             if (result.files.Count == 0) break;
@@ -143,7 +175,7 @@ public sealed class DuckDbFirstScheduler(
     }
 
     private static string[] SourceCodes() =>
-        (Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES") ?? "nvd-cve,osv,cisa-kev,exploitdb,nuclei-templates")
+        (Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES") ?? "nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory")
             .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -203,6 +235,10 @@ public sealed class DuckDbFirstScheduler(
     }
 
     private static string SpoolIncomingPath() => Path.Combine(SpoolRootPath(), "incoming");
+
+    private static bool HasGenericReadyFiles() =>
+        Directory.EnumerateFiles(SpoolIncomingPath(), "*.ndjson.ready")
+            .Any(path => !Path.GetFileName(path).StartsWith("first-epss-", StringComparison.OrdinalIgnoreCase));
 
     private static string LastLine(string value) => value
         .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)

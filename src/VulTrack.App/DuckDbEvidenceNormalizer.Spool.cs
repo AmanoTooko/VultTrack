@@ -52,11 +52,15 @@ public sealed partial class DuckDbEvidenceNormalizer
             RecoverInterruptedSpoolFiles(incoming);
             var files = string.IsNullOrWhiteSpace(request.File)
                 ? Directory.EnumerateFiles(incoming, "*.ndjson.ready")
+                    .Where(path => !Path.GetFileName(path).StartsWith("first-epss-", StringComparison.OrdinalIgnoreCase))
                     .OrderBy(SpoolRunPrefix, StringComparer.Ordinal)
                     .ThenBy(SpoolSequence)
                     .Take(Math.Clamp(request.MaxFiles, 1, 1000))
                     .ToArray()
                 : [ResolveReadyFile(incoming, request.File)];
+
+            if (files.Any(path => Path.GetFileName(path).StartsWith("first-epss-", StringComparison.OrdinalIgnoreCase)))
+                throw new InvalidOperationException("FIRST EPSS must be imported through the native gzip snapshot pipeline.");
 
             foreach (var readyPath in files)
                 outcomes.Add(await IngestSpoolFileAsync(readyPath, Math.Clamp(request.BatchSize, 100, 20_000), ct));
@@ -175,7 +179,6 @@ public sealed partial class DuckDbEvidenceNormalizer
                     StringComparison.OrdinalIgnoreCase);
                 if (!pureThreatRecord && !IsNucleiSpoolSource(sourceCode))
                 {
-                    changedKeys.Add(item.Catalog.VulnerabilityKey);
                     evidenceBatch.Add(item.Evidence);
                     catalogBatch.Add(item.Catalog);
                 }
@@ -185,7 +188,13 @@ public sealed partial class DuckDbEvidenceNormalizer
                 affectedFacts += item.Evidence.AffectedFacts.Count;
                 if (!IsNucleiSpoolSource(sourceCode) &&
                     (evidenceBatch.Count >= batchSize || exploitBatch.Count >= batchSize || threatScoreBatch.Count >= batchSize))
-                    await FlushSpoolBatchAsync(evidenceBatch, catalogBatch, exploitBatch, threatScoreBatch, sourceCode, replaceLogicalSource, ct);
+                    changedKeys.UnionWith(await FlushSpoolBatchAsync(
+                        evidenceBatch,
+                        catalogBatch,
+                        exploitBatch,
+                        threatScoreBatch,
+                        replaceLogicalSource,
+                        ct));
             }
             if (errors > 0)
                 throw new InvalidDataException($"Spool import contained {errors} invalid records.");
@@ -208,7 +217,13 @@ public sealed partial class DuckDbEvidenceNormalizer
             }
             else
             {
-                await FlushSpoolBatchAsync(evidenceBatch, catalogBatch, exploitBatch, threatScoreBatch, sourceCode, replaceLogicalSource, ct);
+                changedKeys.UnionWith(await FlushSpoolBatchAsync(
+                    evidenceBatch,
+                    catalogBatch,
+                    exploitBatch,
+                    threatScoreBatch,
+                    replaceLogicalSource,
+                    ct));
             }
 
             File.Move(processingPath, stagedPath, overwrite: true);
@@ -389,29 +404,55 @@ public sealed partial class DuckDbEvidenceNormalizer
             : 0;
     }
 
-    private async Task FlushSpoolBatchAsync(
+    private async Task<IReadOnlyList<string>> FlushSpoolBatchAsync(
         List<DuckDbEvidenceRecord> evidence,
         List<DuckDbCatalogRecord> catalog,
         List<DuckDbExploit> exploits,
         List<DuckDbThreatScore> threatScores,
-        string? sourceCode,
         bool appendOnly,
         CancellationToken ct)
     {
-        if (evidence.Count == 0 && catalog.Count == 0 && exploits.Count == 0 && threatScores.Count == 0) return;
+        if (evidence.Count == 0 && catalog.Count == 0 && exploits.Count == 0 && threatScores.Count == 0)
+            return [];
+
+        IReadOnlyList<DuckDbCatalogRecord> changedCatalog = catalog;
+        IReadOnlyList<DuckDbEvidenceRecord> changedEvidence = evidence;
+        IReadOnlyList<string> previousKeys = [];
+        if (!appendOnly && catalog.Count > 0)
+        {
+            changedCatalog = await store.FilterChangedCatalogRecordsAsync(catalog, ct);
+            previousKeys = await store.GetExistingCatalogKeysAsync(changedCatalog, ct);
+            var changedRecords = changedCatalog
+                .Select(record => SourceRecordIdentity(record.SourceCode, record.SourceRecordId))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            changedEvidence = evidence
+                .Where(record => changedRecords.Contains(
+                    SourceRecordIdentity(record.SourceCode, record.SourceRecordId)))
+                .ToArray();
+        }
+
         if (appendOnly)
             await store.AppendSpoolBatchAsync(evidence, catalog, exploits, threatScores, ct);
         else
         {
-            await store.ReplaceRecordsAsync(evidence, ct);
-            await store.ReplaceCatalogRecordsAsync(catalog, ct);
+            await store.ReplaceRecordsAsync(changedEvidence, ct);
+            await store.ReplaceCatalogRecordsAsync(changedCatalog, ct);
             await store.ReplaceSpoolSupplementalAsync(exploits, threatScores, ct);
         }
+        var changedKeys = changedCatalog
+            .Select(record => record.VulnerabilityKey)
+            .Concat(previousKeys)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         evidence.Clear();
         catalog.Clear();
         exploits.Clear();
         threatScores.Clear();
+        return changedKeys;
     }
+
+    private static string SourceRecordIdentity(string sourceCode, string sourceRecordId) =>
+        $"{sourceCode}\u001f{sourceRecordId}";
 
     private static ParsedSpoolRecord BuildSpoolRecords(JsonObject envelope)
     {
@@ -433,6 +474,9 @@ public sealed partial class DuckDbEvidenceNormalizer
         string? description;
         string? status;
         string[] identifiers;
+        string[] upstreamIdentifiers = [];
+        string[] relatedIdentifiers = [];
+        var normalizationVersion = "catalog-v1";
         IReadOnlyList<DuckDbAffectedFact> affected;
         IReadOnlyList<DuckDbSeverityScore> severity;
         IReadOnlyList<DuckDbReference> references;
@@ -478,6 +522,9 @@ public sealed partial class DuckDbEvidenceNormalizer
                     .Select(Identifier.Normalize)
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToArray();
+                upstreamIdentifiers = OsvIdentifierExtractor.ExtractUpstream(payload);
+                relatedIdentifiers = OsvIdentifierExtractor.ExtractRelated(payload);
+                normalizationVersion = "osv-relations-v2";
                 key = identifiers.FirstOrDefault(value => value.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase))
                     ?? identifiers.FirstOrDefault()
                     ?? osvId;
@@ -639,7 +686,10 @@ public sealed partial class DuckDbEvidenceNormalizer
                 modifiedAt,
                 sourceUrl,
                 recordHash,
-                identifiers),
+                identifiers,
+                upstreamIdentifiers,
+                relatedIdentifiers,
+                normalizationVersion),
             exploit,
             threatScore);
     }

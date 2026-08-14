@@ -76,11 +76,24 @@ public sealed record DuckDbCatalogRecord(
     string? ModifiedAt,
     string? SourceUrl,
     string RecordHash,
-    IReadOnlyList<string> Identifiers);
+    IReadOnlyList<string> Identifiers,
+    IReadOnlyList<string>? UpstreamIdentifiers = null,
+    IReadOnlyList<string>? RelatedIdentifiers = null,
+    string NormalizationVersion = "catalog-v1");
+
+public sealed record DuckDbVulnerabilityRelations(
+    string[] UpstreamIdentifiers,
+    string[] RelatedIdentifiers);
 
 public sealed record DuckDbCatalogStats(long SourceRecords, long Vulnerabilities, long Identifiers);
 public sealed record DuckDbSourceProjectionState(IReadOnlyList<string> VulnerabilityKeys, bool HasAffectedFacts);
 public sealed record DuckDbNucleiSnapshotStats(long ActiveRows, long ActiveDistinctRawIds);
+public sealed record DuckDbFirstEpssApplyResult(
+    long InputRows,
+    long InsertedRows,
+    long UpdatedRows,
+    long UnchangedRows,
+    long ElapsedMs);
 
 public sealed record DuckDbCatalogVulnerability(
     Guid Id,
@@ -97,8 +110,19 @@ public sealed record DuckDbCatalogVulnerability(
     string? ModifiedAt,
     long SourceCount);
 
+public sealed record DuckDbCatalogListItem(
+    Guid Id,
+    string PrimaryIdentifier,
+    string? Title,
+    string? SeverityLabel,
+    double? MaxCvssScore,
+    long AffectedComponentCount,
+    string[] AffectedComponentNames,
+    string? PublishedAt,
+    string? ModifiedAt);
+
 public sealed record DuckDbCatalogSearchResult(
-    IReadOnlyList<DuckDbCatalogVulnerability> Items,
+    IReadOnlyList<DuckDbCatalogListItem> Items,
     int Page,
     int PageSize,
     string Sort,
@@ -253,7 +277,7 @@ public sealed record DuckDbVulnerabilityKeyMapping(
     Guid VulnerabilityId,
     string VulnerabilityKey);
 
-public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposable
+public sealed partial class DuckDbEvidenceStore(IConfiguration configuration) : IDisposable
 {
     private const string CatalogSelectColumns = """
         select id, primary_identifier, title, description, status, severity_label, max_cvss_score,
@@ -263,7 +287,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
 
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly SemaphoreSlim _initializeLock = new(1, 1);
-    private readonly SemaphoreSlim _readPoolSlots = new(4, 4);
+    private readonly SemaphoreSlim _readPoolSlots = new(2, 2);
     private readonly ConcurrentBag<DuckDBConnection> _readPool = new();
     private bool _initialized;
 
@@ -320,7 +344,8 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
     public async Task<bool> HasSourceRecordsAsync(string sourceCode, CancellationToken ct)
     {
         await InitializeAsync(ct);
-        using var connection = OpenConnection();
+        using var lease = await RentReadConnectionAsync(ct);
+        var connection = lease.Connection;
         using var command = connection.CreateCommand();
         command.CommandText = "select exists(select 1 from source_records where source_code = $1 limit 1)";
         command.Parameters.Add(new DuckDBParameter(sourceCode));
@@ -408,6 +433,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                     Execute(connection, $"delete from {table} where source_code = {source}");
                 Execute(connection, $"delete from exploits where source_code = {source}");
                 Execute(connection, $"delete from threat_scores where source_code = {source}");
+                Execute(connection, $"delete from source_record_relations where source_code = {source}");
                 Execute(connection, $"delete from source_record_identifiers where source_code = {source}");
                 Execute(connection, $"delete from source_records where source_code = {source}");
                 Execute(connection, "commit");
@@ -633,6 +659,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                     {
                         var ids = string.Join(",", batch.Select(SqlValue));
                         var source = SqlValue(sourceGroup.Key);
+                        Execute(connection, $"delete from source_record_relations where source_code = {source} and source_record_id in ({ids})");
                         Execute(connection, $"delete from source_record_identifiers where source_code = {source} and source_record_id in ({ids})");
                         Execute(connection, $"delete from source_records where source_code = {source} and source_record_id in ({ids})");
                     }
@@ -651,6 +678,83 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         {
             _writeLock.Release();
         }
+    }
+
+    public async Task<IReadOnlyList<DuckDbCatalogRecord>> FilterChangedCatalogRecordsAsync(
+        IReadOnlyList<DuckDbCatalogRecord> records,
+        CancellationToken ct)
+    {
+        if (records.Count == 0) return [];
+        await InitializeAsync(ct);
+
+        var existingVersions = new Dictionary<string, (string? Hash, string? Version)>(StringComparer.OrdinalIgnoreCase);
+        using var connection = OpenConnection();
+        foreach (var sourceGroup in records.GroupBy(record => record.SourceCode, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var batch in sourceGroup
+                         .Select(record => record.SourceRecordId)
+                         .Distinct(StringComparer.OrdinalIgnoreCase)
+                         .Chunk(1000))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = $"""
+                    select source_record_id, record_hash, normalizer_version
+                    from source_records
+                    where source_code = $1
+                      and source_record_id in ({string.Join(",", batch.Select(SqlValue))})
+                    """;
+                command.Parameters.Add(new DuckDBParameter(sourceGroup.Key));
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                {
+                    var sourceRecordId = reader.GetString(0);
+                    var recordHash = reader.IsDBNull(1) ? null : reader.GetString(1);
+                    var normalizerVersion = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    existingVersions[SourceRecordIdentity(sourceGroup.Key, sourceRecordId)] = (recordHash, normalizerVersion);
+                }
+            }
+        }
+
+        return records
+            .Where(record =>
+                string.IsNullOrWhiteSpace(record.RecordHash)
+                || !existingVersions.TryGetValue(
+                    SourceRecordIdentity(record.SourceCode, record.SourceRecordId),
+                    out var existing)
+                || !string.Equals(existing.Hash, record.RecordHash, StringComparison.Ordinal)
+                || !string.Equals(existing.Version, record.NormalizationVersion, StringComparison.Ordinal))
+            .ToArray();
+    }
+
+    public async Task<IReadOnlyList<string>> GetExistingCatalogKeysAsync(
+        IReadOnlyList<DuckDbCatalogRecord> records,
+        CancellationToken ct)
+    {
+        if (records.Count == 0) return [];
+        await InitializeAsync(ct);
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var connection = OpenConnection();
+        foreach (var sourceGroup in records.GroupBy(record => record.SourceCode, StringComparer.OrdinalIgnoreCase))
+        {
+            foreach (var batch in sourceGroup
+                         .Select(record => record.SourceRecordId)
+                         .Distinct(StringComparer.OrdinalIgnoreCase)
+                         .Chunk(1000))
+            {
+                using var command = connection.CreateCommand();
+                command.CommandText = $"""
+                    select distinct vulnerability_key
+                    from source_records
+                    where source_code = $1
+                      and source_record_id in ({string.Join(",", batch.Select(SqlValue))})
+                    """;
+                command.Parameters.Add(new DuckDBParameter(sourceGroup.Key));
+                await using var reader = await command.ExecuteReaderAsync(ct);
+                while (await reader.ReadAsync(ct))
+                    if (!reader.IsDBNull(0)) keys.Add(reader.GetString(0));
+            }
+        }
+        return keys.ToArray();
     }
 
     public async Task<DuckDbCatalogStats> RebuildCatalogAsync(CancellationToken ct)
@@ -760,6 +864,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                     where a.primary_identifier = v.primary_identifier
                       and a.vulnerability_id <> v.id
                     """);
+                RefreshLatestCatalog(connection);
                 Execute(connection, "commit");
             }
             catch
@@ -909,6 +1014,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                       and a.primary_identifier in ({keyList})
                       and a.vulnerability_id <> v.id
                     """);
+                RefreshLatestCatalog(connection);
                 Execute(connection, "commit");
             }
             catch
@@ -1084,7 +1190,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         {
             var exact = page == 1 ? await GetCatalogByIdentifierAsync(normalized, ct) : null;
             return new DuckDbCatalogSearchResult(
-                exact is null ? [] : [exact],
+                exact is null ? [] : [ToCatalogListItem(exact)],
                 page,
                 pageSize,
                 sort,
@@ -1101,41 +1207,74 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
             _ => "modified_at desc nulls last, primary_identifier desc"
         };
 
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
-        command.CommandText = $"""
-            select id, primary_identifier, title, description, status, severity_label, max_cvss_score,
-                   affected_component_count, affected_component_names_json, identifiers_json,
-                   published_at, modified_at, source_count
-            from vulnerabilities v
-            where $1 = ''
-               or primary_identifier = $2
-               or lower(primary_identifier) like lower($3)
-               or lower(coalesce(title, '')) like lower($3)
-               or lower(coalesce(description, '')) like lower($3)
-               or exists (
-                    select 1 from vulnerability_identifiers i
-                    where i.vulnerability_id = v.id
-                      and (i.identifier = $2 or lower(i.identifier) like lower($3))
-               )
-            order by
-              case
-                when primary_identifier = $2 then 0
-                when exists (
-                  select 1 from vulnerability_identifiers exact_identifier
-                  where exact_identifier.vulnerability_id = v.id
-                    and exact_identifier.identifier = $2
-                ) then 1
-                else 2
-              end,
-              {orderBy}
-            limit {pageSize + 1}
-            offset {offset}
-            """;
-        command.Parameters.Add(new DuckDBParameter(query));
-        command.Parameters.Add(new DuckDBParameter(normalized));
-        command.Parameters.Add(new DuckDBParameter($"%{query}%"));
-        var rows = await ReadCatalogRowsAsync(command, ct);
+        using var searchLease = await RentReadConnectionAsync(ct);
+        var searchConnection = searchLease.Connection;
+        using var command = searchConnection.CreateCommand();
+        if (string.IsNullOrWhiteSpace(query)
+            && sort == "modifiedDesc"
+            && offset + pageSize + 1 <= 5000)
+        {
+            command.CommandText = $"""
+                select id, primary_identifier, title, severity_label, max_cvss_score,
+                       affected_component_count, affected_component_names_json,
+                       published_at, modified_at
+                from vulnerability_latest
+                order by {orderBy}
+                limit {pageSize + 1}
+                offset {offset}
+                """;
+        }
+        else if (System.Text.RegularExpressions.Regex.IsMatch(
+                     normalized,
+                     @"^CVE-\d{4}$",
+                     System.Text.RegularExpressions.RegexOptions.IgnoreCase)
+                 && int.TryParse(normalized.AsSpan(4, 4), out var cveYear))
+        {
+            command.CommandText = $"""
+                select id, primary_identifier, title, severity_label, max_cvss_score,
+                       affected_component_count, affected_component_names_json,
+                       published_at, modified_at
+                from vulnerabilities
+                where primary_identifier >= $1
+                  and primary_identifier < $2
+                order by {orderBy}
+                limit {pageSize + 1}
+                offset {offset}
+                """;
+            command.Parameters.Add(new DuckDBParameter($"CVE-{cveYear:D4}"));
+            command.Parameters.Add(new DuckDBParameter($"CVE-{cveYear + 1:D4}"));
+        }
+        else
+        {
+            command.CommandText = $"""
+                select id, primary_identifier, title, severity_label, max_cvss_score,
+                       affected_component_count, affected_component_names_json,
+                       published_at, modified_at
+                from vulnerabilities v
+                where primary_identifier = $1
+                   or lower(primary_identifier) like lower($2)
+                   or lower(coalesce(title, '')) like lower($2)
+                   or lower(coalesce(identifiers_json, '')) like lower($2)
+                   or exists (
+                     select 1
+                     from source_record_relations relation
+                     where relation.vulnerability_id = v.id
+                       and (relation.related_identifier = $1
+                            or lower(relation.related_identifier) like lower($2))
+                   )
+                order by
+                  case
+                    when primary_identifier = $1 then 0
+                    else 1
+                  end,
+                  {orderBy}
+                limit {pageSize + 1}
+                offset {offset}
+                """;
+            command.Parameters.Add(new DuckDBParameter(normalized));
+            command.Parameters.Add(new DuckDBParameter($"%{query}%"));
+        }
+        var rows = await ReadCatalogListRowsAsync(command, ct);
         var hasMore = rows.Count > pageSize;
         if (hasMore) rows.RemoveAt(rows.Count - 1);
         return new DuckDbCatalogSearchResult(rows, page, pageSize, sort, hasMore);
@@ -1144,7 +1283,8 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
     public async Task<DuckDbCatalogVulnerability?> GetCatalogByIdAsync(Guid id, CancellationToken ct)
     {
         await InitializeAsync(ct);
-        using var connection = OpenConnection();
+        using var lease = await RentReadConnectionAsync(ct);
+        var connection = lease.Connection;
         using var command = connection.CreateCommand();
         command.CommandText = """
             select id, primary_identifier, title, description, status, severity_label, max_cvss_score,
@@ -1164,7 +1304,8 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
     {
         if (ids.Count == 0) return Array.Empty<DuckDbCatalogVulnerability>();
         await InitializeAsync(ct);
-        using var connection = OpenConnection();
+        using var lease = await RentReadConnectionAsync(ct);
+        var connection = lease.Connection;
         using var command = connection.CreateCommand();
         var idList = string.Join(',', ids.Select(id => SqlValue(id.ToString("D"))));
         command.CommandText = $"""
@@ -1177,6 +1318,53 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         return await ReadCatalogRowsAsync(command, ct);
     }
 
+    public async Task<IReadOnlyDictionary<Guid, DuckDbVulnerabilityRelations>> GetRelationsByVulnerabilityIdsAsync(
+        IReadOnlyCollection<Guid> ids,
+        CancellationToken ct)
+    {
+        if (ids.Count == 0) return new Dictionary<Guid, DuckDbVulnerabilityRelations>();
+        await InitializeAsync(ct);
+        using var lease = await RentReadConnectionAsync(ct);
+        return await ReadRelationsByVulnerabilityIdsAsync(lease.Connection, ids, ct);
+    }
+
+    private static async Task<IReadOnlyDictionary<Guid, DuckDbVulnerabilityRelations>> ReadRelationsByVulnerabilityIdsAsync(
+        DuckDBConnection connection,
+        IReadOnlyCollection<Guid> ids,
+        CancellationToken ct)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            select vulnerability_id, relation_type, related_identifier
+            from source_record_relations
+            where vulnerability_id in ({string.Join(',', ids.Select(id => SqlValue(id.ToString("D"))))})
+            order by vulnerability_id, relation_type, related_identifier
+            """;
+        var values = new Dictionary<Guid, (HashSet<string> Upstream, HashSet<string> Related)>();
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (!Guid.TryParse(reader.GetString(0), out var id)) continue;
+            if (!values.TryGetValue(id, out var relation))
+            {
+                relation = (
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+                values[id] = relation;
+            }
+            var identifier = reader.GetString(2);
+            if (reader.GetString(1).Equals("upstream", StringComparison.OrdinalIgnoreCase))
+                relation.Upstream.Add(identifier);
+            else
+                relation.Related.Add(identifier);
+        }
+        return values.ToDictionary(
+            pair => pair.Key,
+            pair => new DuckDbVulnerabilityRelations(
+                pair.Value.Upstream.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray(),
+                pair.Value.Related.OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray()));
+    }
+
     public async Task<IReadOnlyList<DuckDbComponentCatalogItem>> SearchComponentCatalogAsync(
         string? query,
         ComponentQuery lookup,
@@ -1184,7 +1372,58 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         CancellationToken ct)
     {
         await InitializeAsync(ct);
-        using var connection = OpenConnection();
+        var resultLimit = Math.Clamp(limit, 1, 200);
+        var ecosystem = lookup.Ecosystem?.ToLowerInvariant();
+        var ecosystemFilter = SqlEcosystemFilter("ecosystem_lower", ecosystem);
+        var purls = lookup.PurlCandidates
+            .Append(lookup.PurlWithoutVersion)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (purls.Length > 0)
+        {
+            var exactPurl = await QueryComponentCatalogAsync(
+                TextEqualsOrIn("purl_without_version", purls),
+                resultLimit,
+                ct);
+            if (exactPurl.Count > 0) return exactPurl;
+        }
+
+        var names = lookup.NameCandidates
+            .Append(lookup.ComponentName)
+            .Append(query)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!.Trim().ToLowerInvariant())
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (names.Length > 0)
+        {
+            var exactName = await QueryComponentCatalogAsync(
+                $"package_name_lower in ({TextList(names)}) and {ecosystemFilter}",
+                resultLimit,
+                ct);
+            if (exactName.Count > 0) return exactName;
+        }
+
+        var queryText = query?.Trim() ?? lookup.ComponentName ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(queryText)) return [];
+        var pattern = SqlValue($"%{queryText.ToLowerInvariant()}%");
+        return await QueryComponentCatalogAsync(
+            $"(display_name_lower like {pattern} or package_name_lower like {pattern} " +
+            $"or lower(coalesce(primary_purl, '')) like {pattern} " +
+            $"or lower(coalesce(primary_cpe23_uri, '')) like {pattern}) and {ecosystemFilter}",
+            resultLimit,
+            ct);
+    }
+
+    private async Task<IReadOnlyList<DuckDbComponentCatalogItem>> QueryComponentCatalogAsync(
+        string whereClause,
+        int limit,
+        CancellationToken ct)
+    {
+        using var lease = await RentReadConnectionAsync(ct);
+        var connection = lease.Connection;
         using var command = connection.CreateCommand();
         command.CommandText = $"""
             select md5(concat_ws('|', coalesce(ecosystem, ''), display_name,
@@ -1195,22 +1434,11 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                    max(primary_cpe23_uri) as primary_cpe23_uri,
                    to_json(list(distinct coalesce(nullif(primary_purl, ''), nullif(primary_cpe23_uri, ''), display_name)))::varchar as identities
             from affected_components
-            where ($1 = '' or display_name_lower like lower($2)
-                       or lower(coalesce(primary_purl, '')) like lower($2)
-                       or lower(coalesce(primary_cpe23_uri, '')) like lower($2))
-              and (
-                $3 = ''
-                or ecosystem_lower = lower($3)
-                or (instr(lower($3), ':') = 0 and ecosystem_lower like lower($3) || ':%')
-              )
+            where {whereClause}
             group by ecosystem, display_name, primary_purl, primary_cpe23_uri
             order by display_name
             limit {Math.Clamp(limit, 1, 200)}
             """;
-        var queryText = query?.Trim() ?? lookup.ComponentName ?? string.Empty;
-        command.Parameters.Add(new DuckDBParameter(queryText));
-        command.Parameters.Add(new DuckDBParameter($"%{queryText}%"));
-        command.Parameters.Add(new DuckDBParameter(lookup.Ecosystem ?? string.Empty));
         var rows = new List<DuckDbComponentCatalogItem>();
         using var reader = await command.ExecuteReaderAsync(ct);
         while (await reader.ReadAsync(ct))
@@ -1273,8 +1501,9 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
     public async Task<IReadOnlyList<DuckDbSbomUpload>> ListSbomsAsync(CancellationToken ct)
     {
         await InitializeAsync(ct);
-        using var connection = OpenConnection();
-        using var command = connection.CreateCommand();
+        using var candidateLease = await RentReadConnectionAsync(ct);
+        var candidateConnection = candidateLease.Connection;
+        using var command = candidateConnection.CreateCommand();
         command.CommandText = "select id, name, format, component_count, matched_count, uploaded_at from sbom_uploads order by uploaded_at desc limit 50";
         var rows = new List<DuckDbSbomUpload>();
         using var reader = await command.ExecuteReaderAsync(ct);
@@ -1426,7 +1655,8 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
     public async Task<DuckDbCatalogVulnerability?> GetCatalogByIdentifierAsync(string identifier, CancellationToken ct)
     {
         await InitializeAsync(ct);
-        using var connection = OpenConnection();
+        using var lease = await RentReadConnectionAsync(ct);
+        var connection = lease.Connection;
         var normalized = Identifier.Normalize(identifier);
         using (var primary = connection.CreateCommand())
         {
@@ -1452,6 +1682,19 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                 """;
             alias.Parameters.Add(new DuckDBParameter(normalized));
             vulnerabilityId = (await alias.ExecuteScalarAsync(ct))?.ToString();
+        }
+        if (string.IsNullOrWhiteSpace(vulnerabilityId))
+        {
+            using var relation = connection.CreateCommand();
+            relation.CommandText = """
+                select vulnerability_id
+                from source_record_relations
+                where related_identifier = $1
+                order by case relation_type when 'upstream' then 0 else 1 end, vulnerability_id
+                limit 1
+                """;
+            relation.Parameters.Add(new DuckDBParameter(normalized));
+            vulnerabilityId = (await relation.ExecuteScalarAsync(ct))?.ToString();
         }
         if (string.IsNullOrWhiteSpace(vulnerabilityId)) return null;
 
@@ -1485,6 +1728,8 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         if (vulnerability is null) return null;
         var key = vulnerability.PrimaryIdentifier;
         var evidence = await QueryDetailEvidenceAsync(connection, id, key, ct);
+        var relations = await ReadRelationsByVulnerabilityIdsAsync(connection, [id], ct);
+        relations.TryGetValue(id, out var vulnerabilityRelations);
         return new
         {
             vulnerability = new
@@ -1500,6 +1745,8 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                 vulnerability.ModifiedAt,
                 vulnerability.Identifiers,
                 aliases = vulnerability.Identifiers.Where(value => !value.Equals(key, StringComparison.OrdinalIgnoreCase)).ToArray(),
+                upstreamIdentifiers = vulnerabilityRelations?.UpstreamIdentifiers ?? [],
+                relatedIdentifiers = vulnerabilityRelations?.RelatedIdentifiers ?? [],
                 vulnerability.SourceCount,
                 vulnerability.AffectedComponentCount,
                 vulnerability.AffectedComponentNames
@@ -1680,7 +1927,8 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
     public async Task<object?> GetAiAnalysisAsync(Guid id, CancellationToken ct)
     {
         await InitializeAsync(ct);
-        using var connection = OpenConnection();
+        using var lease = await RentReadConnectionAsync(ct);
+        var connection = lease.Connection;
         using var command = connection.CreateCommand();
         command.CommandText = """
             select vulnerability_id, model, prompt_version, evidence_hash, analysis_json,
@@ -1735,7 +1983,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
             ? Directory.EnumerateFiles(incoming, "*.ndjson.processing").ToArray()
             : [];
         var schedulerSources = (Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES")
-                ?? "nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates")
+                ?? "nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory")
             .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
         return new
         {
@@ -1783,6 +2031,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
             var state = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path));
             var checkpoint = state?["checkpoint"];
             var lastRun = state?["lastRun"];
+            var skipReason = checkpoint?["skipped"]?.ToString();
             return new
             {
                 code = sourceCode,
@@ -1796,7 +2045,9 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                 fetchedCount = lastRun?["fetched_count"]?.GetValue<int>() ?? 0,
                 parsedCount = lastRun?["parsed_count"]?.GetValue<int>() ?? 0,
                 errorCount = lastRun?["error_count"]?.GetValue<int>() ?? 0,
-                skipped = checkpoint?["skipped"]?.GetValue<bool>() ?? false,
+                skipped = !string.IsNullOrWhiteSpace(skipReason)
+                    && !string.Equals(skipReason, "false", StringComparison.OrdinalIgnoreCase),
+                skipReason,
                 stateUpdatedAt = new DateTimeOffset(File.GetLastWriteTimeUtc(path))
             };
         }
@@ -1835,6 +2086,39 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         }
         return rows;
     }
+
+    private static async Task<List<DuckDbCatalogListItem>> ReadCatalogListRowsAsync(DuckDBCommand command, CancellationToken ct)
+    {
+        var rows = new List<DuckDbCatalogListItem>();
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (!Guid.TryParse(reader.GetString(0), out var id)) continue;
+            rows.Add(new DuckDbCatalogListItem(
+                id,
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3),
+                reader.IsDBNull(4) ? null : reader.GetDouble(4),
+                reader.IsDBNull(5) ? 0 : reader.GetInt64(5),
+                JsonStringArray(reader.IsDBNull(6) ? null : reader.GetString(6)),
+                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8)));
+        }
+        return rows;
+    }
+
+    private static DuckDbCatalogListItem ToCatalogListItem(DuckDbCatalogVulnerability vulnerability) =>
+        new(
+            vulnerability.Id,
+            vulnerability.PrimaryIdentifier,
+            vulnerability.Title,
+            vulnerability.SeverityLabel,
+            vulnerability.MaxCvssScore,
+            vulnerability.AffectedComponentCount,
+            vulnerability.AffectedComponentNames,
+            vulnerability.PublishedAt,
+            vulnerability.ModifiedAt);
 
     private static string[] JsonStringArray(string? json)
     {
@@ -2040,6 +2324,46 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
             Count(connection, "severity_scores"),
             Count(connection, "evidence_references"),
             Count(connection, "weaknesses")));
+    }
+
+    public async Task<object> CoverageStatusAsync(CancellationToken ct)
+    {
+        ct.ThrowIfCancellationRequested();
+        await InitializeAsync(ct);
+        using var connection = OpenConnection();
+
+        using var sourceCommand = connection.CreateCommand();
+        sourceCommand.CommandText = """
+            select source_code,
+                   count(*) as records,
+                   count(distinct vulnerability_key) as vulnerabilities,
+                   max(nullif(modified_at, '')) as latest_modified_at
+            from source_records
+            group by source_code
+            order by records desc, source_code
+            """;
+        var sources = await ReadRowsAsync(sourceCommand, ct);
+
+        using var ecosystemCommand = connection.CreateCommand();
+        ecosystemCommand.CommandText = """
+            select coalesce(nullif(ecosystem_lower, ''), 'unknown') as ecosystem,
+                   count(*) as components,
+                   count(distinct vulnerability_id) as vulnerabilities,
+                   count(*) filter (where normalized_range is not null and normalized_range <> '') as ranged_components,
+                   count(*) filter (where purl_without_version is not null and purl_without_version <> '') as purl_components,
+                   count(*) filter (where primary_cpe23_uri is not null and primary_cpe23_uri <> '') as cpe_components
+            from affected_components
+            group by coalesce(nullif(ecosystem_lower, ''), 'unknown')
+            order by components desc, ecosystem
+            """;
+        var ecosystems = await ReadRowsAsync(ecosystemCommand, ct);
+
+        return new
+        {
+            sources,
+            ecosystems,
+            generatedAt = DateTimeOffset.UtcNow
+        };
     }
 
     public async Task<long> CountAffectedComponentsAsync(CancellationToken ct = default)
@@ -2743,20 +3067,25 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Select(value => value!)
             .Distinct(StringComparer.Ordinal));
+        var purlValues = query.PurlCandidates
+            .Append(query.PurlWithoutVersion)
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var purlPredicate = TextEqualsOrIn("c.purl_without_version", purlValues);
         var ecosystem = query.Ecosystem?.ToLowerInvariant();
-        var ecosystemFilter = ecosystem is null
-            ? "true"
-            : $"(c.ecosystem_lower = {SqlValue(ecosystem)} or " +
-              $"(instr({SqlValue(ecosystem)}, ':') = 0 and c.ecosystem_lower like {SqlValue(ecosystem + ":%")}))";
+        var ecosystemFilter = SqlEcosystemFilter("c.ecosystem_lower", ecosystem);
         var rangeFilter = withRangeFilter ? "and c.normalized_range is not null and c.normalized_range <> ''" : "";
 
-        using var connection = OpenConnection();
+        using var lease = await RentReadConnectionAsync(ct);
+        var connection = lease.Connection;
         using var command = connection.CreateCommand();
         command.CommandText = hasExplicitPurl
             ? $"""
               select distinct vulnerability_id, ecosystem, package_name, primary_purl, normalized_range, range_type
               from affected_components c
-              where c.purl_without_version in ({purlList})
+              where {purlPredicate}
                 and {ecosystemFilter}
                 {rangeFilter}
               limit {Math.Clamp(limit, 1, 20000)}
@@ -2780,8 +3109,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
               select id, vulnerability_id, ecosystem, package_name, primary_purl, normalized_range, range_type, 3 as priority
               from affected_components c
               where {NonEmptyListPredicate(purlList)}
-                and c.purl_without_version in ({purlList})
-                and {ecosystemFilter}
+                and {purlPredicate}
                 {rangeFilter}
             ),
             deduplicated as (
@@ -2886,11 +3214,6 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                   from temp_sbom_match_components t
                   join affected_components c on t.purl_without_version is not null
                    and c.purl_without_version = t.purl_without_version
-                   and (
-                     t.mapped_ecosystem_lower is null
-                     or c.ecosystem_lower = t.mapped_ecosystem_lower
-                     or (instr(t.mapped_ecosystem_lower, ':') = 0 and c.ecosystem_lower like t.mapped_ecosystem_lower || ':%')
-                   )
                 )
                 select component_id, purl, component_version, component_cpe, source_package_version,
                        vulnerability_id, display_name, ecosystem, normalized_range, primary_cpe23_uri, match_basis
@@ -2917,11 +3240,6 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
               from temp_sbom_match_components t
               join affected_components c on t.purl_without_version_lower is not null
                and c.purl_without_version = t.purl_without_version
-               and (
-                 t.mapped_ecosystem_lower is null
-                 or c.ecosystem_lower = t.mapped_ecosystem_lower
-                 or (instr(t.mapped_ecosystem_lower, ':') = 0 and c.ecosystem_lower like t.mapped_ecosystem_lower || ':%')
-               )
               union all
               select t.component_id, t.purl, t.version as component_version, t.cpe23_uri as component_cpe,
                      t.source_package_version, c.vulnerability_id, c.display_name, c.ecosystem,
@@ -3348,10 +3666,11 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
             record.PublishedAt,
             record.ModifiedAt,
             record.SourceUrl,
-            record.RecordHash));
+            record.RecordHash,
+            record.NormalizationVersion));
         await CopyRowsAsync(connection, "source_records", """
             source_code, source_record_id, vulnerability_id, vulnerability_key, title, description,
-            status, published_at, modified_at, source_url, record_hash
+            status, published_at, modified_at, source_url, record_hash, normalizer_version
             """, sourceRows, ct);
 
         var identifierRows = records.SelectMany(record => record.Identifiers
@@ -3368,6 +3687,26 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         await CopyRowsAsync(connection, "source_record_identifiers", """
             source_code, source_record_id, vulnerability_id, vulnerability_key, identifier
             """, identifierRows, ct);
+
+        var relationRows = records.SelectMany(record =>
+            (record.UpstreamIdentifiers ?? [])
+                .Select(identifier => (Type: "upstream", Identifier: identifier))
+                .Concat((record.RelatedIdentifiers ?? [])
+                    .Select(identifier => (Type: "related", Identifier: identifier)))
+                .Where(relation => !string.IsNullOrWhiteSpace(relation.Identifier))
+                .Select(relation => (relation.Type, Identifier: Identifier.Normalize(relation.Identifier)))
+                .Where(relation => Identifier.IsVulnerabilityId(relation.Identifier))
+                .Distinct()
+                .Select(relation => CsvRow(
+                    record.SourceCode,
+                    record.SourceRecordId,
+                    record.VulnerabilityId.ToString("D"),
+                    NormalizeKey(record.VulnerabilityKey),
+                    relation.Type,
+                    relation.Identifier)));
+        await CopyRowsAsync(connection, "source_record_relations", """
+            source_code, source_record_id, vulnerability_id, vulnerability_key, relation_type, related_identifier
+            """, relationRows, ct);
     }
 
     private async Task CopySeverityScoresAsync(DuckDBConnection connection, IReadOnlyList<DuckDbEvidenceRecord> records, CancellationToken ct)
@@ -3489,7 +3828,7 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
                   new_line '\n',
                   null '\N',
                   strict_mode true,
-                  max_line_size 104857600
+                  max_line_size 8388608
                 )
                 """);
         }
@@ -3546,6 +3885,20 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         command.ExecuteNonQuery();
     }
 
+    private static void RefreshLatestCatalog(DuckDBConnection connection)
+    {
+        Execute(connection, "delete from vulnerability_latest");
+        Execute(connection, """
+            insert into vulnerability_latest
+            select id, primary_identifier, title, severity_label, max_cvss_score,
+                   affected_component_count, affected_component_names_json,
+                   published_at, modified_at
+            from vulnerabilities
+            order by modified_at desc nulls last, primary_identifier desc
+            limit 5000
+            """);
+    }
+
     private static void RecreateAffectedComponentsTable(DuckDBConnection connection)
     {
         Execute(connection, "drop table if exists affected_components");
@@ -3556,6 +3909,21 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         string.IsNullOrWhiteSpace(value)
             ? "null"
             : $"'{value.Replace("'", "''")}'";
+
+    private static string SqlEcosystemFilter(string column, string? ecosystem)
+    {
+        if (string.IsNullOrWhiteSpace(ecosystem)) return "true";
+
+        var normalized = ecosystem.ToLowerInvariant();
+        if (normalized is "cargo" or "crates.io")
+            return $"{column} in ('cargo', 'crates.io')";
+
+        return $"({column} = {SqlValue(normalized)} or " +
+               $"(instr({SqlValue(normalized)}, ':') = 0 and {column} like {SqlValue(normalized + ":%")}))";
+    }
+
+    private static string SourceRecordIdentity(string sourceCode, string sourceRecordId) =>
+        $"{sourceCode}\u001f{sourceRecordId}";
 
     private static string KeyList(IEnumerable<string> keys) =>
         string.Join(", ", keys
@@ -3571,6 +3939,21 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
             .Distinct(StringComparer.Ordinal)
             .ToArray();
         return list.Length == 0 ? "null" : string.Join(", ", list);
+    }
+
+    private static string TextEqualsOrIn(string column, IEnumerable<string?> values)
+    {
+        var list = values
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => SqlValue(value))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        return list.Length switch
+        {
+            0 => "false",
+            1 => $"{column} = {list[0]}",
+            _ => $"{column} in ({string.Join(", ", list)})"
+        };
     }
 
     private static string NonEmptyListPredicate(string list) => list == "null" ? "false" : "true";
@@ -3628,8 +4011,10 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
     private static readonly string[] ResetTables =
     [
         "vulnerability_identifiers",
+        "vulnerability_latest",
         "vulnerabilities",
         "source_record_identifiers",
+        "source_record_relations",
         "source_records",
         "affected_facts",
         "severity_scores",
@@ -3657,9 +4042,11 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
           published_at varchar,
           modified_at varchar,
           source_url varchar,
-          record_hash varchar
+          record_hash varchar,
+          normalizer_version varchar
         )
         """,
+        "alter table source_records add column if not exists normalizer_version varchar",
         """
         create table if not exists source_record_identifiers (
           source_code varchar,
@@ -3667,6 +4054,16 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
           vulnerability_id varchar,
           vulnerability_key varchar,
           identifier varchar
+        )
+        """,
+        """
+        create table if not exists source_record_relations (
+          source_code varchar,
+          source_record_id varchar,
+          vulnerability_id varchar,
+          vulnerability_key varchar,
+          relation_type varchar,
+          related_identifier varchar
         )
         """,
         """
@@ -3686,6 +4083,29 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
           source_count bigint,
           updated_at timestamp
         )
+        """,
+        """
+        create table if not exists vulnerability_latest (
+          id varchar,
+          primary_identifier varchar,
+          title varchar,
+          severity_label varchar,
+          max_cvss_score double,
+          affected_component_count bigint,
+          affected_component_names_json varchar,
+          published_at varchar,
+          modified_at varchar
+        )
+        """,
+        """
+        insert into vulnerability_latest
+        select id, primary_identifier, title, severity_label, max_cvss_score,
+               affected_component_count, affected_component_names_json,
+               published_at, modified_at
+        from vulnerabilities
+        where not exists (select 1 from vulnerability_latest limit 1)
+        order by modified_at desc nulls last, primary_identifier desc
+        limit 5000
         """,
         """
         create table if not exists vulnerability_identifiers (
@@ -3874,7 +4294,16 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
         create index if not exists ix_duck_vulnerabilities_primary on vulnerabilities(primary_identifier)
         """,
         """
+        create index if not exists ix_duck_vulnerabilities_id on vulnerabilities(id)
+        """,
+        """
         create index if not exists ix_duck_vulnerability_identifiers_value on vulnerability_identifiers(identifier)
+        """,
+        """
+        create index if not exists ix_duck_source_record_relations_vulnerability_id on source_record_relations(vulnerability_id)
+        """,
+        """
+        create index if not exists ix_duck_source_record_relations_related_identifier on source_record_relations(related_identifier)
         """,
         """
         create index if not exists ix_duck_ai_vulnerability on ai_vulnerability_analyses(vulnerability_id)
@@ -3950,12 +4379,14 @@ public sealed class DuckDbEvidenceStore(IConfiguration configuration) : IDisposa
     private static readonly string[] CatalogIndexStatements =
     [
         "create index if not exists ix_duck_vulnerabilities_primary on vulnerabilities(primary_identifier)",
+        "create index if not exists ix_duck_vulnerabilities_id on vulnerabilities(id)",
         "create index if not exists ix_duck_vulnerability_identifiers_value on vulnerability_identifiers(identifier)"
     ];
 
     private static readonly string[] CatalogDropIndexStatements =
     [
         "drop index if exists ix_duck_vulnerabilities_primary",
+        "drop index if exists ix_duck_vulnerabilities_id",
         "drop index if exists ix_duck_vulnerability_identifiers_value"
     ];
 

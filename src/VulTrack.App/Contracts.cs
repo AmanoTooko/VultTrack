@@ -101,7 +101,9 @@ public sealed record ComponentVulnerabilityMatch(
     string? RangeType,
     string[] Identifiers,
     string[] Aliases,
-    bool? VersionMatched);
+    bool? VersionMatched,
+    string[] UpstreamIdentifiers,
+    string[] RelatedIdentifiers);
 
 public sealed record SbomUploadRequest(
     string Name,
