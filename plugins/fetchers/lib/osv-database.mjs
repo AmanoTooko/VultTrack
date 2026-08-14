@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import { createReadStream, createWriteStream, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import yauzl from 'yauzl';
@@ -191,7 +192,7 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
   const csvUrl = options.ecosystem
     ? `${BASE_URL}/${encodeURIComponent(options.ecosystem)}/modified_id.csv`
     : `${BASE_URL}/modified_id.csv`;
-  const index = await fetchModifiedIndex(csvUrl, checkpoint, options);
+  let index = await fetchModifiedIndex(csvUrl, checkpoint, options);
   const indexEtag = header(index.headers, 'etag');
   const indexLastModified = header(index.headers, 'last-modified');
 
@@ -217,36 +218,66 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
     });
   }
 
+  let indexSnapshotPath = index.snapshotPath ?? null;
+  if ((!options.fetchIndex || options.persistIndexSnapshot) && client.__spool && !indexSnapshotPath) {
+    indexSnapshotPath = await materializeModifiedIndex(
+      index.body,
+      options.ecosystem,
+      indexEtag ?? indexLastModified ?? new Date().toISOString(),
+      options.indexSnapshotDirectory);
+    index = { ...index, body: createReadStream(indexSnapshotPath), snapshotPath: indexSnapshotPath };
+  }
+
   const pending = readPending(checkpoint.pending);
   const activeCursor = pending?.baseCursor ?? cursor;
   const pendingMatchesIndex = pending && sameIndexVersion(pending, { indexEtag, indexLastModified });
   const resume = pendingMatchesIndex ? pending.resume : null;
+  const snapshotMode = Boolean(indexSnapshotPath);
+  const snapshotOffset = snapshotMode && pendingMatchesIndex
+    && pending?.indexSnapshotPath === indexSnapshotPath
+    ? pending.offset
+    : 0;
   const candidates = [];
-  const newestIds = new Set();
-  let newestModifiedAt = null;
+  const newestIds = new Set(snapshotMode && pendingMatchesIndex ? pending.newestIds : []);
+  let newestModifiedAt = snapshotMode && pendingMatchesIndex ? pending.newestModifiedAt : null;
   let previousModifiedAt = null;
   const handledEntries = [];
+  let entryOffset = 0;
+  let processedOffset = snapshotOffset;
   let hitLimit = false;
 
   for await (const line of csvLines(index.body)) {
     const entry = parseModifiedIdLine(line);
     if (!entry) continue;
+    entryOffset++;
     if (!isValidTimestamp(entry.modifiedAt)) throw new Error(`Invalid OSV modified timestamp: ${entry.modifiedAt}`);
-    if (previousModifiedAt && compareRfc3339(entry.modifiedAt, previousModifiedAt) > 0)
+    if (!snapshotMode && previousModifiedAt && compareRfc3339(entry.modifiedAt, previousModifiedAt) > 0)
       throw new Error('OSV modified_id.csv is not reverse chronological');
     previousModifiedAt = entry.modifiedAt;
-    newestModifiedAt ??= entry.modifiedAt;
-    if (entry.modifiedAt === newestModifiedAt) newestIds.add(entry.rawId);
+    if (snapshotMode && entryOffset <= snapshotOffset) continue;
+
+    if (!newestModifiedAt || compareRfc3339(entry.modifiedAt, newestModifiedAt) > 0) {
+      newestModifiedAt = entry.modifiedAt;
+      newestIds.clear();
+      newestIds.add(entry.rawId);
+    } else if (compareRfc3339(entry.modifiedAt, newestModifiedAt) === 0) {
+      newestIds.add(entry.rawId);
+    }
 
     const relation = compareToCursor(entry.modifiedAt, entry.rawId, activeCursor);
-    if (relation < 0) break;
-    if (relation === 0 || isAtOrAboveResume(entry, resume)) continue;
+    if (!snapshotMode && relation < 0) break;
+    if (relation <= 0 || (!snapshotMode && isAtOrAboveResume(entry, resume))) {
+      if (snapshotMode) processedOffset = entryOffset;
+      continue;
+    }
     if (options.idFilter && !options.idFilter(entry.rawId)) {
       handledEntries.push(entry);
+      if (snapshotMode) processedOffset = entryOffset;
       continue;
     }
     candidates.push(entry);
     handledEntries.push(entry);
+    if (snapshotMode) processedOffset = entryOffset;
     if (candidates.length >= max) {
       hitLimit = true;
       break;
@@ -288,12 +319,20 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
           baseCursor: activeCursor,
           indexEtag,
           indexLastModified,
-          resume: advanceResume(resume, handledEntries)
+          ...(snapshotMode ? {
+            indexSnapshotPath,
+            offset: processedOffset,
+            newestModifiedAt,
+            newestIds: [...newestIds].sort()
+          } : {
+            resume: advanceResume(resume, handledEntries)
+          })
         }
       }
     };
   }
 
+  if (indexSnapshotPath) await fs.rm(indexSnapshotPath, { force: true });
   return {
     fetchedCount: count,
     parsedCount: count,
@@ -349,7 +388,12 @@ function compareRfc3339(left, right) {
 }
 
 function readPending(value) {
-  if (!isValidTimestamp(value?.baseCursor?.modifiedAt) || !isValidTimestamp(value?.resume?.modifiedAt)) return null;
+  if (!isValidTimestamp(value?.baseCursor?.modifiedAt)) return null;
+  const hasSnapshot = typeof value.indexSnapshotPath === 'string'
+    && Number.isInteger(value.offset)
+    && value.offset >= 0;
+  const hasResume = isValidTimestamp(value?.resume?.modifiedAt);
+  if (!hasSnapshot && !hasResume) return null;
   return {
     baseCursor: {
       modifiedAt: value.baseCursor.modifiedAt,
@@ -357,10 +401,14 @@ function readPending(value) {
     },
     indexEtag: value.indexEtag ?? null,
     indexLastModified: value.indexLastModified ?? null,
-    resume: {
+    indexSnapshotPath: typeof value.indexSnapshotPath === 'string' ? value.indexSnapshotPath : null,
+    offset: hasSnapshot ? value.offset : 0,
+    newestModifiedAt: isValidTimestamp(value.newestModifiedAt) ? value.newestModifiedAt : null,
+    newestIds: Array.isArray(value.newestIds) ? value.newestIds : [],
+    resume: hasResume ? {
       modifiedAt: value.resume.modifiedAt,
       ids: Array.isArray(value.resume.ids) ? value.resume.ids : []
-    }
+    } : null
   };
 }
 
@@ -429,11 +477,46 @@ async function abortIndexBody(body) {
 }
 
 async function fetchModifiedIndex(url, checkpoint, options) {
+  const pending = readPending(checkpoint.pending);
+  if (pending?.indexSnapshotPath && existsSync(pending.indexSnapshotPath)) {
+    return {
+      status: 200,
+      ok: true,
+      body: createReadStream(pending.indexSnapshotPath),
+      snapshotPath: pending.indexSnapshotPath,
+      headers: {
+        get(name) {
+          const normalized = String(name).toLowerCase();
+          if (normalized === 'etag') return pending.indexEtag;
+          if (normalized === 'last-modified') return pending.indexLastModified;
+          return null;
+        }
+      }
+    };
+  }
+
   const headers = {};
-  const mustRescan = checkpoint.bootstrapRequired === true || readPending(checkpoint.pending) !== null;
+  const mustRescan = checkpoint.bootstrapRequired === true || pending !== null;
   if (!process.env.FETCHER_FORCE && !mustRescan && checkpoint.indexEtag) headers['if-none-match'] = checkpoint.indexEtag;
   else if (!process.env.FETCHER_FORCE && !mustRescan && checkpoint.indexLastModified) headers['if-modified-since'] = checkpoint.indexLastModified;
   return options.fetchIndex ? options.fetchIndex(url, { headers }) : fetchResponse(url, { headers });
+}
+
+async function materializeModifiedIndex(body, ecosystem, version, configuredDirectory) {
+  const directory = configuredDirectory ?? getRootPath('data/mirrors/osv-index');
+  await fs.mkdir(directory, { recursive: true });
+  const name = `${ecosystem ? String(ecosystem).toLowerCase() : 'all'}-${sha256(String(version)).slice(0, 16)}.csv`;
+  const target = path.join(directory, name);
+  const temporary = `${target}.${process.pid}.tmp`;
+  const input = typeof body.getReader === 'function' ? Readable.fromWeb(body) : body;
+  try {
+    await pipeline(input, createWriteStream(temporary));
+    await fs.rename(temporary, target);
+    return target;
+  } catch (error) {
+    await fs.rm(temporary, { force: true });
+    throw error;
+  }
 }
 
 function osvFetchLimit() {

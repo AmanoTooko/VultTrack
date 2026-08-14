@@ -4,18 +4,20 @@ import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeArtifact, writeRecord } from '../lib/db.mjs';
 import { upsertExploitPoc } from '../lib/staging.mjs';
-import { classifyExploitType, ensureGitMirror, githubHeaders, maturityFor, walkFiles } from '../lib/exploit-utils.mjs';
+import { changedGitFiles, classifyExploitType, ensureGitMirror, gitRevisionUnchanged, githubHeaders, maturityFor, walkFiles } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'poc-in-github';
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
   const mirror = await ensureGitMirror(sourceCode, 'https://github.com/nomi-sec/PoC-in-GitHub.git', 'master');
-  const files = await walkFiles(
-    mirror.dir,
-    (file) => /\/20\d{2}\/CVE-\d{4}-\d+\.json$/i.test(file),
-    max * 4
-  );
+  if (gitRevisionUnchanged(ctx.source.checkpoint_json, mirror.revision)) {
+    console.error('[poc-in-github] unchanged, skipping.');
+    return { fetchedCount: 0, parsedCount: 0, checkpoint: { gitRevision: mirror.revision, skipped: true } };
+  }
+  const pocFileFilter = (file) => /\/20\d{2}\/CVE-\d{4}-\d+\.json$/i.test(file);
+  const changedFiles = changedGitFiles(mirror, ctx.source.checkpoint_json?.gitRevision, pocFileFilter, max * 4);
+  const files = changedFiles ?? await walkFiles(mirror.dir, pocFileFilter, max * 4);
 
   let count = 0;
   for (const file of files) {
@@ -62,7 +64,7 @@ export async function run(client, ctx) {
         publishedAt: item.publishedAt,
         modifiedAt: item.modifiedAt,
         identifiers,
-        recordHash: sha256(stableJson({ repo, artifactSha256: item.artifactSha256, revision: mirror.revision })),
+        recordHash: sha256(stableJson({ repo, artifactSha256: item.artifactSha256 })),
         payload: item
       });
       await upsertExploitPoc(client, rawIndexId, item);

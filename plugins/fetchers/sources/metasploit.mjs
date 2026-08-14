@@ -4,18 +4,20 @@ import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeArtifact, writeRecord } from '../lib/db.mjs';
 import { upsertExploitPoc } from '../lib/staging.mjs';
-import { classifyExploitType, ensureGitMirror, identifiersFromText, languageFromPath, maturityFor, walkFiles } from '../lib/exploit-utils.mjs';
+import { changedGitFiles, classifyExploitType, ensureGitMirror, gitRevisionUnchanged, identifiersFromText, languageFromPath, maturityFor, walkFiles } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'metasploit';
 
 export async function run(client, ctx) {
   const max = getIntEnv('FETCHER_MAX_RECORDS', Number.MAX_SAFE_INTEGER);
   const mirror = await ensureGitMirror(sourceCode, 'https://github.com/rapid7/metasploit-framework.git', 'master');
-  const files = await walkFiles(
-    path.join(mirror.dir, 'modules'),
-    (file) => file.endsWith('.rb') && /\/modules\/(exploits|auxiliary)\//.test(file),
-    max * 4
-  );
+  if (gitRevisionUnchanged(ctx.source.checkpoint_json, mirror.revision)) {
+    console.error('[metasploit] unchanged, skipping.');
+    return { fetchedCount: 0, parsedCount: 0, checkpoint: { gitRevision: mirror.revision, skipped: true } };
+  }
+  const moduleFilter = (file) => file.endsWith('.rb') && /\/modules\/(exploits|auxiliary)\//.test(file);
+  const changedFiles = changedGitFiles(mirror, ctx.source.checkpoint_json?.gitRevision, moduleFilter, max * 4);
+  const files = changedFiles ?? await walkFiles(path.join(mirror.dir, 'modules'), moduleFilter, max * 4);
 
   let count = 0;
   for (const file of files) {
@@ -59,7 +61,7 @@ export async function run(client, ctx) {
       sourceUrl: item.sourceUrl,
       modifiedAt: item.modifiedAt,
       identifiers,
-      recordHash: sha256(stableJson({ sourceKey: item.sourceKey, artifactSha256: item.artifactSha256, revision: mirror.revision })),
+      recordHash: sha256(stableJson({ sourceKey: item.sourceKey, artifactSha256: item.artifactSha256 })),
       payload: item
     });
     await upsertExploitPoc(client, rawIndexId, item);

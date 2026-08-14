@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { Readable } from 'node:stream';
+import { spawnSync } from 'node:child_process';
 import zlib from 'node:zlib';
 
 test('all fetchers export matching sourceCode and run()', async () => {
@@ -37,7 +38,7 @@ test('debian tracker package index is grouped into CVE records', async () => {
 });
 
 test('exploit metadata sanitizer replaces only invalid Unicode surrogates', async () => {
-  const { sanitizeUnicode } = await import('../../plugins/fetchers/lib/exploit-utils.mjs');
+  const { changedGitFiles, gitRevisionUnchanged, sanitizeUnicode } = await import('../../plugins/fetchers/lib/exploit-utils.mjs');
   assert.deepEqual(sanitizeUnicode({
     valid: 'before \uD83D\uDE00 after',
     invalid: ['high \uD800', 'low \uDC00']
@@ -45,6 +46,32 @@ test('exploit metadata sanitizer replaces only invalid Unicode surrogates', asyn
     valid: 'before \uD83D\uDE00 after',
     invalid: ['high \uFFFD', 'low \uFFFD']
   });
+  assert.equal(gitRevisionUnchanged({ gitRevision: 'abc' }, 'abc', false), true);
+  assert.equal(gitRevisionUnchanged({ gitRevision: 'abc' }, 'def', false), false);
+  assert.equal(gitRevisionUnchanged({ gitRevision: 'abc' }, 'abc', true), false);
+
+  const repo = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-git-diff-'));
+  try {
+    const git = (...args) => spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+    assert.equal(git('init').status, 0);
+    assert.equal(git('config', 'user.email', 'test@vultrack.local').status, 0);
+    assert.equal(git('config', 'user.name', 'VulTrack Test').status, 0);
+    await fs.mkdir(path.join(repo, '2026'));
+    await fs.writeFile(path.join(repo, '2026', 'CVE-2026-0001.json'), '{}');
+    assert.equal(git('add', '.').status, 0);
+    assert.equal(git('commit', '-m', 'baseline').status, 0);
+    const baseline = git('rev-parse', 'HEAD').stdout.trim();
+    await fs.writeFile(path.join(repo, '2026', 'CVE-2026-0001.json'), '{"changed":true}');
+    assert.equal(git('commit', '-am', 'update').status, 0);
+    const revision = git('rev-parse', 'HEAD').stdout.trim();
+    const changed = changedGitFiles(
+      { dir: repo, revision },
+      baseline,
+      (file) => file.endsWith('.json'));
+    assert.deepEqual(changed, [path.join(repo, '2026', 'CVE-2026-0001.json')]);
+  } finally {
+    await fs.rm(repo, { recursive: true, force: true });
+  }
 });
 
 test('init checkpoints resume only matching incomplete imports and persist progress', async () => {
@@ -106,13 +133,16 @@ test('Compose env files are not overridden by interpolated runtime defaults', as
   assert.match(production, /"\$\{VULTRACK_HTTP_PORT:-3000\}:80"/);
 });
 
-test('FIRST EPSS is excluded from default DuckDB scheduler sources until delta state is accepted', async () => {
+test('FIRST EPSS is enabled after its native delta pipeline is accepted', async () => {
   const scheduler = await fs.readFile('src/VulTrack.App/DuckDbFirstScheduler.cs', 'utf8');
   const program = await fs.readFile('src/VulTrack.App/Program.cs', 'utf8');
+  const store = await fs.readFile('src/VulTrack.App/DuckDbEvidenceStore.cs', 'utf8');
   const envExample = await fs.readFile('.env.example', 'utf8');
-  assert.match(scheduler, /\?\? "nvd-cve,osv,cisa-kev,exploitdb,nuclei-templates"/);
-  assert.match(program, /\?\? "nvd-cve,osv,cisa-kev,exploitdb,nuclei-templates"/);
-  assert.match(envExample, /^DUCKDB_FETCH_SOURCES=nvd-cve,osv,cisa-kev,exploitdb,nuclei-templates$/m);
+  const defaults = 'nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory';
+  assert.match(scheduler, new RegExp(`\\?\\? "${defaults}"`));
+  assert.match(program, new RegExp(`\\?\\? "${defaults}"`));
+  assert.match(store, new RegExp(`\\?\\? "${defaults}"`));
+  assert.match(envExample, new RegExp(`^DUCKDB_FETCH_SOURCES=${defaults}$`, 'm'));
 });
 
 test('OSV incremental streams only records newer than its baseline cursor', async () => {
@@ -220,6 +250,44 @@ test('OSV pending batches never send conditional headers and resume from their e
   assert.equal(second.result.checkpoint.pending.resume.modifiedAt, '2026-01-03T00:00:00.000000001Z');
 });
 
+test('OSV production snapshot resumes by row offset without refetching a changing index', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-osv-snapshot-'));
+  try {
+    const csv = [
+      '2026-01-03T00:00:00.000000001Z,PyPI/OSV-FIRST',
+      '2026-01-03T00:00:00.000000003Z,PyPI/OSV-OUT-OF-ORDER',
+      '2026-01-02T00:00:00Z,PyPI/OSV-THIRD',
+      '2026-01-01T00:00:00Z,PyPI/OSV-OLD'
+    ].join('\n');
+    const first = await runOsvIncremental({
+      checkpoint: {},
+      bootstrapWatermark: '2026-01-01T00:00:00Z',
+      csv,
+      etag: 'stable-index-v1',
+      maxRecords: 1,
+      persistIndexSnapshot: true,
+      root
+    });
+    assert.deepEqual(first.fetchedIds, ['PyPI/OSV-FIRST']);
+    assert.equal(first.result.checkpoint.pending.offset, 1);
+    assert.equal(first.snapshotExists, true);
+
+    const second = await runOsvIncremental({
+      checkpoint: first.result.checkpoint,
+      status: 500,
+      maxRecords: 1,
+      persistIndexSnapshot: true,
+      root
+    });
+    assert.equal(second.fetchHeaders, null);
+    assert.deepEqual(second.fetchedIds, ['PyPI/OSV-OUT-OF-ORDER']);
+    assert.equal(second.result.checkpoint.pending.offset, 2);
+    assert.equal(second.result.checkpoint.pending.newestModifiedAt, '2026-01-03T00:00:00.000000003Z');
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test('OSV restarts pending work from the base cursor when the index version changes', async () => {
   const checkpoint = {
     cursor: { modifiedAt: '2026-01-01T00:00:00Z', ids: [] },
@@ -283,162 +351,64 @@ test('OSV stops and destroys an index stream once its cursor is reached', async 
   assert.equal(body.destroyed, true);
 });
 
-test('FIRST EPSS writes only changed rows after an atomic compact-state baseline', async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-epss-delta-'));
-  const baseline = epssCsv([
-    'CVE-2026-0001,0.01,0.10',
-    'CVE-2026-0002,0.02,0.20',
-    'CVE-2026-0003,0.03,0.30'
-  ]);
-  try {
-    const first = await runEpssDelta({ root, csv: baseline, allowBaseline: true });
-    assert.equal(first.result.fetchedCount, 3);
-    assert.equal(first.result.changedCount, 3);
-    assert.deepEqual(first.spoolIds, ['CVE-2026-0001', 'CVE-2026-0002', 'CVE-2026-0003']);
-    assert.equal(first.stateExists, true);
-
-    const second = await runEpssDelta({
-      root,
-      checkpoint: first.result.checkpoint,
-      csv: epssCsv([
-        'CVE-2026-0001,0.01,0.10',
-        'CVE-2026-0002,0.025,0.20',
-        'CVE-2026-0003,0.03,0.30'
-      ])
-    });
-    assert.equal(second.result.fetchedCount, 3);
-    assert.equal(second.result.changedCount, 1);
-    assert.deepEqual(second.spoolIds, ['CVE-2026-0002']);
-    assert.equal(second.stateExists, true);
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('FIRST EPSS sidecar never advances before its matching spool is ready', async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-epss-atomic-'));
-  const previous = captureEpssEnv();
+test('FIRST EPSS publishes one gzip input and a tiny manifest without advancing the checkpoint', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-epss-native-'));
+  const previous = Object.fromEntries(['VULTRACK_STORAGE_BACKEND', 'VULTRACK_SPOOL_PATH'].map((key) => [key, process.env[key]]));
   process.env.VULTRACK_STORAGE_BACKEND = 'duckdb';
   process.env.VULTRACK_SPOOL_PATH = root;
-  process.env.EPSS_DELTA_ALLOW_BASELINE = '1';
-  try {
-    const { withClient, rollbackWriteBatch } = await import('../../plugins/fetchers/lib/db.mjs');
-    const { runEpssDelta } = await import('../../plugins/fetchers/sources/first-epss.mjs');
-    await withClient(async (client) => {
-      const result = await runEpssDelta(client, {
-        source: { id: 'first-epss', code: 'first-epss', checkpoint_json: {} },
-        run: { id: 'atomic-test' }
-      }, { fetchGzip: async () => zlib.gzipSync(epssCsv(['CVE-2026-0001,0.01,0.10'])) });
-      assert.equal(result.changedCount, 1);
-      await assert.rejects(fs.access(path.join(root, 'state', 'first-epss.delta.v1.tsv.gz')));
-      const incoming = await fs.readdir(path.join(root, 'incoming'));
-      assert.equal(incoming.some((file) => file.endsWith('.partial')), true);
-      await rollbackWriteBatch(client);
-    });
-    const stateFiles = await fs.readdir(path.join(root, 'state')).catch(() => []);
-    const incomingFiles = await fs.readdir(path.join(root, 'incoming')).catch(() => []);
-    assert.equal(stateFiles.some((file) => file.includes('first-epss.delta')), false);
-    assert.equal(incomingFiles.some((file) => file.endsWith('.partial')), false);
-  } finally {
-    restoreEpssEnv(previous);
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('FIRST EPSS fails closed without a delta baseline or when a daily bulk delta exceeds its cap', async () => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-epss-cap-'));
-  const csv = epssCsv([
-    'CVE-2026-0001,0.01,0.10',
-    'CVE-2026-0002,0.02,0.20',
-    'CVE-2026-0003,0.03,0.30'
-  ]);
-  try {
-    const missing = await runEpssDelta({ root, csv });
-    assert.equal(missing.result.changedCount, 0);
-    assert.equal(missing.result.checkpoint.skipped, 'delta-state-required');
-    assert.deepEqual(missing.spoolIds, []);
-
-    const baseline = await runEpssDelta({ root, csv, allowBaseline: true });
-    await assert.rejects(
-      () => runEpssDelta({
-        root,
-        checkpoint: baseline.result.checkpoint,
-        maxChangedRows: 2,
-        csv: epssCsv([
-          'CVE-2026-0001,0.11,0.11',
-          'CVE-2026-0002,0.12,0.12',
-          'CVE-2026-0003,0.13,0.13'
-        ])
-      }),
-      /EPSS_DELTA_MAX_CHANGED_ROWS=2/
-    );
-  } finally {
-    await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-function epssCsv(rows) {
-  return ['#model_version: test', 'cve,epss,percentile', ...rows].join('\n');
-}
-
-async function runEpssDelta({ root, checkpoint = {}, csv, allowBaseline = false, maxChangedRows }) {
-  const previous = captureEpssEnv();
-  process.env.VULTRACK_STORAGE_BACKEND = 'duckdb';
-  process.env.VULTRACK_SPOOL_PATH = root;
-  process.env.EPSS_DELTA_ALLOW_BASELINE = allowBaseline ? '1' : '0';
-  process.env.EPSS_DELTA_ALLOW_BULK = '0';
-  if (maxChangedRows === undefined) delete process.env.EPSS_DELTA_MAX_CHANGED_ROWS;
-  else process.env.EPSS_DELTA_MAX_CHANGED_ROWS = String(maxChangedRows);
   try {
     const { withClient, flushWriteBatch } = await import('../../plugins/fetchers/lib/db.mjs');
-    const { runEpssDelta: run } = await import('../../plugins/fetchers/sources/first-epss.mjs');
-    const incoming = path.join(root, 'incoming');
-    const existingReady = new Set((await fs.readdir(incoming).catch(() => [])).filter((file) => file.endsWith('.ready')));
+    const { runEpssSnapshot } = await import('../../plugins/fetchers/sources/first-epss.mjs');
+    const gzip = zlib.gzipSync(['#model_version: test', 'cve,epss,percentile', 'CVE-2026-0001,0.01,0.10'].join('\n'));
     const result = await withClient(async (client) => {
-      const current = await run(client, {
-        source: { id: 'first-epss', code: 'first-epss', checkpoint_json: checkpoint },
-        run: { id: `epss-${Math.random().toString(16).slice(2)}` }
-      }, { fetchGzip: async () => zlib.gzipSync(csv) });
+      const current = await runEpssSnapshot(client, {
+        source: { id: 'first-epss', code: 'first-epss', checkpoint_json: {} },
+        run: { id: 'native-test' }
+      }, { fetchGzip: async () => gzip });
       await flushWriteBatch(client);
       return current;
     });
-    const spoolIds = [];
-    for (const file of (await fs.readdir(incoming).catch(() => [])).filter((file) => file.endsWith('.ready') && !existingReady.has(file))) {
-      const lines = (await fs.readFile(path.join(incoming, file), 'utf8')).trim().split('\n').filter(Boolean);
-      spoolIds.push(...lines.map((line) => JSON.parse(line).externalKey));
-    }
-    return {
-      result,
-      spoolIds,
-      stateExists: await fs.access(path.join(root, 'state', 'first-epss.delta.v1.tsv.gz')).then(() => true, () => false)
-    };
+    assert.equal(result.fetchedCount, 1);
+    const incoming = await fs.readdir(path.join(root, 'incoming'));
+    assert.deepEqual(incoming.sort(), [
+      'first-epss-native-test.epss.csv.gz.ready',
+      'first-epss-native-test.epss.json.ready'
+    ]);
+    const manifest = JSON.parse(await fs.readFile(path.join(root, 'incoming', 'first-epss-native-test.epss.json.ready'), 'utf8'));
+    assert.equal(manifest.bytes, gzip.length);
+    assert.match(manifest.contentHash, /^[a-f0-9]{64}$/);
+    await assert.rejects(fs.access(path.join(root, 'state', 'first-epss.json')));
+
+    const duplicate = await withClient((client) => runEpssSnapshot(client, {
+      source: { id: 'first-epss', code: 'first-epss', checkpoint_json: {} },
+      run: { id: 'duplicate-test' }
+    }, { fetchGzip: async () => gzip }));
+    assert.equal(duplicate.fetchedCount, 0);
+    assert.equal((await fs.readdir(path.join(root, 'incoming'))).length, 2);
   } finally {
-    restoreEpssEnv(previous);
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await fs.rm(root, { recursive: true, force: true });
   }
-}
+});
 
-function captureEpssEnv() {
-  return Object.fromEntries([
-    'VULTRACK_STORAGE_BACKEND',
-    'VULTRACK_SPOOL_PATH',
-    'EPSS_DELTA_ALLOW_BASELINE',
-    'EPSS_DELTA_ALLOW_BULK',
-    'EPSS_DELTA_MAX_CHANGED_ROWS'
-  ].map((key) => [key, process.env[key]]));
-}
-
-function restoreEpssEnv(previous) {
-  for (const [key, value] of Object.entries(previous)) {
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  }
-}
-
-async function runOsvIncremental({ checkpoint, bootstrapWatermark, csv = '', etag, status = 200, maxRecords, body }) {
+async function runOsvIncremental({
+  checkpoint,
+  bootstrapWatermark,
+  csv = '',
+  etag,
+  status = 200,
+  maxRecords,
+  body,
+  persistIndexSnapshot = false,
+  root: providedRoot
+}) {
   const previousBackend = process.env.VULTRACK_STORAGE_BACKEND;
   const previousPath = process.env.VULTRACK_SPOOL_PATH;
   const previousMax = process.env.OSV_FETCH_MAX_RECORDS;
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-osv-incremental-'));
+  const root = providedRoot ?? await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-osv-incremental-'));
   process.env.VULTRACK_STORAGE_BACKEND = 'duckdb';
   process.env.VULTRACK_SPOOL_PATH = root;
   if (maxRecords === undefined) delete process.env.OSV_FETCH_MAX_RECORDS;
@@ -455,6 +425,8 @@ async function runOsvIncremental({ checkpoint, bootstrapWatermark, csv = '', eta
       };
       const current = await runOsvModifiedIdIncremental(client, ctx, {
         bootstrapWatermark,
+        persistIndexSnapshot,
+        indexSnapshotDirectory: path.join(root, 'osv-index'),
         fetchIndex: async (_url, request) => {
           fetchHeaders = request.headers;
           return {
@@ -479,7 +451,9 @@ async function runOsvIncremental({ checkpoint, bootstrapWatermark, csv = '', eta
       const lines = (await fs.readFile(path.join(incoming, file), 'utf8')).trim().split('\n').filter(Boolean);
       spoolIds.push(...lines.map((line) => JSON.parse(line).externalKey));
     }
-    return { result, fetchedIds, fetchHeaders, spoolIds };
+    const snapshotPath = result.checkpoint.pending?.indexSnapshotPath;
+    const snapshotExists = snapshotPath ? await fs.access(snapshotPath).then(() => true, () => false) : false;
+    return { result, fetchedIds, fetchHeaders, spoolIds, snapshotExists };
   } finally {
     if (previousBackend === undefined) delete process.env.VULTRACK_STORAGE_BACKEND;
     else process.env.VULTRACK_STORAGE_BACKEND = previousBackend;
@@ -487,7 +461,7 @@ async function runOsvIncremental({ checkpoint, bootstrapWatermark, csv = '', eta
     else process.env.VULTRACK_SPOOL_PATH = previousPath;
     if (previousMax === undefined) delete process.env.OSV_FETCH_MAX_RECORDS;
     else process.env.OSV_FETCH_MAX_RECORDS = previousMax;
-    await fs.rm(root, { recursive: true, force: true });
+    if (!providedRoot) await fs.rm(root, { recursive: true, force: true });
   }
 }
 
