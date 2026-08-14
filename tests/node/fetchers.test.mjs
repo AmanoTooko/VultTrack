@@ -93,8 +93,10 @@ test('init checkpoints resume only matching incomplete imports and persist progr
 test('DuckDB scheduler defaults to blocking automatic baseline imports on every due-run path', async () => {
   const scheduler = await fs.readFile('src/VulTrack.App/DuckDbFirstScheduler.cs', 'utf8');
   const program = await fs.readFile('src/VulTrack.App/Program.cs', 'utf8');
+  const options = await fs.readFile('src/VulTrack.App/VulTrackOptions.cs', 'utf8');
   const envExample = await fs.readFile('.env.example', 'utf8');
-  assert.match(scheduler, /EnvBool\("DUCKDB_ALLOW_AUTOMATIC_INIT", false\)/);
+  assert.match(options, /BoolFlag\("DUCKDB_ALLOW_AUTOMATIC_INIT", false\)/);
+  assert.match(scheduler, /options\.Scheduler\.AllowAutomaticInit/);
   assert.match(scheduler, /"nvd-cve" or "nvd-cve-init" => "nvd-cve-init"/);
   assert.match(scheduler, /"osv" or "osv-init" => "osv-init"/);
   assert.match(scheduler, /checkpoint\?\["initComplete"\].*== false\)\s*return RequireAutomaticInit/s);
@@ -136,11 +138,13 @@ test('FIRST EPSS is enabled after its native delta pipeline is accepted', async 
   const scheduler = await fs.readFile('src/VulTrack.App/DuckDbFirstScheduler.cs', 'utf8');
   const sourceEndpoints = await fs.readFile('src/VulTrack.App/Endpoints/SourceEndpoints.cs', 'utf8');
   const storeStatus = await fs.readFile('src/VulTrack.App/DuckDbEvidenceStore.Status.cs', 'utf8');
+  const options = await fs.readFile('src/VulTrack.App/VulTrackOptions.cs', 'utf8');
   const envExample = await fs.readFile('.env.example', 'utf8');
-  const defaults = 'nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory';
-  assert.match(scheduler, new RegExp(`\\?\\? "${defaults}"`));
-  assert.match(sourceEndpoints, new RegExp(`\\?\\? "${defaults}"`));
-  assert.match(storeStatus, new RegExp(`\\?\\? "${defaults}"`));
+  const defaults = 'nvd-cve,osv,ghsa,google-osv,cnnvd,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory';
+  assert.match(options, new RegExp(`DefaultFetchSources =\\s*"${defaults}"`));
+  assert.match(scheduler, /options\.Scheduler\.SourceCodes\(\)/);
+  assert.match(sourceEndpoints, /options\.Scheduler\.SourceCodes\(\)/);
+  assert.match(storeStatus, /Options\.Scheduler\.SourceCodes\(\)/);
   assert.match(envExample, new RegExp(`^DUCKDB_FETCH_SOURCES=${defaults}$`, 'm'));
 });
 
@@ -627,7 +631,7 @@ test('Nuclei DuckDB projection applies a complete revision before finalizing the
   assert.match(nucleiApply, /UpsertExploitRowsAsync\(connection, uniqueRows, snapshotId, ct\)/);
   assert.match(nucleiApply, /snapshot_id is distinct from \{SqlValue\(snapshotId\)\}/);
   assert.match(nucleiApply, /NUCLEI_ALLOW_LARGE_SNAPSHOT_DROP/);
-  assert.match(nucleiApply, /NucleiSnapshotDropThreshold/);
+  assert.match(nucleiApply, /NucleiLargeSnapshotDropThreshold/);
   assert.match(nucleiApply, /Nuclei snapshot verification failed/);
   assert.doesNotMatch(nucleiApply, /delete from exploits/i);
 
