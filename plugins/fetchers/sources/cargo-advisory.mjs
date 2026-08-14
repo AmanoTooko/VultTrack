@@ -4,7 +4,6 @@ import { spawnSync } from 'node:child_process';
 import { getIntEnv, getRootPath } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertOsv } from '../lib/staging.mjs';
 
 export const sourceCode = 'cargo-advisory';
 
@@ -136,7 +135,7 @@ export async function run(client, ctx) {
     }
 
     const ids = [payload.id, ...payload.aliases].filter(Boolean);
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: payload.id,
       externalId: payload.id,
       sourceUrl: `https://rustsec.org/advisories/${id}.html`,
@@ -146,7 +145,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson(payload)),
       payload
     });
-    await upsertOsv(client, rawIndexId, payload);
     count++;
   }
 

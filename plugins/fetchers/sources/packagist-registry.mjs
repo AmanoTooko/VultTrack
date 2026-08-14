@@ -2,7 +2,6 @@ import { fetchJson } from '../lib/http.mjs';
 import { getEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertRegistryPackage } from '../lib/staging.mjs';
 
 export const sourceCode = 'packagist-registry';
 
@@ -24,7 +23,7 @@ export async function run(client, ctx) {
       metadata: { description: latest.description, license: latest.license },
       payload: item
     };
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: name,
       externalId: name,
       sourceUrl: `https://packagist.org/packages/${name}`,
@@ -32,7 +31,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson(payload)),
       payload
     });
-    await upsertRegistryPackage(client, rawIndexId, 'packagist', 'composer', payload);
     count++;
   }
   return { fetchedCount: count, parsedCount: count, checkpoint: { count, lastFetched: new Date().toISOString() } };

@@ -2,7 +2,6 @@ import { authHeaders, fetchJson } from '../lib/http.mjs';
 import { getIntEnv, getRootPath } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { commitSpoolSegment, resumeInitOffset, saveCheckpoint, saveInitProgress, writeRecord } from '../lib/db.mjs';
-import { upsertNvdCve } from '../lib/staging.mjs';
 
 export const sourceCode = 'nvd-cve';
 
@@ -209,7 +208,7 @@ export async function initFromMirror(client, ctx, max) {
         latestMod = item.lastModified;
       }
 
-      const rawIndexId = await writeRecord(client, ctx, {
+      await writeRecord(client, ctx, {
         externalKey: cveId,
         externalId: cveId,
         sourceUrl: `https://nvd.nist.gov/vuln/detail/${cveId}`,
@@ -219,7 +218,6 @@ export async function initFromMirror(client, ctx, max) {
         recordHash: sha256(stableJson(item)),
         payload: item
       });
-      await upsertNvdCve(client, rawIndexId, item);
       count++;
     }
 
@@ -300,7 +298,7 @@ async function incrFromApi(client, ctx, max, lastModStartDate) {
       if (cve.lastModified && cve.lastModified > latestMod) {
         latestMod = cve.lastModified;
       }
-      const rawIndexId = await writeRecord(client, ctx, {
+      await writeRecord(client, ctx, {
         externalKey: cve.id,
         externalId: cve.id,
         sourceUrl: `https://nvd.nist.gov/vuln/detail/${cve.id}`,
@@ -310,7 +308,6 @@ async function incrFromApi(client, ctx, max, lastModStartDate) {
         recordHash: sha256(stableJson(item)),
         payload: item
       });
-      await upsertNvdCve(client, rawIndexId, item);
       count++;
     }
     startIndex += data.resultsPerPage ?? pageSize;

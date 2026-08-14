@@ -2,7 +2,6 @@ import { fetchJson, authHeaders } from '../lib/http.mjs';
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { resumeInitOffset, saveInitProgress, writeRecord } from '../lib/db.mjs';
-import { upsertNvdCpe } from '../lib/staging.mjs';
 
 export const sourceCode = 'nvd-cpe';
 
@@ -69,7 +68,7 @@ export async function run(client, ctx) {
       if (!uri) continue;
       const modDate = cpe?.lastModified ?? cpe?.lastModifiedDate;
       if (modDate && (!latestMod || modDate > latestMod)) latestMod = modDate;
-      const rawIndexId = await writeRecord(client, ctx, {
+      await writeRecord(client, ctx, {
         externalKey: uri,
         externalId: uri,
         sourceUrl: 'https://nvd.nist.gov/products/cpe',
@@ -78,7 +77,6 @@ export async function run(client, ctx) {
         recordHash: sha256(stableJson(item)),
         payload: item
       });
-      await upsertNvdCpe(client, rawIndexId, item);
       count++;
     }
     startIndex += data.resultsPerPage ?? pageSize;

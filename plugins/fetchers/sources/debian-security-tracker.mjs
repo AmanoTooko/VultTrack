@@ -1,7 +1,6 @@
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertDebian } from '../lib/staging.mjs';
 
 export const sourceCode = 'debian-security-tracker';
 const TRANSFORM_VERSION = 2;
@@ -36,7 +35,7 @@ export async function run(client, ctx) {
       continue;
     }
 
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: cveId,
       externalId: cveId,
       sourceUrl: `https://security-tracker.debian.org/tracker/${cveId}`,
@@ -44,7 +43,6 @@ export async function run(client, ctx) {
       recordHash,
       payload
     });
-    await upsertDebian(client, rawIndexId, cveId, packages, payload);
     count++;
     changed++;
   }

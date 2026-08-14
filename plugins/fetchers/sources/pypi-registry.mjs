@@ -2,7 +2,6 @@ import { fetchJson } from '../lib/http.mjs';
 import { getEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertRegistryPackage } from '../lib/staging.mjs';
 
 export const sourceCode = 'pypi-registry';
 
@@ -21,7 +20,7 @@ export async function run(client, ctx) {
       metadata: { summary: item.info?.summary, projectUrls: item.info?.project_urls },
       payload: item
     };
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: name.toLowerCase(),
       externalId: name,
       sourceUrl: item.info?.project_url ?? `https://pypi.org/project/${encodeURIComponent(name)}/`,
@@ -29,7 +28,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson(payload)),
       payload
     });
-    await upsertRegistryPackage(client, rawIndexId, 'pypi', 'pypi', payload);
     count++;
   }
   return { fetchedCount: count, parsedCount: count, checkpoint: { count, lastFetched: new Date().toISOString() } };

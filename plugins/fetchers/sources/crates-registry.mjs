@@ -2,7 +2,6 @@ import { fetchJson } from '../lib/http.mjs';
 import { getEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertRegistryPackage } from '../lib/staging.mjs';
 
 export const sourceCode = 'crates-registry';
 
@@ -22,7 +21,7 @@ export async function run(client, ctx) {
       metadata: { description: crate.description, license: crate.license, downloads: crate.downloads },
       payload: item
     };
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: name,
       externalId: name,
       sourceUrl: `https://crates.io/crates/${encodeURIComponent(name)}`,
@@ -30,7 +29,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson(payload)),
       payload
     });
-    await upsertRegistryPackage(client, rawIndexId, 'crates.io', 'cargo', payload);
     count++;
   }
   return { fetchedCount: count, parsedCount: count, checkpoint: { count, lastFetched: new Date().toISOString() } };

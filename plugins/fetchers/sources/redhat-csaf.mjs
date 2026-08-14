@@ -2,7 +2,6 @@ import { fetchJson } from '../lib/http.mjs';
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertEcosystemAdvisory } from '../lib/staging.mjs';
 
 export const sourceCode = 'redhat-csaf';
 
@@ -26,7 +25,7 @@ export async function run(client, ctx) {
     if (!advisoryId) continue;
     const identifiers = [advisoryId, ...(item.CVEs ?? [])].filter(Boolean);
     const sourceUrl = `https://access.redhat.com/errata/${advisoryId}`;
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: advisoryId,
       externalId: advisoryId,
       sourceUrl,
@@ -34,17 +33,6 @@ export async function run(client, ctx) {
       modifiedAt: item.released_on ?? null,
       identifiers,
       recordHash: sha256(stableJson(item)),
-      payload: item
-    });
-    await upsertEcosystemAdvisory(client, rawIndexId, {
-      provider: 'redhat-csaf',
-      ecosystem: 'rpm',
-      advisoryId,
-      identifiers,
-      severityLabel: item.severity ?? null,
-      references: [{ url: sourceUrl }],
-      publishedAt: item.released_on ?? null,
-      modifiedAt: item.released_on ?? null,
       payload: item
     });
     count++;

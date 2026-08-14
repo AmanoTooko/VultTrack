@@ -4,7 +4,6 @@ import { spawnSync } from 'node:child_process';
 import { getIntEnv, getRootPath } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertOsv } from '../lib/staging.mjs';
 
 export const sourceCode = 'go-advisory';
 
@@ -68,7 +67,7 @@ export async function run(client, ctx) {
 
     // Convert to standard format if needed
     const ids = [item.id, ...(item.aliases ?? [])].filter(Boolean);
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: item.id,
       externalId: item.id,
       sourceUrl: item.id.startsWith('GO-') ? `https://pkg.go.dev/vuln/${item.id}` : `https://osv.dev/vulnerability/${item.id}`,
@@ -78,7 +77,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson(item)),
       payload: item
     });
-    await upsertOsv(client, rawIndexId, item);
     count++;
     if (count % 100 === 0) console.error(`[go-advisory] ${count} records...`);
   }

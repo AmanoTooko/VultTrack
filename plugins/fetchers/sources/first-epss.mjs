@@ -4,7 +4,6 @@ import path from 'node:path';
 import { fetchBuffer } from '../lib/http.mjs';
 import { getRootPath } from '../lib/env.mjs';
 import { sha256 } from '../lib/hash.mjs';
-import { isSpoolBackend } from '../lib/db.mjs';
 
 export const sourceCode = 'first-epss';
 const EPSS_URL = 'https://epss.empiricalsecurity.com/epss_scores-current.csv.gz';
@@ -33,10 +32,6 @@ export async function runEpssSnapshot(_client, ctx, { fetchGzip = fetchBuffer } 
   if (await hasPendingSnapshot(incoming, contentHash)) {
     console.error('FIRST EPSS snapshot is already pending DuckDB commit, skipping duplicate download.');
     return { fetchedCount: 0, changedCount: 0, parsedCount: 0 };
-  }
-
-  if (!isSpoolBackend()) {
-    throw new Error('FIRST EPSS native ingestion requires VULTRACK_STORAGE_BACKEND=duckdb');
   }
 
   const observedAt = new Date().toISOString();

@@ -1,7 +1,6 @@
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertThreatIntel } from '../lib/staging.mjs';
 
 export const sourceCode = 'cisa-kev';
 
@@ -27,7 +26,7 @@ export async function run(client, ctx) {
   for (const item of data.vulnerabilities ?? []) {
     if (count >= max) break;
     const cve = item.cveID;
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: cve,
       externalId: cve,
       sourceUrl: 'https://www.cisa.gov/known-exploited-vulnerabilities-catalog',
@@ -36,7 +35,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson(item)),
       payload: item
     });
-    await upsertThreatIntel(client, rawIndexId, 'cisa-kev', cve, item);
     count++;
   }
   return { fetchedCount: count, parsedCount: count, checkpoint: { contentHash, lastFetched: new Date().toISOString() } };

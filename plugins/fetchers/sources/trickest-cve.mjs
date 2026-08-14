@@ -1,7 +1,6 @@
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
-import { writeArtifact, writeRecord } from '../lib/db.mjs';
-import { upsertExploitPoc } from '../lib/staging.mjs';
+import { writeRecord } from '../lib/db.mjs';
 import { classifyExploitType, githubHeaders, maturityFor } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'trickest-cve';
@@ -21,13 +20,7 @@ export async function run(client, ctx) {
       const rel = `${year}/${entry.name}`;
       const title = body.match(/^###\s+\[?([^\]\n]+)\]?/m)?.[1]?.trim() ?? cve;
       const githubLinks = [...body.matchAll(/https:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/g)].map((m) => m[0]);
-      const artifact = await writeArtifact(client, ctx, {
-        externalKey: cve,
-        filename: rel,
-        body,
-        contentType: 'text/markdown',
-        schemaHint: 'trickest-cve-markdown'
-      });
+      const artifact = { objectId: null, sha256: sha256(Buffer.from(body, 'utf8')) };
       const item = {
         provider: 'trickest-cve',
         sourceKey: cve,
@@ -48,7 +41,7 @@ export async function run(client, ctx) {
         tags: ['github-poc-index'],
         payload: { path: rel, githubLinks: [...new Set(githubLinks)].slice(0, 200) }
       };
-      const rawIndexId = await writeRecord(client, ctx, {
+      await writeRecord(client, ctx, {
         externalKey: item.sourceKey,
         externalId: item.sourceKey,
         sourceUrl: item.sourceUrl,
@@ -57,7 +50,6 @@ export async function run(client, ctx) {
         recordHash: sha256(stableJson({ sourceKey: item.sourceKey, artifactSha256: item.artifactSha256 })),
         payload: item
       });
-      await upsertExploitPoc(client, rawIndexId, item);
       count++;
     }
     if (count >= max) break;

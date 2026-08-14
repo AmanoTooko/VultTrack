@@ -81,14 +81,12 @@ test('init checkpoints resume only matching incomplete imports and persist progr
   assert.equal(resumeInitOffset({ initComplete: false, initMode: 'full', offset: 500 }, { initMode: 'incremental' }), 0);
   assert.equal(resumeInitOffset({ initComplete: false, initMode: 'full', offset: -1 }, { initMode: 'full' }), 0);
 
-  const queries = [];
+  const client = {};
   const ctx = { source: { id: 'source-id', checkpoint_json: {} } };
-  const next = await saveInitProgress({
-    query: async (sql, values) => queries.push({ sql, values })
-  }, ctx, { initMode: 'full', offset: 500 });
+  const next = await saveInitProgress(client, ctx, { initMode: 'full', offset: 500 });
 
   assert.deepEqual(next, { initMode: 'full', offset: 500, initComplete: false });
-  assert.equal(JSON.parse(queries[0].values[1]).offset, 500);
+  assert.deepEqual(client.pendingCheckpoint, next);
   assert.strictEqual(ctx.source.checkpoint_json, next);
 });
 
@@ -102,7 +100,8 @@ test('DuckDB scheduler defaults to blocking automatic baseline imports on every 
   assert.match(scheduler, /checkpoint\?\["initComplete"\].*== false\)\s*return RequireAutomaticInit/s);
   assert.match(scheduler, /sourceCode\.EndsWith\("-init"[\s\S]*return RequireAutomaticInit/);
   assert.match(scheduler, /HasSourceRecordsAsync\(sourceCode, ct\)\) return sourceCode;\s*return RequireAutomaticInit/s);
-  assert.match(program, /admin\.scheduler\.runDue[\s\S]*duckScheduler\.RunCycleAsync\(ct\)/);
+  assert.match(program, /AddHostedService\(serviceProvider => serviceProvider\.GetRequiredService<DuckDbFirstScheduler>\(\)\)/);
+  assert.match(scheduler, /ExecuteAsync\(CancellationToken stoppingToken\)[\s\S]*RunCycleAsync\(stoppingToken\)/);
   assert.match(envExample, /^DUCKDB_ALLOW_AUTOMATIC_INIT=false$/m);
   for (const composeFile of ['docker-compose.yml', 'docker-compose.duckdb.yml', 'docker-compose.prod.yml']) {
     const compose = await fs.readFile(composeFile, 'utf8');
@@ -110,7 +109,7 @@ test('DuckDB scheduler defaults to blocking automatic baseline imports on every 
   }
 });
 
-test('Compose env files are not overridden by interpolated runtime defaults', async () => {
+test('Compose env files are not overridden by hardcoded runtime defaults', async () => {
   const runtimeKeys = [
     'VULTRACK_DUCKDB_MEMORY_LIMIT',
     'VULTRACK_DUCKDB_THREADS',
@@ -124,7 +123,7 @@ test('Compose env files are not overridden by interpolated runtime defaults', as
   for (const composeFile of ['docker-compose.yml', 'docker-compose.duckdb.yml', 'docker-compose.prod.yml']) {
     const compose = await fs.readFile(composeFile, 'utf8');
     for (const key of runtimeKeys) {
-      assert.doesNotMatch(compose, new RegExp(`^\\s+${key}:`, 'm'), `${composeFile} does not override ${key}`);
+      assert.doesNotMatch(compose, new RegExp(`^\\s+${key}: (?!\\$\\{)`, 'm'), `${composeFile} does not hardcode ${key}`);
     }
   }
 
@@ -135,13 +134,13 @@ test('Compose env files are not overridden by interpolated runtime defaults', as
 
 test('FIRST EPSS is enabled after its native delta pipeline is accepted', async () => {
   const scheduler = await fs.readFile('src/VulTrack.App/DuckDbFirstScheduler.cs', 'utf8');
-  const program = await fs.readFile('src/VulTrack.App/Program.cs', 'utf8');
-  const store = await fs.readFile('src/VulTrack.App/DuckDbEvidenceStore.cs', 'utf8');
+  const sourceEndpoints = await fs.readFile('src/VulTrack.App/Endpoints/SourceEndpoints.cs', 'utf8');
+  const storeStatus = await fs.readFile('src/VulTrack.App/DuckDbEvidenceStore.Status.cs', 'utf8');
   const envExample = await fs.readFile('.env.example', 'utf8');
   const defaults = 'nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory';
   assert.match(scheduler, new RegExp(`\\?\\? "${defaults}"`));
-  assert.match(program, new RegExp(`\\?\\? "${defaults}"`));
-  assert.match(store, new RegExp(`\\?\\? "${defaults}"`));
+  assert.match(sourceEndpoints, new RegExp(`\\?\\? "${defaults}"`));
+  assert.match(storeStatus, new RegExp(`\\?\\? "${defaults}"`));
   assert.match(envExample, new RegExp(`^DUCKDB_FETCH_SOURCES=${defaults}$`, 'm'));
 });
 
@@ -353,8 +352,7 @@ test('OSV stops and destroys an index stream once its cursor is reached', async 
 
 test('FIRST EPSS publishes one gzip input and a tiny manifest without advancing the checkpoint', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-epss-native-'));
-  const previous = Object.fromEntries(['VULTRACK_STORAGE_BACKEND', 'VULTRACK_SPOOL_PATH'].map((key) => [key, process.env[key]]));
-  process.env.VULTRACK_STORAGE_BACKEND = 'duckdb';
+  const previous = Object.fromEntries(['VULTRACK_SPOOL_PATH'].map((key) => [key, process.env[key]]));
   process.env.VULTRACK_SPOOL_PATH = root;
   try {
     const { withClient, flushWriteBatch } = await import('../../plugins/fetchers/lib/db.mjs');
@@ -405,11 +403,9 @@ async function runOsvIncremental({
   persistIndexSnapshot = false,
   root: providedRoot
 }) {
-  const previousBackend = process.env.VULTRACK_STORAGE_BACKEND;
   const previousPath = process.env.VULTRACK_SPOOL_PATH;
   const previousMax = process.env.OSV_FETCH_MAX_RECORDS;
   const root = providedRoot ?? await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-osv-incremental-'));
-  process.env.VULTRACK_STORAGE_BACKEND = 'duckdb';
   process.env.VULTRACK_SPOOL_PATH = root;
   if (maxRecords === undefined) delete process.env.OSV_FETCH_MAX_RECORDS;
   else process.env.OSV_FETCH_MAX_RECORDS = String(maxRecords);
@@ -455,8 +451,6 @@ async function runOsvIncremental({
     const snapshotExists = snapshotPath ? await fs.access(snapshotPath).then(() => true, () => false) : false;
     return { result, fetchedIds, fetchHeaders, spoolIds, snapshotExists };
   } finally {
-    if (previousBackend === undefined) delete process.env.VULTRACK_STORAGE_BACKEND;
-    else process.env.VULTRACK_STORAGE_BACKEND = previousBackend;
     if (previousPath === undefined) delete process.env.VULTRACK_SPOOL_PATH;
     else process.env.VULTRACK_SPOOL_PATH = previousPath;
     if (previousMax === undefined) delete process.env.OSV_FETCH_MAX_RECORDS;
@@ -465,11 +459,9 @@ async function runOsvIncremental({
   }
 }
 
-test('DuckDB fetch backend writes one atomic spool batch without PostgreSQL', async () => {
-  const previousBackend = process.env.VULTRACK_STORAGE_BACKEND;
+test('spool fetch backend writes one atomic spool batch', async () => {
   const previousPath = process.env.VULTRACK_SPOOL_PATH;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-spool-'));
-  process.env.VULTRACK_STORAGE_BACKEND = 'duckdb';
   process.env.VULTRACK_SPOOL_PATH = root;
   try {
     const { withClient, getSource, startRun, writeRecord, flushWriteBatch, finishRun } =
@@ -503,19 +495,15 @@ test('DuckDB fetch backend writes one atomic spool batch without PostgreSQL', as
     assert.equal(state.lastRun.status, 'succeeded');
     assert.equal(state.checkpoint.done, true);
   } finally {
-    if (previousBackend === undefined) delete process.env.VULTRACK_STORAGE_BACKEND;
-    else process.env.VULTRACK_STORAGE_BACKEND = previousBackend;
     if (previousPath === undefined) delete process.env.VULTRACK_SPOOL_PATH;
     else process.env.VULTRACK_SPOOL_PATH = previousPath;
     await fs.rm(root, { recursive: true, force: true });
   }
 });
 
-test('DuckDB fetch backend commits resumable spool segments atomically', async () => {
-  const previousBackend = process.env.VULTRACK_STORAGE_BACKEND;
+test('spool fetch backend commits resumable spool segments atomically', async () => {
   const previousPath = process.env.VULTRACK_SPOOL_PATH;
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-spool-segments-'));
-  process.env.VULTRACK_STORAGE_BACKEND = 'duckdb';
   process.env.VULTRACK_SPOOL_PATH = root;
   try {
     const { withClient, getSource, startRun, writeRecord, commitSpoolSegment, flushWriteBatch, finishRun } =
@@ -543,70 +531,9 @@ test('DuckDB fetch backend commits resumable spool segments atomically', async (
     assert.equal(state.checkpoint.year, 2004);
     assert.equal(state.hasRecords, true);
   } finally {
-    if (previousBackend === undefined) delete process.env.VULTRACK_STORAGE_BACKEND;
-    else process.env.VULTRACK_STORAGE_BACKEND = previousBackend;
     if (previousPath === undefined) delete process.env.VULTRACK_SPOOL_PATH;
     else process.env.VULTRACK_SPOOL_PATH = previousPath;
     await fs.rm(root, { recursive: true, force: true });
-  }
-});
-
-test('raw store none keeps only the raw index and skips unchanged staging writes', async () => {
-  const previous = process.env.RAW_OBJECT_STORE;
-  process.env.RAW_OBJECT_STORE = 'none';
-  try {
-    const { writeRecord } = await import('../../plugins/fetchers/lib/db.mjs');
-    const { upsertNvdCve } = await import('../../plugins/fetchers/lib/staging.mjs');
-    const queries = [];
-    const client = {
-      query: async (sql, values) => {
-        queries.push({ sql, values });
-        if (sql === 'begin') return { rowCount: 0, rows: [] };
-        if (sql.includes('select id') && sql.includes('source_raw_index')) return { rowCount: 0, rows: [] };
-        if (sql.includes('insert into source_raw_index')) return { rowCount: 1, rows: [{ id: 'raw-id' }] };
-        throw new Error(`Unexpected query: ${sql}`);
-      }
-    };
-    const ctx = { source: { id: 'source-id', code: 'nvd-cve' }, run: { id: 'run-id' } };
-    const id = await writeRecord(client, ctx, { externalKey: 'CVE-2026-1', payload: { id: 'CVE-2026-1' } });
-    assert.equal(id, 'raw-id');
-    assert.equal(queries.some((x) => x.sql.includes('source_objects')), false);
-    assert.equal(queries.find((x) => x.sql.includes('insert into source_raw_index')).values[2], null);
-
-    let stagingQueried = false;
-    await upsertNvdCve({ query: async () => { stagingQueried = true; } }, null, {});
-    assert.equal(stagingQueried, false);
-  } finally {
-    if (previous === undefined) delete process.env.RAW_OBJECT_STORE;
-    else process.env.RAW_OBJECT_STORE = previous;
-  }
-});
-
-test('unchanged normalized records bypass raw storage and staging', async () => {
-  const previous = process.env.RAW_OBJECT_STORE;
-  process.env.RAW_OBJECT_STORE = 'none';
-  try {
-    const { writeRecord } = await import('../../plugins/fetchers/lib/db.mjs');
-    const queries = [];
-    const client = {
-      query: async (sql, values) => {
-        queries.push({ sql, values });
-        if (sql === 'begin') return { rowCount: 0, rows: [] };
-        if (sql.includes('select id') && sql.includes('source_raw_index')) {
-          return { rowCount: 1, rows: [{ id: 'existing-raw-id' }] };
-        }
-        if (sql.includes('update source_raw_index')) return { rowCount: 1, rows: [] };
-        throw new Error(`Unexpected query: ${sql}`);
-      }
-    };
-    const ctx = { source: { id: 'source-id', code: 'nvd-cve' }, run: { id: 'run-id' } };
-    const id = await writeRecord(client, ctx, { externalKey: 'CVE-2026-1', payload: { id: 'CVE-2026-1' } });
-    assert.equal(id, null);
-    assert.equal(queries.length, 3);
-    assert.equal(queries.some((x) => x.sql.includes('insert into source_objects')), false);
-  } finally {
-    if (previous === undefined) delete process.env.RAW_OBJECT_STORE;
-    else process.env.RAW_OBJECT_STORE = previous;
   }
 });
 
@@ -671,8 +598,11 @@ test('Nuclei fetcher refuses truncated revisions without advancing the completed
 
 test('Nuclei DuckDB projection applies a complete revision before finalizing the spool', async () => {
   const spool = await fs.readFile('src/VulTrack.App/DuckDbEvidenceNormalizer.Spool.cs', 'utf8');
-  const store = await fs.readFile('src/VulTrack.App/DuckDbEvidenceStore.cs', 'utf8');
-  const legacyNormalizer = await fs.readFile('src/VulTrack.App/DuckDbEvidenceNormalizer.cs', 'utf8');
+  const store = (await Promise.all([
+    'src/VulTrack.App/DuckDbEvidenceStore.Evidence.cs',
+    'src/VulTrack.App/DuckDbEvidenceStore.Schema.cs',
+    'src/VulTrack.App/DuckDbEvidenceStore.Catalog.cs'
+  ].map((file) => fs.readFile(file, 'utf8')))).join('\n');
   const fetcher = await fs.readFile('plugins/fetchers/sources/nuclei-templates.mjs', 'utf8');
 
   assert.match(fetcher, /const templates = \[\]/);
@@ -713,12 +643,12 @@ test('Nuclei DuckDB projection applies a complete revision before finalizing the
   assert.match(store, /where coalesce\(is_active, true\)/);
   assert.match(store, /from source_records\s+where source_code <> 'nuclei-templates'/);
 
-  const legacyExploitLoader = legacyNormalizer.slice(
-    legacyNormalizer.indexOf('private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadExploitAsync'),
-    legacyNormalizer.indexOf('private async Task<IReadOnlyList<DuckDbEvidenceRecord>> LoadCnnvdAsync')
+  const exploitProjection = store.slice(
+    store.indexOf('public async Task UpsertExploitProjectionAsync'),
+    store.indexOf('public async Task<DuckDbNucleiSnapshotStats> GetNucleiSnapshotStatsAsync')
   );
-  assert.match(legacyExploitLoader, /await store\.UpsertExploitProjectionAsync\(exploits, ct\)/);
-  assert.doesNotMatch(legacyExploitLoader, /DeleteDuckRows\(conn, "exploits"/);
+  assert.match(exploitProjection, /await UpsertExploitRowsAsync\(connection, exploits, snapshotId: null, ct\)/);
+  assert.doesNotMatch(exploitProjection, /delete from exploits/i);
 });
 
 test('china advisory identifiers collect domestic ids and CVEs', async () => {

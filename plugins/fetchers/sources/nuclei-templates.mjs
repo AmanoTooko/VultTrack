@@ -3,8 +3,7 @@ import path from 'node:path';
 import YAML from 'yaml';
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
-import { writeArtifact, writeRecord } from '../lib/db.mjs';
-import { upsertExploitPoc } from '../lib/staging.mjs';
+import { writeRecord } from '../lib/db.mjs';
 import { classifyExploitType, ensureGitMirror, identifiersFromText, maturityFor, sanitizeUnicode, walkFiles } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'nuclei-templates';
@@ -60,13 +59,7 @@ export async function run(client, ctx) {
 
   const fetchedAt = new Date().toISOString();
   for (const template of templates) {
-    const artifact = await writeArtifact(client, ctx, {
-      externalKey: template.rel,
-      filename: template.rel,
-      body: template.body,
-      contentType: 'application/yaml',
-      schemaHint: 'nuclei-template'
-    });
+    const artifact = { objectId: null, sha256: sha256(Buffer.from(template.body, 'utf8')) };
     const item = sanitizeUnicode({
       provider: 'nuclei-templates',
       sourceKey: template.doc?.id || template.rel,
@@ -89,7 +82,7 @@ export async function run(client, ctx) {
       tags: template.tags,
       payload: { id: template.doc?.id, info: template.doc?.info, path: template.rel, gitRevision: mirror.revision }
     });
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: template.rel,
       externalId: item.sourceKey,
       sourceUrl: item.sourceUrl,
@@ -100,7 +93,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson({ sourceKey: item.sourceKey, artifactSha256: item.artifactSha256, revision: mirror.revision })),
       payload: item
     });
-    await upsertExploitPoc(client, rawIndexId, item);
   }
 
   return { fetchedCount: templates.length, parsedCount: templates.length, checkpoint: plan.checkpoint };

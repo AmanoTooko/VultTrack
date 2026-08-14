@@ -2,8 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
-import { writeArtifact, writeRecord } from '../lib/db.mjs';
-import { upsertExploitPoc } from '../lib/staging.mjs';
+import { writeRecord } from '../lib/db.mjs';
 import { changedGitFiles, classifyExploitType, ensureGitMirror, gitRevisionUnchanged, identifiersFromText, languageFromPath, maturityFor, walkFiles } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'metasploit';
@@ -28,13 +27,7 @@ export async function run(client, ctx) {
     const rel = path.relative(mirror.dir, file);
     const title = extractRubyMeta(body, 'Name') ?? rel;
     const rank = body.match(/\bRank\s*=\s*([A-Za-z]+)Ranking/)?.[1] ?? null;
-    const artifact = await writeArtifact(client, ctx, {
-      externalKey: rel,
-      filename: rel,
-      body,
-      contentType: 'text/x-ruby',
-      schemaHint: 'metasploit-module'
-    });
+    const artifact = { objectId: null, sha256: sha256(Buffer.from(body, 'utf8')) };
     const item = {
       provider: 'metasploit',
       sourceKey: rel,
@@ -55,7 +48,7 @@ export async function run(client, ctx) {
       tags: ['metasploit', rank].filter(Boolean),
       payload: { path: rel, rank, gitRevision: mirror.revision, name: title }
     };
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: item.sourceKey,
       externalId: item.sourceKey,
       sourceUrl: item.sourceUrl,
@@ -64,7 +57,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson({ sourceKey: item.sourceKey, artifactSha256: item.artifactSha256 })),
       payload: item
     });
-    await upsertExploitPoc(client, rawIndexId, item);
     count++;
   }
 

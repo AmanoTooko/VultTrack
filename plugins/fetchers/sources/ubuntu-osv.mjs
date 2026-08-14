@@ -5,7 +5,6 @@ import { spawnSync } from 'node:child_process';
 import { getBoolEnv, getCsvEnv, getIntEnv, getRootPath } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertOsv } from '../lib/staging.mjs';
 
 export const sourceCode = 'ubuntu-osv';
 const UBUNTU_OSV_URL = 'https://security-metadata.canonical.com/osv/osv-all.tar.xz';
@@ -68,7 +67,7 @@ export async function run(client, ctx) {
       if (count >= max) break;
       const item = JSON.parse(await fs.readFile(file, 'utf8'));
       const ids = [item.id, ...(item.aliases ?? [])].filter(Boolean);
-      const rawIndexId = await writeRecord(client, ctx, {
+      await writeRecord(client, ctx, {
         externalKey: item.id,
         externalId: item.id,
         sourceUrl: 'https://security-metadata.canonical.com/osv/',
@@ -78,7 +77,6 @@ export async function run(client, ctx) {
         recordHash: sha256(stableJson(item)),
         payload: item
       });
-      await upsertOsv(client, rawIndexId, item, 'stg_ubuntu_osv');
       count++;
     }
     return { fetchedCount: count, parsedCount: count, checkpoint: { contentHash, ...metadata, lastFetched: new Date().toISOString() } };
@@ -119,7 +117,7 @@ async function runBoundedApi(client, ctx, max, ids) {
     if (!res.ok) throw new Error(`HTTP ${res.status} for OSV vuln ${id}`);
     const item = await res.json();
     const identifiers = [item.id, ...(item.aliases ?? [])].filter(Boolean);
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: item.id,
       externalId: item.id,
       sourceUrl: `https://osv.dev/vulnerability/${item.id}`,
@@ -129,7 +127,6 @@ async function runBoundedApi(client, ctx, max, ids) {
       recordHash: sha256(stableJson(item)),
       payload: item
     });
-    await upsertOsv(client, rawIndexId, item, 'stg_ubuntu_osv');
     count++;
   }
   return { fetchedCount: count, parsedCount: count, checkpoint: { ids: ids.slice(0, count), lastFetched: new Date().toISOString() } };

@@ -9,7 +9,6 @@ import { getBoolEnv, getIntEnv, getRootPath } from './env.mjs';
 import { fetchJson, fetchResponse } from './http.mjs';
 import { sha256, stableJson } from './hash.mjs';
 import { commitSpoolSegment, writeRecord } from './db.mjs';
-import { upsertAndroidOsv, upsertOsv } from './staging.mjs';
 
 const BASE_URL = 'https://storage.googleapis.com/osv-vulnerabilities';
 
@@ -48,7 +47,7 @@ export async function runOsvAllZipInit(client, ctx, options = {}) {
     prefixes: options.prefixes,
     onItem: async (item, nextOffset, estimatedEntries) => {
       const accepted = !options.filter || options.filter(item);
-      if (accepted) await writeOsvItem(client, ctx, item, options);
+      if (accepted) await writeOsvItem(client, ctx, item);
       if (client.__spool && nextOffset % 5000 === 0) {
         const segmentCheckpoint = {
           contentHash,
@@ -297,7 +296,7 @@ export async function runOsvModifiedIdIncremental(client, ctx, options = {}) {
       if (options.filter && !options.filter(item)) {
         continue;
       }
-      await writeOsvItem(client, ctx, item, options);
+      await writeOsvItem(client, ctx, item);
       count++;
     }
   }
@@ -542,7 +541,7 @@ async function runOsvIds(client, ctx, ids, options) {
   for (const id of ids) {
     const item = await fetchOsvItem(id, options.ecosystem);
     if (options.filter && !options.filter(item)) continue;
-    await writeOsvItem(client, ctx, item, options);
+    await writeOsvItem(client, ctx, item);
     count++;
   }
   return { fetchedCount: count, parsedCount: count, checkpoint: { ids, lastFetched: new Date().toISOString() } };
@@ -553,9 +552,9 @@ async function fetchOsvItem(rawId, ecosystem) {
   return fetchJson(`${BASE_URL}/${path}`);
 }
 
-async function writeOsvItem(client, ctx, item, options) {
+async function writeOsvItem(client, ctx, item) {
   const ids = [item.id, ...(item.aliases ?? [])].filter(Boolean);
-  const rawIndexId = await writeRecord(client, ctx, {
+  await writeRecord(client, ctx, {
     externalKey: item.id,
     externalId: item.id,
     sourceUrl: `https://osv.dev/vulnerability/${item.id}`,
@@ -565,11 +564,4 @@ async function writeOsvItem(client, ctx, item, options) {
     recordHash: sha256(stableJson(item)),
     payload: item
   });
-
-  if (options.androidTable) {
-    await upsertAndroidOsv(client, rawIndexId, item).catch(async () => upsertOsv(client, rawIndexId, item));
-    return;
-  }
-
-  await upsertOsv(client, rawIndexId, item, options.table);
 }

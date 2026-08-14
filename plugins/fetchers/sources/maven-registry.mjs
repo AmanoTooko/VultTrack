@@ -2,7 +2,6 @@ import { fetchJson } from '../lib/http.mjs';
 import { getEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertRegistryPackage } from '../lib/staging.mjs';
 import { mavenPurl } from '../lib/advisory.mjs';
 
 export const sourceCode = 'maven-registry';
@@ -30,7 +29,7 @@ export async function run(client, ctx) {
       metadata: doc,
       payload: data
     };
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: `${coord.groupId}:${coord.artifactId}`,
       externalId: `${coord.groupId}:${coord.artifactId}`,
       sourceUrl: `https://search.maven.org/artifact/${coord.groupId}/${coord.artifactId}/${version ?? ''}/jar`,
@@ -38,7 +37,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson(payload)),
       payload
     });
-    await upsertRegistryPackage(client, rawIndexId, 'maven-central', 'maven', payload);
     count++;
   }
   return { fetchedCount: count, parsedCount: count, checkpoint: { count, lastFetched: new Date().toISOString() } };

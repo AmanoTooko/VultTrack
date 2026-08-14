@@ -2,7 +2,6 @@ import { fetchJson } from '../lib/http.mjs';
 import { getEnv, getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertNpmAdvisory } from '../lib/staging.mjs';
 import { extractIdentifiers, npmPurl } from '../lib/advisory.mjs';
 
 export const sourceCode = 'npm-audit';
@@ -74,7 +73,7 @@ export async function run(client, ctx) {
         npm_audit: advisory,
         purl: npmPurl(packageName)
       };
-      const rawIndexId = await writeRecord(client, ctx, {
+      await writeRecord(client, ctx, {
         externalKey: `${packageName}/${ghsa}`,
         externalId: ghsa,
         sourceUrl: advisory.url ?? 'https://registry.npmjs.org/-/npm/v1/security/advisories/bulk',
@@ -82,7 +81,6 @@ export async function run(client, ctx) {
         recordHash: sha256(stableJson(item)),
         payload: item
       });
-      await upsertNpmAdvisory(client, rawIndexId, item);
       count++;
     }
     if (count >= max) break;

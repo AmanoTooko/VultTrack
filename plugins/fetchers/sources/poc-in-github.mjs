@@ -2,8 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
-import { writeArtifact, writeRecord } from '../lib/db.mjs';
-import { upsertExploitPoc } from '../lib/staging.mjs';
+import { writeRecord } from '../lib/db.mjs';
 import { changedGitFiles, classifyExploitType, ensureGitMirror, gitRevisionUnchanged, githubHeaders, maturityFor, walkFiles } from '../lib/exploit-utils.mjs';
 
 export const sourceCode = 'poc-in-github';
@@ -57,7 +56,7 @@ export async function run(client, ctx) {
         tags: ['github-poc', repo.fork ? 'fork' : 'source'].filter(Boolean),
         payload: repo
       };
-      const rawIndexId = await writeRecord(client, ctx, {
+      await writeRecord(client, ctx, {
         externalKey: item.sourceKey,
         externalId: item.sourceKey,
         sourceUrl: item.sourceUrl,
@@ -67,7 +66,6 @@ export async function run(client, ctx) {
         recordHash: sha256(stableJson({ repo, artifactSha256: item.artifactSha256 })),
         payload: item
       });
-      await upsertExploitPoc(client, rawIndexId, item);
       count++;
     }
   }
@@ -83,24 +81,11 @@ async function archiveGithubRepoMetadata(client, ctx, cve, repo) {
   if (process.env.FETCHER_ARCHIVE_GITHUB_REPOS === '1') {
     const archive = await tryDownloadArchive(repo.full_name);
     if (archive) {
-      return await writeArtifact(client, ctx, {
-        externalKey: `${cve}-${repo.full_name}`,
-        filename: `${repo.full_name}.zip`,
-        body: archive,
-        contentType: 'application/zip',
-        schemaHint: 'github-repository-archive',
-        compressedExtension: '.zip.gz'
-      });
+      return { objectId: null, sha256: sha256(archive) };
     }
   }
 
-  return await writeArtifact(client, ctx, {
-    externalKey: `${cve}-${repo.full_name}`,
-    filename: `${repo.full_name}.json`,
-    body: JSON.stringify(repo, null, 2),
-    contentType: 'application/json',
-    schemaHint: 'github-poc-metadata'
-  });
+  return { objectId: null, sha256: sha256(Buffer.from(JSON.stringify(repo, null, 2), 'utf8')) };
 }
 
 async function tryDownloadArchive(fullName) {

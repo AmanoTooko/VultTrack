@@ -2,7 +2,6 @@ import { fetchJson } from '../lib/http.mjs';
 import { getEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertRegistryPackage } from '../lib/staging.mjs';
 
 export const sourceCode = 'npm-registry';
 
@@ -23,7 +22,7 @@ export async function run(client, ctx) {
       metadata: { description: item.description, distTags: item['dist-tags'] },
       payload: item
     };
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: name,
       externalId: name,
       sourceUrl: `https://www.npmjs.com/package/${name}`,
@@ -31,7 +30,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson(payload)),
       payload
     });
-    await upsertRegistryPackage(client, rawIndexId, 'npm', 'npm', payload);
     count++;
   }
   return { fetchedCount: count, parsedCount: count, checkpoint: { count } };

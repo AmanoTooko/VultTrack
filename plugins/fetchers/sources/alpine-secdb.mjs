@@ -1,7 +1,6 @@
 import { getEnv, getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertAlpine } from '../lib/staging.mjs';
 
 export const sourceCode = 'alpine-secdb';
 
@@ -34,7 +33,7 @@ export async function run(client, ctx) {
           const identifiers = [...new Set(Object.values(secfixes).flatMap((x) => Array.isArray(x) ? x : []))].filter(Boolean);
           const name = pkg.pkg?.name ?? pkg.name;
           const payload = { release, repo, pkg };
-          const rawIndexId = await writeRecord(client, ctx, {
+          await writeRecord(client, ctx, {
             externalKey: `${release}/${repo}/${name}`,
             externalId: name,
             sourceUrl: url,
@@ -42,7 +41,6 @@ export async function run(client, ctx) {
             recordHash: sha256(stableJson(payload)),
             payload
           });
-          await upsertAlpine(client, rawIndexId, `${release}/${repo}`, pkg, identifiers, payload);
           count++;
         }
       } catch { continue; }

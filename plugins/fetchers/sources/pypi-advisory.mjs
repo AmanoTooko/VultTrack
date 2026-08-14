@@ -5,7 +5,6 @@ import { parse as yamlParse } from 'yaml';
 import { getEnv, getIntEnv, getRootPath } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertPypiAdvisory } from '../lib/staging.mjs';
 
 export const sourceCode = 'pypi-advisory';
 
@@ -41,7 +40,7 @@ export async function run(client, ctx) {
       if (!item || !item.id) continue;
 
       const ids = [item.id, ...(item.aliases ?? [])].filter(Boolean);
-      const rawIndexId = await writeRecord(client, ctx, {
+      await writeRecord(client, ctx, {
         externalKey: item.id,
         externalId: item.id,
         sourceUrl: `https://github.com/pypa/advisory-database/blob/main/vulns/${path.basename(file)}`,
@@ -51,7 +50,6 @@ export async function run(client, ctx) {
         recordHash: sha256(stableJson(item)),
         payload: item
       });
-      await upsertPypiAdvisory(client, rawIndexId, item);
       count++;
       if (count % 500 === 0) {
         console.error(`  ${count}/${files.length}...`);

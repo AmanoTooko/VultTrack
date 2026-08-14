@@ -2,8 +2,7 @@ import { fetchJson } from '../lib/http.mjs';
 import { getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertEcosystemAdvisory } from '../lib/staging.mjs';
-import { advisoryIdFromUrl, extractIdentifiers, nugetSeverityLabel } from '../lib/advisory.mjs';
+import { advisoryIdFromUrl, extractIdentifiers } from '../lib/advisory.mjs';
 
 export const sourceCode = 'nuget-advisory';
 
@@ -32,25 +31,12 @@ export async function run(client, ctx) {
         const ids = extractIdentifiers(advisory.url);
         const advisoryId = advisoryIdFromUrl(advisory.url, `NUGET-${sha256(stableJson({ packageName, advisory })).slice(0, 12)}`);
         const payload = { packageName, advisory, sourcePage: page };
-        const rawIndexId = await writeRecord(client, ctx, {
+        await writeRecord(client, ctx, {
           externalKey: `${packageName}/${advisoryId}/${advisory.versions}`,
           externalId: advisoryId,
           sourceUrl: advisory.url,
           identifiers: ids,
           recordHash: sha256(stableJson(payload)),
-          payload
-        });
-        await upsertEcosystemAdvisory(client, rawIndexId, {
-          provider: 'nuget-vulnerability-info',
-          ecosystem: 'nuget',
-          advisoryId,
-          identifiers: ids,
-          packageName,
-          purl: `pkg:nuget/${encodeURIComponent(packageName)}`,
-          vulnerableRanges: [advisory.versions].filter(Boolean),
-          severityLabel: nugetSeverityLabel(advisory.severity),
-          references: advisory.url ? [{ url: advisory.url }] : [],
-          modifiedAt: page['@updated'] ?? null,
           payload
         });
         count++;

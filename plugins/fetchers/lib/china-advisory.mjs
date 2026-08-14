@@ -1,6 +1,5 @@
 import { sha256, stableJson } from './hash.mjs';
 import { writeRecord } from './db.mjs';
-import { upsertExternalAdvisory } from './staging.mjs';
 
 const ID_PATTERNS = [
   /\bCVE-\d{4}-\d{4,10}\b/gi,
@@ -109,7 +108,6 @@ export async function persistExternalAdvisory(client, ctx, item) {
     schemaHint: 'external-advisory',
     payload: normalized
   });
-  await upsertExternalAdvisory(client, rawIndexId, normalized);
   return rawIndexId;
 }
 

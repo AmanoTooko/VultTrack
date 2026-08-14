@@ -1,7 +1,6 @@
 import { getEnv, getIntEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertEcosystemAdvisory } from '../lib/staging.mjs';
 import { extractIdentifiers, firstUrl, mavenPurl } from '../lib/advisory.mjs';
 
 export const sourceCode = 'maven-advisory';
@@ -35,27 +34,12 @@ export async function run(client, ctx) {
       const ids = extractIdentifiers(vulnerability.id, vulnerability.title, vulnerability.description, ...(vulnerability.aliases ?? []), ...(vulnerability.cves ?? []));
       const advisoryId = ids[0] ?? vulnerability.id ?? `${report.coordinates}:${sha256(stableJson(vulnerability)).slice(0, 12)}`;
       const payload = { provider, component: report.component, coordinates: report.coordinates, vulnerability };
-      const rawIndexId = await writeRecord(client, ctx, {
+      await writeRecord(client, ctx, {
         externalKey: `${report.coordinates}/${advisoryId}`,
         externalId: advisoryId,
         sourceUrl: firstUrl(vulnerability.references?.[0]) ?? vulnerability.reference ?? `https://osv.dev/vulnerability/${advisoryId}`,
         identifiers: ids,
         recordHash: sha256(stableJson(payload)),
-        payload
-      });
-      await upsertEcosystemAdvisory(client, rawIndexId, {
-        provider,
-        ecosystem: 'maven',
-        advisoryId,
-        identifiers: ids,
-        packageName: `${report.component.groupId}:${report.component.artifactId}`,
-        purl: mavenPurl(report.component.groupId, report.component.artifactId, report.component.version),
-        vulnerableRanges: vulnerability.vulnerableRanges ?? [],
-        severityLabel: vulnerability.severityLabel ?? null,
-        cvss: vulnerability.cvss ?? {},
-        references: normalizeReferences(vulnerability),
-        publishedAt: vulnerability.published ?? null,
-        modifiedAt: vulnerability.modified ?? null,
         payload
       });
       count++;
@@ -133,10 +117,4 @@ function parseCoordinate(raw) {
   const [groupId, artifactId] = name.split(':');
   if (!groupId || !artifactId) throw new Error(`Invalid Maven coordinate: ${raw}`);
   return { raw, groupId, artifactId, version };
-}
-
-function normalizeReferences(vulnerability) {
-  return (vulnerability.references ?? [])
-    .map((ref) => typeof ref === 'string' ? { url: ref } : ref)
-    .filter((ref) => ref?.url);
 }

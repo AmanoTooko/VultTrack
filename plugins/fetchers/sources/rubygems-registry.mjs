@@ -2,7 +2,6 @@ import { fetchJson } from '../lib/http.mjs';
 import { getEnv } from '../lib/env.mjs';
 import { sha256, stableJson } from '../lib/hash.mjs';
 import { writeRecord } from '../lib/db.mjs';
-import { upsertRegistryPackage } from '../lib/staging.mjs';
 
 export const sourceCode = 'rubygems-registry';
 
@@ -20,7 +19,7 @@ export async function run(client, ctx) {
       metadata: { info: item.info, licenses: item.licenses, bugTrackerUri: item.bug_tracker_uri },
       payload: item
     };
-    const rawIndexId = await writeRecord(client, ctx, {
+    await writeRecord(client, ctx, {
       externalKey: name,
       externalId: name,
       sourceUrl: item.project_uri ?? `https://rubygems.org/gems/${encodeURIComponent(name)}`,
@@ -28,7 +27,6 @@ export async function run(client, ctx) {
       recordHash: sha256(stableJson(payload)),
       payload
     });
-    await upsertRegistryPackage(client, rawIndexId, 'rubygems', 'gem', payload);
     count++;
   }
   return { fetchedCount: count, parsedCount: count, checkpoint: { count, lastFetched: new Date().toISOString() } };
