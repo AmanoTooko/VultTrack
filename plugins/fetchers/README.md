@@ -1,23 +1,37 @@
 # VulTrack Fetchers
 
-Fetcher 是 VulTrack 的 source-fetcher 插件层。每个 fetcher 负责从一个外部来源拉取原始数据，写入 raw object、`source_raw_index` 和对应 staging 表。后续解析、合并和组件匹配由 .NET worker 处理。
+Fetcher 是 VulTrack 的 source-fetcher 插件层。每个 fetcher 是一个 Node.js ESM 脚本，由 .NET `DuckDbFirstScheduler` 以子进程方式串行执行（也可通过 `run-fetcher.mjs` 手动运行）。fetcher 只负责拉取外部来源并写 spool 文件；后续解析、归一化、组件匹配全部由 .NET 端在摄入 spool 时完成。
+
+## Spool 管线
+
+fetcher 不直接写任何数据库。`writeRecord()` 把记录追加为 NDJSON 行写入：
+
+```text
+data/spool/incoming/<source>-<runId>-sNNNN.ndjson.partial
+```
+
+一个 run 成功结束时，`flushWriteBatch()` 把 `.partial` 原子 rename 为 `.ndjson.ready`；失败时 `.partial` 被删除。scheduler 只摄入 `*.ndjson.ready` 文件，摄入成功后删除该文件。checkpoint 和 run 状态保存在 `data/spool/state/<source>.json`（同样是临时文件 + 原子 rename），并且只在对应 spool segment 晋升 `.ready` 之后才提交，避免丢文件后跳过记录。
+
+每行 spool 记录包含 `schemaVersion`、`sourceCode`、`runId`、`externalKey`、`identifiers`、`recordHash`、`payload` 等字段（见 `lib/db.mjs` 的 `writeSpoolRecord`）。
 
 ## 目录约定
 
 ```text
 plugins/fetchers/
   run-fetcher.mjs          # 单个 source 入口
-  run-all.mjs              # 动态发现并运行所有 sources/*.mjs
+  run-all.mjs              # 动态发现并运行所有 sources/*.mjs（本地 smoke 用）
   lib/
-    db.mjs                 # 唯一 PostgreSQL 连接入口
-    staging.mjs            # staging upsert helpers
+    db.mjs                 # spool 写入 / checkpoint / run 状态
     http.mjs               # HTTP helpers
     env.mjs                # .env / 环境变量 helpers
+    hash.mjs               # sha256 / stableJson
+    advisory.mjs           # 通用 advisory helpers
+    china-advisory.mjs     # 中国境内 advisory 归一 helpers
+    exploit-utils.mjs      # exploit/PoC 分类与 git mirror helpers
+    osv-database.mjs       # OSV 生态归档 helpers
   sources/
     <source-code>.mjs      # 一个 source 一个模块
 ```
-
-所有 fetcher 都必须通过 `lib/db.mjs` 连接数据库，不要在 source 文件中直接创建 `pg.Pool` 或硬编码连接串。
 
 ## 新增 Fetcher
 
@@ -32,9 +46,9 @@ export const sourceCode = '<source-code>';
 // 需要显式指定的源使用 runMode = 'manual'，run-all 始终默认跳过。
 
 export async function run(client, ctx) {
-  // client: pg client，由 run-fetcher 注入
-  // ctx.source: sources 表当前 source row
-  // ctx.run: source_sync_runs 当前 run row
+  // client: spool client，由 run-fetcher 注入（不是数据库连接）
+  // ctx.source: 来源状态（id/code/checkpoint_json/has_records）
+  // ctx.run: 当前 run（id、started_at 等）
   return {
     fetchedCount: 0,
     parsedCount: 0,
@@ -43,32 +57,33 @@ export async function run(client, ctx) {
 }
 ```
 
-3. 用 `writeRecord(client, ctx, record)` 写 raw object 和 `source_raw_index`。默认 raw object 存到 PostgreSQL `source_objects.compressed_content`；只有显式设置 `RAW_OBJECT_STORE=filesystem` 时才会写入 `RAW_OBJECT_PATH`。
-4. 在 `lib/staging.mjs` 增加或复用 staging upsert helper。
-5. 在 `db/init/001_schema.sql` seed `sources` 行，并为新 staging 表补 `create table if not exists`。
-6. 运行：
+3. 用 `writeRecord(client, ctx, record)` 写记录；record 至少包含 `externalKey`、`identifiers`、`payload`，可选 `sourceUrl`、`publishedAt`、`modifiedAt`、`recordHash`。
+4. checkpoint 必须支持增量：从 `ctx.source.checkpoint_json` 读取，run 返回新的 checkpoint；用 `FETCHER_FORCE=1` 可忽略 checkpoint 重抓。
+5. 运行：
 
 ```bash
 npm test
-npm run test:integration
 FETCHER_MAX_RECORDS=1 npm run fetch -- --source <source-code>
 ```
+
+6. 新 source 还需要在 .NET scheduler 的 source 列表中登记后才能参与定时抓取；手动 `npm run fetch` 不需要。
 
 ## 单个 Fetcher 调试
 
 推荐先用 bounded 模式。`FETCHER_MAX_RECORDS` 只限制真实来源处理条数，不应该让 fetcher 自动改用内置示例数据：
 
 ```bash
-DATABASE_URL=postgres://vultrack:vultrack@localhost:5432/vultrack \
-FETCHER_MAX_RECORDS=1 \
-npm run fetch -- --source nvd-cve
+FETCHER_MAX_RECORDS=1 npm run fetch -- --source nvd-cve
 ```
 
 常用环境变量：
 
 ```bash
 FETCHER_TIMEOUT_MS=600000
-RAW_OBJECT_STORE=pgsql
+FETCHER_MAX_RECORDS=          # 空 = 不限制
+FETCHER_FORCE=0               # 1 = 忽略 checkpoint 重抓
+FETCHER_SMOKE=0               # 1 = 显式 smoke 模式
+VULTRACK_SPOOL_PATH=data/spool
 NVD_API_KEY=...
 GITHUB_TOKEN=...
 OSS_INDEX_USERNAME=...
@@ -80,13 +95,13 @@ EXPLOITDB_ARCHIVE_ARTIFACTS=0
 
 Exploit/PoC sources:
 
-- `exploitdb`：默认同步 Exploit-DB CSV 元数据。设置 `EXPLOITDB_ARCHIVE_ARTIFACTS=1` 后才会逐条下载 exploit 文件并 gzip 归档到 `source_objects`。
+- `exploitdb`：默认同步 Exploit-DB CSV 元数据。设置 `EXPLOITDB_ARCHIVE_ARTIFACTS=1` 后才会逐条下载 exploit 文件并随 spool 记录归档。
 - `metasploit`：浅克隆 Metasploit Framework，解析带 CVE 引用的 module，并归档 Ruby module。
 - `nuclei-templates`：浅克隆 ProjectDiscovery nuclei-templates，解析 CVE 模板，并归档 YAML template。
 - `poc-in-github`：浅克隆 PoC-in-GitHub 的 CVE-to-repository 索引。默认归档仓库 metadata；如果设置 `FETCHER_ARCHIVE_GITHUB_REPOS=1`，会尝试下载 GitHub repo zipball，受 `FETCHER_GITHUB_ARCHIVE_MAX_BYTES` 限制。
-- `trickest-cve`：手动源。通过 GitHub Contents API 拉取 CVE markdown 索引，单年目录响应很大且需要逐条下载 markdown，默认禁用以避免拖慢初始化和定时任务。已有归档数据会继续参与查询；需要复核时显式运行 `npm run fetch -- --source trickest-cve`。
+- `trickest-cve`：手动源。通过 GitHub Contents API 拉取 CVE markdown 索引，单年目录响应很大且需要逐条下载 markdown，默认禁用以避免拖慢初始化和定时任务。需要复核时显式运行 `npm run fetch -- --source trickest-cve`。
 
-GitHub 公开 API 不强制要求 token，但全量跑 `poc-in-github`、手动复核 `trickest-cve` 或开启 GitHub repo zipball 归档时，建议申请并配置 `GITHUB_TOKEN`，否则容易遇到 GitHub rate limit。当前 fetcher 不会自动执行任何 PoC，只保存元数据、来源 URL、hash 和压缩归档对象。
+GitHub 公开 API 不强制要求 token，但全量跑 `poc-in-github`、手动复核 `trickest-cve` 或开启 GitHub repo zipball 归档时，建议申请并配置 `GITHUB_TOKEN`，否则容易遇到 GitHub rate limit。当前 fetcher 不会自动执行任何 PoC，只保存元数据、来源 URL、hash 和归档内容。
 
 中国境内漏洞情报源：
 
@@ -100,7 +115,7 @@ GitHub 公开 API 不强制要求 token，但全量跑 `poc-in-github`、手动�
 
 默认只有 `cnnvd` 启用定时抓取，每 6 小时运行一次。其余中国境内来源全部是 `manual` 且默认禁用，只能通过管理界面或显式 `npm run fetch -- --source <code>` 运行。
 
-这些来源统一写入 `stg_external_advisories`，再由 `ExternalAdvisoryRawNormalizer` 合并。能解析出 CVE 时优先归并到 CVE；没有 CVE 时保留来源编号，例如 `CNNVD-*`、`CNVD-*`、`SSV-*`、`AVD-*` 或 `CT-*`。产品名称作为弱结构化事实保存，不会伪造 purl。
+这些来源统一带 `schemaHint: 'external-advisory'` 写入 spool，由 .NET 端归一化合并。能解析出 CVE 时优先归并到 CVE；没有 CVE 时保留来源编号，例如 `CNNVD-*`、`CNVD-*`、`SSV-*`、`AVD-*` 或 `CT-*`。产品名称作为弱结构化事实保存，不会伪造 purl。
 
 奇安信 TI 的公开 advisory 页面目前是 SPA，没有发现可稳定复用的公开 API。接入前需要向奇安信申请正式 API 地址和凭据，再按其授权接口补 fetcher，不要依赖页面脚本里出现的内部地址。
 
@@ -145,7 +160,7 @@ FETCHER_INCLUDE_INIT=1 npm run fetch -- --source android-osv-init
 
 ## 运行所有 Fetcher
 
-`run-all.mjs` 默认动态发现 `sources/*.mjs`，并跳过 `runMode = 'init'` 的初始化源与 `runMode = 'manual'` 的手动源：
+`run-all.mjs` 默认动态发现 `sources/*.mjs`，并跳过 `runMode = 'init'` 的初始化源与 `runMode = 'manual'` 的手动源（生产环境由 .NET scheduler 串行调度，不经过 run-all）：
 
 ```bash
 FETCHER_MAX_RECORDS=1 node plugins/fetchers/run-all.mjs
@@ -171,26 +186,16 @@ FETCHER_MAX_RECORDS= node plugins/fetchers/run-all.mjs
 
 全量模式依赖各 source 的 checkpoint。不要用 `FETCHER_FORCE=1` 跑全量，除非你明确要忽略 checkpoint 重新抓取。
 
-## 数据库配置
-
-统一入口是：
-
-```text
-DATABASE_URL=postgres://vultrack:vultrack@localhost:5432/vultrack
-```
-
-`lib/db.mjs` 会读取 `DATABASE_URL`，默认值只用于本地开发。新增 fetcher 不要复制连接逻辑。
-
 ## 检查运行状态
 
+每个 source 的 checkpoint、最近 run 结果和最近错误都写在磁盘状态文件中：
+
 ```bash
-docker exec -i vultrack-postgres psql -U vultrack -d vultrack -XAtc "
-select s.code, r.status, r.fetched_count, r.parsed_count, r.error_count, r.started_at, r.finished_at
-from source_sync_runs r
-join sources s on s.id = r.source_id
-order by r.started_at desc
-limit 30;"
+ls data/spool/state/
+cat data/spool/state/nvd-cve.json
 ```
+
+待摄入和摄入中的 spool 文件在 `data/spool/incoming/`：只有 `*.ndjson.ready` 会被 scheduler 摄入，`.partial` 表示 fetcher 仍在写或已失败待清理。
 
 取消卡住的 run 前，先确认进程是否仍在运行：
 

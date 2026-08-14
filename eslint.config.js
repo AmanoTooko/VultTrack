@@ -26,10 +26,10 @@ export default [
     }
   },
   {
-    files: ['frontend/wwwroot/**/*.js', 'src/VulTrack.App/wwwroot/**/*.js'],
+    files: ['src/VulTrack.App/wwwroot/js/**/*.js'],
     languageOptions: {
       ecmaVersion: 'latest',
-      sourceType: 'script',
+      sourceType: 'module',
       globals: {
         ...globals.browser,
         alert: 'readonly',

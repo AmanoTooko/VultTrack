@@ -16,14 +16,12 @@
     "benchmark:api": "node scripts/api-performance-check.mjs",
     "benchmark:duckdb": "node scripts/benchmark-duckdb-normalization.mjs",
     "ai:input": "node scripts/preview-ai-summary-input.mjs",
-    "ai:analyze": "node scripts/run-ai-vulnerability-analysis.mjs",
     "lint": "eslint plugins scripts tests src/VulTrack.App/wwwroot",
     "test": "node --test tests/node/*.test.mjs",
     "test:api": "node --test tests/api/*.test.mjs"
   },
   "dependencies": {
     "dotenv": "^17.2.3",
-    "pg": "^8.21.0",
     "yaml": "^2.9.0",
     "yauzl": "^3.4.0"
   },

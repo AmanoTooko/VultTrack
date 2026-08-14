@@ -29,7 +29,7 @@ export function requestJson(baseUrl, path, options = {}) {
       res.on('end', () => {
         const text = Buffer.concat(chunks).toString('utf8');
         let json = null;
-        try { json = text ? JSON.parse(text) : null; } catch {}
+        try { json = text ? JSON.parse(text) : null; } catch { /* response body is not JSON */ }
         resolve({
           statusCode: res.statusCode ?? 0,
           headers: res.headers,
