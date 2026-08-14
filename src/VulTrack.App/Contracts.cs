@@ -1,62 +1,12 @@
 namespace VulTrack.App;
 
-public sealed record ProcessPendingRequest(int Limit = 100);
-
-public sealed record ProcessPendingResult(int Processed, int Failed);
-
 public sealed record VulnerabilitySearchRequest(
     string? Query = null,
     int Page = 1,
     int PageSize = 50,
     string? Sort = "modifiedDesc");
 
-public sealed record NormalizePendingRequest(int LimitPerSource = 100);
-
-public sealed record NormalizeSourceRequest(
-    string SourceCode,
-    int Limit = 100);
-
 public sealed record AdminLoginRequest(string Username, string Password);
-
-public sealed record AdminSourceUpdateRequest(
-    string SourceCode,
-    bool Enabled,
-    string? ScheduleCron = null,
-    string? RunMode = null);
-
-public sealed record AdminSourceActionRequest(
-    string SourceCode,
-    bool Force = false,
-    int Limit = 100);
-
-public sealed record DetailSnapshotBuildRequest(
-    string? Shard = null,
-    int Limit = 100,
-    string? Since = null,
-    Guid[]? Ids = null,
-    bool ConsumeQueue = false,
-    int Concurrency = 4,
-    int GzipLevel = 6);
-
-public sealed record DuckDbAffectedComponentRebuildRequest(
-    bool Reset = true,
-    int BatchSize = 100000,
-    int Limit = 0);
-
-public sealed record DuckDbAffectedComponentQueueRequest(
-    int Limit = 5000,
-    int BatchSize = 1000);
-
-public sealed record DuckDbAffectedComponentQueueResult(
-    bool ok,
-    int limit,
-    int batchSize,
-    long selected,
-    long processedRows,
-    long processedVulnerabilities,
-    long duckDbAffectedComponents,
-    double elapsedSeconds,
-    double rowsPerSecond);
 
 public sealed record DuckDbAiImportRequest(string Path);
 
@@ -104,10 +54,6 @@ public sealed record ComponentVulnerabilityMatch(
     bool? VersionMatched,
     string[] UpstreamIdentifiers,
     string[] RelatedIdentifiers);
-
-public sealed record SbomUploadRequest(
-    string Name,
-    string Content);
 
 public sealed record SbomMatchRequest(
     Guid SbomId);
