@@ -27,43 +27,43 @@ public sealed class DuckDbNucleiSnapshotTests
             using (var store = new DuckDbEvidenceStore(configuration))
             {
 
-            var firstId = Guid.NewGuid();
-            var removedId = Guid.NewGuid();
-            var addedId = Guid.NewGuid();
-            var thirdId = Guid.NewGuid();
-            var first = await store.ApplyNucleiSnapshotAsync(
-            [
-                Exploit(firstId, "CVE-2024-0001", "revision-a title"),
+                var firstId = Guid.NewGuid();
+                var removedId = Guid.NewGuid();
+                var addedId = Guid.NewGuid();
+                var thirdId = Guid.NewGuid();
+                var first = await store.ApplyNucleiSnapshotAsync(
+                [
+                    Exploit(firstId, "CVE-2024-0001", "revision-a title"),
                 Exploit(removedId, "CVE-2024-0002", "removed in revision-b")
-            ], "revision-a", CancellationToken.None);
-            Assert.Equal(2, first.ActiveRows);
-            Assert.Equal(2, first.ActiveDistinctRawIds);
+                ], "revision-a", CancellationToken.None);
+                Assert.Equal(2, first.ActiveRows);
+                Assert.Equal(2, first.ActiveDistinctRawIds);
 
-            var second = await store.ApplyNucleiSnapshotAsync(
-            [
-                Exploit(firstId, "CVE-2024-0001", "revision-b updated title"),
+                var second = await store.ApplyNucleiSnapshotAsync(
+                [
+                    Exploit(firstId, "CVE-2024-0001", "revision-b updated title"),
                 Exploit(addedId, "CVE-2024-0003", "new in revision-b"),
                 Exploit(thirdId, "CVE-2024-0004", "another revision-b template"),
                 Exploit(addedId, "CVE-2024-0003", "new in revision-b")
-            ], "revision-b", CancellationToken.None);
+                ], "revision-b", CancellationToken.None);
 
-            Assert.Equal(3, second.ActiveRows);
-            Assert.Equal(3, second.ActiveDistinctRawIds);
-            Assert.Single(await store.QueryExploitsAsync("CVE-2024-0001", 10, CancellationToken.None));
-            Assert.Empty(await store.QueryExploitsAsync("CVE-2024-0002", 10, CancellationToken.None));
-            Assert.Single(await store.QueryExploitsAsync("CVE-2024-0003", 10, CancellationToken.None));
-            Assert.Single(await store.QueryExploitsAsync("CVE-2024-0004", 10, CancellationToken.None));
-            Assert.Equal(second, await store.GetNucleiSnapshotStatsAsync(CancellationToken.None));
+                Assert.Equal(3, second.ActiveRows);
+                Assert.Equal(3, second.ActiveDistinctRawIds);
+                Assert.Single(await store.QueryExploitsAsync("CVE-2024-0001", 10, CancellationToken.None));
+                Assert.Empty(await store.QueryExploitsAsync("CVE-2024-0002", 10, CancellationToken.None));
+                Assert.Single(await store.QueryExploitsAsync("CVE-2024-0003", 10, CancellationToken.None));
+                Assert.Single(await store.QueryExploitsAsync("CVE-2024-0004", 10, CancellationToken.None));
+                Assert.Equal(second, await store.GetNucleiSnapshotStatsAsync(CancellationToken.None));
 
-            await Assert.ThrowsAsync<InvalidDataException>(() =>
-                store.ApplyNucleiSnapshotAsync(
-                    [Exploit(firstId, "CVE-2024-0001", "unexpected small revision")],
-                    "revision-c", CancellationToken.None));
-            Assert.Equal(second, await store.GetNucleiSnapshotStatsAsync(CancellationToken.None));
+                await Assert.ThrowsAsync<InvalidDataException>(() =>
+                    store.ApplyNucleiSnapshotAsync(
+                        [Exploit(firstId, "CVE-2024-0001", "unexpected small revision")],
+                        "revision-c", CancellationToken.None));
+                Assert.Equal(second, await store.GetNucleiSnapshotStatsAsync(CancellationToken.None));
 
-            await Assert.ThrowsAsync<InvalidDataException>(() =>
-                store.ApplyNucleiSnapshotAsync([], "revision-c", CancellationToken.None));
-            Assert.Equal(second, await store.GetNucleiSnapshotStatsAsync(CancellationToken.None));
+                await Assert.ThrowsAsync<InvalidDataException>(() =>
+                    store.ApplyNucleiSnapshotAsync([], "revision-c", CancellationToken.None));
+                Assert.Equal(second, await store.GetNucleiSnapshotStatsAsync(CancellationToken.None));
             }
         }
         finally

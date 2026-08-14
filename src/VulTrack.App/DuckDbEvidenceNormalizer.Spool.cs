@@ -511,21 +511,21 @@ public sealed partial class DuckDbEvidenceNormalizer
         {
             case "nvd-cve":
             case "nvd-cve-init":
-            {
-                var cve = payload["cve"] ?? payload;
-                key = cve["id"]?.GetValue<string>() ?? externalKey;
-                identifiers = [Identifier.Normalize(key)];
-                description = FirstLocalizedValue(cve["descriptions"], "en");
-                title = description is { Length: <= 220 } ? description : null;
-                status = cve["vulnStatus"]?.GetValue<string>();
-                publishedAt ??= cve["published"]?.GetValue<string>();
-                modifiedAt ??= cve["lastModified"]?.GetValue<string>();
-                affected = ExtractNvdFacts(cve["configurations"]).ToList();
-                severity = ExtractNvdSeverity(cve["metrics"]).ToList();
-                references = ExtractReferences(cve["references"]).ToList();
-                weaknesses = ExtractNvdWeaknesses(cve["weaknesses"]).ToList();
-                break;
-            }
+                {
+                    var cve = payload["cve"] ?? payload;
+                    key = cve["id"]?.GetValue<string>() ?? externalKey;
+                    identifiers = [Identifier.Normalize(key)];
+                    description = FirstLocalizedValue(cve["descriptions"], "en");
+                    title = description is { Length: <= 220 } ? description : null;
+                    status = cve["vulnStatus"]?.GetValue<string>();
+                    publishedAt ??= cve["published"]?.GetValue<string>();
+                    modifiedAt ??= cve["lastModified"]?.GetValue<string>();
+                    affected = ExtractNvdFacts(cve["configurations"]).ToList();
+                    severity = ExtractNvdSeverity(cve["metrics"]).ToList();
+                    references = ExtractReferences(cve["references"]).ToList();
+                    weaknesses = ExtractNvdWeaknesses(cve["weaknesses"]).ToList();
+                    break;
+                }
             case "osv":
             case "osv-init":
             case "android-osv":
@@ -538,109 +538,109 @@ public sealed partial class DuckDbEvidenceNormalizer
             case "cargo-advisory":
             case "ubuntu-osv":
             case "pypi-advisory":
-            {
-                var osvId = payload["id"]?.GetValue<string>() ?? externalId;
-                var aliases = StringArray(payload["aliases"]);
-                identifiers = OsvIdentifierExtractor.Extract(osvId, aliases, payload)
-                    .Select(Identifier.Normalize)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
-                upstreamIdentifiers = OsvIdentifierExtractor.ExtractUpstream(payload);
-                relatedIdentifiers = OsvIdentifierExtractor.ExtractRelated(payload);
-                normalizationVersion = "osv-relations-v2";
-                key = identifiers.FirstOrDefault(value => value.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase))
-                    ?? identifiers.FirstOrDefault()
-                    ?? osvId;
-                title = payload["summary"]?.GetValue<string>();
-                description = payload["details"]?.GetValue<string>() ?? title;
-                status = payload["withdrawn"] is null ? "active" : "withdrawn";
-                publishedAt ??= payload["published"]?.GetValue<string>();
-                modifiedAt ??= payload["modified"]?.GetValue<string>();
-                affected = ExtractOsvFacts(payload["affected"]).ToList();
-                severity = ExtractOsvSeverity(payload["severity"]).ToList();
-                references = ExtractReferences(payload["references"]).ToList();
-                weaknesses = [];
-                break;
-            }
+                {
+                    var osvId = payload["id"]?.GetValue<string>() ?? externalId;
+                    var aliases = StringArray(payload["aliases"]);
+                    identifiers = OsvIdentifierExtractor.Extract(osvId, aliases, payload)
+                        .Select(Identifier.Normalize)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+                    upstreamIdentifiers = OsvIdentifierExtractor.ExtractUpstream(payload);
+                    relatedIdentifiers = OsvIdentifierExtractor.ExtractRelated(payload);
+                    normalizationVersion = "osv-relations-v2";
+                    key = identifiers.FirstOrDefault(value => value.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase))
+                        ?? identifiers.FirstOrDefault()
+                        ?? osvId;
+                    title = payload["summary"]?.GetValue<string>();
+                    description = payload["details"]?.GetValue<string>() ?? title;
+                    status = payload["withdrawn"] is null ? "active" : "withdrawn";
+                    publishedAt ??= payload["published"]?.GetValue<string>();
+                    modifiedAt ??= payload["modified"]?.GetValue<string>();
+                    affected = ExtractOsvFacts(payload["affected"]).ToList();
+                    severity = ExtractOsvSeverity(payload["severity"]).ToList();
+                    references = ExtractReferences(payload["references"]).ToList();
+                    weaknesses = [];
+                    break;
+                }
             case "ghsa":
             case "npm-advisory":
             case "npm-audit":
-            {
-                identifiers = GenericIdentifiers(envelope, payload, externalId);
-                key = PreferredIdentifier(identifiers, externalId);
-                title = StringValue(payload["summary"]);
-                description = StringValue(payload["description"]) ?? title;
-                status = StringValue(payload["withdrawn_at"]) is null ? "active" : "withdrawn";
-                publishedAt ??= StringValue(payload["published_at"]);
-                modifiedAt ??= StringValue(payload["updated_at"]);
-                affected = ExtractGhsaFacts(payload["vulnerabilities"]).ToList();
-                severity = ExtractGenericSeverity(payload).ToList();
-                references = ExtractReferences(payload["references"]).ToList();
-                weaknesses = ExtractGenericWeaknesses(payload["cwes"]).ToList();
-                break;
-            }
+                {
+                    identifiers = GenericIdentifiers(envelope, payload, externalId);
+                    key = PreferredIdentifier(identifiers, externalId);
+                    title = StringValue(payload["summary"]);
+                    description = StringValue(payload["description"]) ?? title;
+                    status = StringValue(payload["withdrawn_at"]) is null ? "active" : "withdrawn";
+                    publishedAt ??= StringValue(payload["published_at"]);
+                    modifiedAt ??= StringValue(payload["updated_at"]);
+                    affected = ExtractGhsaFacts(payload["vulnerabilities"]).ToList();
+                    severity = ExtractGenericSeverity(payload).ToList();
+                    references = ExtractReferences(payload["references"]).ToList();
+                    weaknesses = ExtractGenericWeaknesses(payload["cwes"]).ToList();
+                    break;
+                }
             case "cve-list-v5":
-            {
-                var metadata = payload["cveMetadata"];
-                var cna = payload["containers"]?["cna"];
-                identifiers = GenericIdentifiers(envelope, payload, externalId)
-                    .Append(StringValue(metadata?["cveId"]) ?? externalId)
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToArray();
-                key = StringValue(metadata?["cveId"]) ?? PreferredIdentifier(identifiers, externalId);
-                title = StringValue(cna?["title"]);
-                description = FirstLocalizedValue(cna?["descriptions"], "en") ?? title;
-                status = StringValue(metadata?["state"]) ?? "active";
-                publishedAt ??= StringValue(metadata?["datePublished"]);
-                modifiedAt ??= StringValue(metadata?["dateUpdated"]);
-                affected = ExtractCveListFacts(cna).ToList();
-                severity = [];
-                references = ExtractCveListReferences(cna?["references"]).ToList();
-                weaknesses = [];
-                break;
-            }
+                {
+                    var metadata = payload["cveMetadata"];
+                    var cna = payload["containers"]?["cna"];
+                    identifiers = GenericIdentifiers(envelope, payload, externalId)
+                        .Append(StringValue(metadata?["cveId"]) ?? externalId)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
+                    key = StringValue(metadata?["cveId"]) ?? PreferredIdentifier(identifiers, externalId);
+                    title = StringValue(cna?["title"]);
+                    description = FirstLocalizedValue(cna?["descriptions"], "en") ?? title;
+                    status = StringValue(metadata?["state"]) ?? "active";
+                    publishedAt ??= StringValue(metadata?["datePublished"]);
+                    modifiedAt ??= StringValue(metadata?["dateUpdated"]);
+                    affected = ExtractCveListFacts(cna).ToList();
+                    severity = [];
+                    references = ExtractCveListReferences(cna?["references"]).ToList();
+                    weaknesses = [];
+                    break;
+                }
             case "cisa-kev":
-            {
-                identifiers = GenericIdentifiers(envelope, payload, externalId);
-                key = StringValue(payload["cveID"]) ?? PreferredIdentifier(identifiers, externalId);
-                title = StringValue(payload["vulnerabilityName"]);
-                description = StringValue(payload["shortDescription"]) ?? title;
-                status = "known-exploited";
-                publishedAt ??= StringValue(payload["dateAdded"]);
-                affected = GenericProductFacts(payload, inputSourceCode).ToList();
-                severity = [];
-                references = GenericReferences(payload, sourceUrl, "kev");
-                weaknesses = [];
-                break;
-            }
+                {
+                    identifiers = GenericIdentifiers(envelope, payload, externalId);
+                    key = StringValue(payload["cveID"]) ?? PreferredIdentifier(identifiers, externalId);
+                    title = StringValue(payload["vulnerabilityName"]);
+                    description = StringValue(payload["shortDescription"]) ?? title;
+                    status = "known-exploited";
+                    publishedAt ??= StringValue(payload["dateAdded"]);
+                    affected = GenericProductFacts(payload, inputSourceCode).ToList();
+                    severity = [];
+                    references = GenericReferences(payload, sourceUrl, "kev");
+                    weaknesses = [];
+                    break;
+                }
             case "first-epss":
-            {
-                identifiers = GenericIdentifiers(envelope, payload, externalId);
-                key = StringValue(payload["cve"]) ?? PreferredIdentifier(identifiers, externalId);
-                title = null;
-                description = null;
-                status = "active";
-                affected = [];
-                severity = [];
-                references = [];
-                weaknesses = [];
-                break;
-            }
+                {
+                    identifiers = GenericIdentifiers(envelope, payload, externalId);
+                    key = StringValue(payload["cve"]) ?? PreferredIdentifier(identifiers, externalId);
+                    title = null;
+                    description = null;
+                    status = "active";
+                    affected = [];
+                    severity = [];
+                    references = [];
+                    weaknesses = [];
+                    break;
+                }
             default:
-            {
-                identifiers = GenericIdentifiers(envelope, payload, externalId);
-                key = PreferredIdentifier(identifiers, externalId);
-                title = FirstString(payload, "title", "summary", "name", "vulnerabilityName");
-                description = FirstString(payload, "description", "details", "shortDescription", "summary") ?? title;
-                status = FirstString(payload, "status", "state") ?? "active";
-                publishedAt ??= FirstString(payload, "publishedAt", "published_at", "published", "dateAdded");
-                modifiedAt ??= FirstString(payload, "modifiedAt", "updated_at", "modified", "updatedAt");
-                affected = GenericProductFacts(payload, inputSourceCode).ToList();
-                severity = ExtractGenericSeverity(payload).ToList();
-                references = GenericReferences(payload, sourceUrl, "advisory");
-                weaknesses = ExtractGenericWeaknesses(payload["cwes"] ?? payload["weaknesses"]).ToList();
-                break;
-            }
+                {
+                    identifiers = GenericIdentifiers(envelope, payload, externalId);
+                    key = PreferredIdentifier(identifiers, externalId);
+                    title = FirstString(payload, "title", "summary", "name", "vulnerabilityName");
+                    description = FirstString(payload, "description", "details", "shortDescription", "summary") ?? title;
+                    status = FirstString(payload, "status", "state") ?? "active";
+                    publishedAt ??= FirstString(payload, "publishedAt", "published_at", "published", "dateAdded");
+                    modifiedAt ??= FirstString(payload, "modifiedAt", "updated_at", "modified", "updatedAt");
+                    affected = GenericProductFacts(payload, inputSourceCode).ToList();
+                    severity = ExtractGenericSeverity(payload).ToList();
+                    references = GenericReferences(payload, sourceUrl, "advisory");
+                    weaknesses = ExtractGenericWeaknesses(payload["cwes"] ?? payload["weaknesses"]).ToList();
+                    break;
+                }
         }
 
         key = Identifier.Normalize(key);
