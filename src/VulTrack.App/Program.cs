@@ -2,6 +2,7 @@ using VulTrack.App;
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Services.AddSingleton(VulTrackOptions.Load(builder.Configuration));
 builder.Services.AddSingleton<ComponentVulnerabilitySearchService>();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<AdminAuthService>();

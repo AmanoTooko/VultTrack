@@ -4,10 +4,10 @@ public static class AdminEndpoints
 {
     public static WebApplication MapAdminEndpoints(this WebApplication app)
     {
-        app.MapGet("/api/v1/admin.source.list", (HttpContext context, AdminAuthService auth) =>
+        app.MapGet("/api/v1/admin.source.list", (HttpContext context, AdminAuthService auth, VulTrackOptions options) =>
         {
             if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
-            return ApiResult.Ok(SourceEndpoints.DuckDbConfiguredSources());
+            return ApiResult.Ok(SourceEndpoints.DuckDbConfiguredSources(options));
         });
 
         app.MapPost("/api/v1/admin.duckdbSpool.ingest", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer normalizer, DuckDbSpoolIngestRequest request, CancellationToken ct) =>

@@ -183,10 +183,10 @@ public sealed partial class DuckDbEvidenceStore
             try
             {
                 var existingStats = ReadNucleiSnapshotStats(connection);
-                var dropThreshold = NucleiSnapshotDropThreshold();
+                var dropThreshold = Options.DuckDb.NucleiLargeSnapshotDropThreshold;
                 if (existingStats.ActiveRows > 0 &&
                     uniqueRows.Length < existingStats.ActiveRows * dropThreshold &&
-                    !EnvironmentFlag("NUCLEI_ALLOW_LARGE_SNAPSHOT_DROP"))
+                    !Options.DuckDb.NucleiAllowLargeSnapshotDrop)
                 {
                     throw new InvalidDataException(
                         $"Nuclei snapshot rejected before mutation: incoming={uniqueRows.Length}, " +
@@ -1036,15 +1036,6 @@ public sealed partial class DuckDbEvidenceStore
         using var reader = command.ExecuteReader();
         if (!reader.Read()) return new DuckDbNucleiSnapshotStats(0, 0);
         return new DuckDbNucleiSnapshotStats(reader.GetInt64(0), reader.GetInt64(1));
-    }
-
-    private static double NucleiSnapshotDropThreshold()
-    {
-        var raw = Environment.GetEnvironmentVariable("NUCLEI_LARGE_SNAPSHOT_DROP_THRESHOLD");
-        if (double.TryParse(raw, System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out var configured))
-            return Math.Clamp(configured, 0.0, 1.0);
-        return 0.5;
     }
 
     public async Task<IReadOnlyList<Dictionary<string, object?>>> QueryCpeEntriesAsync(string vendor, string product, int limit = 50, CancellationToken ct = default)

@@ -9,8 +9,14 @@ public sealed class AdminAuthService
     public const string CookieName = "vultrack_admin";
     private static readonly TimeSpan SessionLifetime = TimeSpan.FromHours(12);
     private readonly ConcurrentDictionary<string, Session> sessions = new(StringComparer.Ordinal);
-    private readonly string username = Environment.GetEnvironmentVariable("VULTRACK_ADMIN_USERNAME") ?? "admin";
-    private readonly string password = Environment.GetEnvironmentVariable("VULTRACK_ADMIN_PASSWORD") ?? "admin";
+    private readonly string username;
+    private readonly string password;
+
+    public AdminAuthService(VulTrackOptions options)
+    {
+        username = options.Admin.Username;
+        password = options.Admin.Password;
+    }
 
     public string Username => username;
 

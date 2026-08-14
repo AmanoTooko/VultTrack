@@ -149,7 +149,7 @@ public sealed partial class DuckDbEvidenceNormalizer
             throw new InvalidDataException("FIRST EPSS gzip content hash does not match its manifest.");
     }
 
-    private static async Task AdvanceFirstEpssCheckpointAsync(
+    private async Task AdvanceFirstEpssCheckpointAsync(
         FirstEpssManifest manifest,
         DuckDbFirstEpssApplyResult applied,
         CancellationToken ct)

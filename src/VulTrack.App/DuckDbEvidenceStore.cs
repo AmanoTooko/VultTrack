@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 
 namespace VulTrack.App;
 
-public sealed partial class DuckDbEvidenceStore(IConfiguration configuration) : IDisposable
+public sealed partial class DuckDbEvidenceStore(IConfiguration configuration, VulTrackOptions? options = null) : IDisposable
 {
     private const string CatalogSelectColumns = """
         select id, primary_identifier, title, description, status, severity_label, max_cvss_score,
@@ -17,11 +17,11 @@ public sealed partial class DuckDbEvidenceStore(IConfiguration configuration) : 
     private readonly ConcurrentBag<DuckDBConnection> _readPool = new();
     private bool _initialized;
 
-    public string DatabasePath { get; } = ResolvePath(configuration);
+    public VulTrackOptions Options { get; } = options ?? VulTrackOptions.Load(configuration);
 
-    public bool Enabled { get; } =
-        string.Equals(Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_ENABLED"), "true", StringComparison.OrdinalIgnoreCase)
-        || string.Equals(configuration["VulTrack:DuckDb:Enabled"], "true", StringComparison.OrdinalIgnoreCase);
+    public string DatabasePath => Options.DuckDb.DatabasePath;
+
+    public bool Enabled => Options.DuckDb.Enabled;
 
     public async Task InitializeAsync(CancellationToken ct)
     {
@@ -90,11 +90,10 @@ public sealed partial class DuckDbEvidenceStore(IConfiguration configuration) : 
     {
         var connection = new DuckDBConnection($"Data Source={DatabasePath}");
         connection.Open();
-        var memoryLimit = Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_MEMORY_LIMIT");
+        var memoryLimit = Options.DuckDb.MemoryLimit;
         if (!string.IsNullOrWhiteSpace(memoryLimit))
             Execute(connection, $"set memory_limit = {SqlValue(memoryLimit)}");
-        var threads = Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_THREADS");
-        if (int.TryParse(threads, out var threadCount) && threadCount > 0)
+        if (int.TryParse(Options.DuckDb.Threads, out var threadCount) && threadCount > 0)
             Execute(connection, $"set threads = {Math.Clamp(threadCount, 1, 32)}");
         return connection;
     }
@@ -184,9 +183,6 @@ public sealed partial class DuckDbEvidenceStore(IConfiguration configuration) : 
         command.CommandText = $"select count(*) from {tableName}";
         return Convert.ToInt64(command.ExecuteScalar());
     }
-
-    private static bool EnvironmentFlag(string name) =>
-        bool.TryParse(Environment.GetEnvironmentVariable(name), out var value) && value;
 
     private static void Execute(DuckDBConnection connection, string sql)
     {
@@ -278,15 +274,4 @@ public sealed partial class DuckDbEvidenceStore(IConfiguration configuration) : 
             : value.Split('|', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-
-    private static string ResolvePath(IConfiguration configuration)
-    {
-        var configured = Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_PATH")
-            ?? configuration["VulTrack:DuckDb:Path"];
-        if (!string.IsNullOrWhiteSpace(configured)) return Path.GetFullPath(configured);
-
-        var root = Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT")
-            ?? Directory.GetCurrentDirectory();
-        return Path.GetFullPath(Path.Combine(root, "data", "duckdb", "vultrack-evidence.duckdb"));
-    }
 }

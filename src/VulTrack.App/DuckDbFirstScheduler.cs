@@ -6,6 +6,7 @@ namespace VulTrack.App;
 public sealed class DuckDbFirstScheduler(
     DuckDbEvidenceNormalizer normalizer,
     DuckDbEvidenceStore store,
+    VulTrackOptions options,
     ILogger<DuckDbFirstScheduler> logger) : BackgroundService
 {
     private readonly SemaphoreSlim cycleLock = new(1, 1);
@@ -15,14 +16,14 @@ public sealed class DuckDbFirstScheduler(
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!EnvBool("VULTRACK_SCHEDULER_ENABLED", false))
+        if (!options.Scheduler.Enabled)
         {
             logger.LogInformation("DuckDB-first scheduler is disabled.");
             return;
         }
 
-        var interval = TimeSpan.FromSeconds(EnvInt("DUCKDB_FETCH_INTERVAL_SECONDS", 21600, 60));
-        var initialDelay = TimeSpan.FromSeconds(EnvInt("DUCKDB_FETCH_INITIAL_DELAY_SECONDS", 15, 0));
+        var interval = TimeSpan.FromSeconds(options.Scheduler.FetchIntervalSeconds);
+        var initialDelay = TimeSpan.FromSeconds(options.Scheduler.InitialDelaySeconds);
         await ConsumeReadyFilesAsync(stoppingToken);
         await FlushDeferredCatalogRebuildAsync(stoppingToken);
         if (initialDelay > TimeSpan.Zero) await Task.Delay(initialDelay, stoppingToken);
@@ -60,7 +61,7 @@ public sealed class DuckDbFirstScheduler(
                     await ConsumeReadyFilesAsync(ct);
                     if (fetchSource.Equals("osv", StringComparison.OrdinalIgnoreCase))
                     {
-                        var maxPendingBatches = Math.Clamp(EnvInt("OSV_PENDING_MAX_BATCHES_PER_CYCLE", 3, 1), 1, 12);
+                        var maxPendingBatches = options.Scheduler.OsvPendingMaxBatchesPerCycle;
                         for (var batch = 1; batch < maxPendingBatches && HasOsvPending(); batch++)
                         {
                             await RunFetcherAsync("osv", force: false, ct);
@@ -158,7 +159,7 @@ public sealed class DuckDbFirstScheduler(
 
     private async Task RunFetcherAsync(string sourceCode, bool force, CancellationToken ct)
     {
-        var root = Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT") ?? "/workspace";
+        var root = options.RepoRoot ?? "/workspace";
         var start = new ProcessStartInfo
         {
             FileName = "node",
@@ -211,11 +212,7 @@ public sealed class DuckDbFirstScheduler(
         return recent.LastOrDefault() ?? string.Empty;
     }
 
-    private static string[] SourceCodes() =>
-        (Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES") ?? "nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory")
-            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+    private string[] SourceCodes() => options.Scheduler.SourceCodes();
 
     private async Task<string> ResolveScheduledSourceAsync(string sourceCode, CancellationToken ct)
     {
@@ -241,14 +238,14 @@ public sealed class DuckDbFirstScheduler(
 
     private string RequireAutomaticInit(string sourceCode, string baselineSource, string reason)
     {
-        if (EnvBool("DUCKDB_ALLOW_AUTOMATIC_INIT", false)) return baselineSource;
+        if (options.Scheduler.AllowAutomaticInit) return baselineSource;
         var message = $"Automatic init for {baselineSource} is blocked while scheduling {sourceCode}: {reason}. " +
                       "Set DUCKDB_ALLOW_AUTOMATIC_INIT=true only for an intentional baseline import.";
         logger.LogError("{Message}", message);
         throw new InvalidOperationException(message);
     }
 
-    private static JsonObject? ReadCheckpoint(string sourceCode)
+    private JsonObject? ReadCheckpoint(string sourceCode)
     {
         var path = Path.Combine(SpoolRootPath(), "state", $"{sourceCode}.json");
         if (!File.Exists(path)) return null;
@@ -262,28 +259,17 @@ public sealed class DuckDbFirstScheduler(
         }
     }
 
-    private static bool HasOsvPending() => ReadCheckpoint("osv")?["pending"] is JsonObject;
+    private bool HasOsvPending() => ReadCheckpoint("osv")?["pending"] is JsonObject;
 
-    private static string SpoolRootPath()
-    {
-        var configured = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
-        if (!string.IsNullOrWhiteSpace(configured)) return Path.GetFullPath(configured);
-        return Path.Combine(Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT") ?? Directory.GetCurrentDirectory(), "data", "spool");
-    }
+    private string SpoolRootPath() => options.ResolveSpoolRoot();
 
-    private static string SpoolIncomingPath() => Path.Combine(SpoolRootPath(), "incoming");
+    private string SpoolIncomingPath() => Path.Combine(SpoolRootPath(), "incoming");
 
-    private static bool HasGenericReadyFiles() =>
+    private bool HasGenericReadyFiles() =>
         Directory.EnumerateFiles(SpoolIncomingPath(), "*.ndjson.ready")
             .Any(path => !Path.GetFileName(path).StartsWith("first-epss-", StringComparison.OrdinalIgnoreCase));
 
     private static string LastLine(string value) => value
         .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
         .LastOrDefault() ?? string.Empty;
-
-    private static bool EnvBool(string name, bool fallback) =>
-        bool.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? value : fallback;
-
-    private static int EnvInt(string name, int fallback, int minimum) =>
-        int.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? Math.Max(minimum, value) : fallback;
 }

@@ -323,7 +323,7 @@ public sealed partial class DuckDbEvidenceNormalizer
         }
     }
 
-    private static void CleanupCompletedSourceMirrors(
+    private void CleanupCompletedSourceMirrors(
         string incoming,
         IEnumerable<SpoolFileIngestOutcome> outcomes)
     {
@@ -344,14 +344,14 @@ public sealed partial class DuckDbEvidenceNormalizer
             var statePath = Path.Combine(spoolRoot, "state", $"{sourceCode}.json");
             if (!CheckpointIsComplete(statePath)) continue;
 
-            var repoRoot = Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT")
+            var repoRoot = store.Options.RepoRoot
                 ?? Directory.GetCurrentDirectory();
             var mirrorPath = Path.Combine(repoRoot, "data", "mirrors", mirrorName);
             try { File.Delete(mirrorPath); } catch { }
         }
     }
 
-    private static int EnsureCurrentNucleiSnapshot(string? snapshotId)
+    private int EnsureCurrentNucleiSnapshot(string? snapshotId)
     {
         try
         {
@@ -924,14 +924,7 @@ public sealed partial class DuckDbEvidenceNormalizer
         return new Guid(bytes);
     }
 
-    private static string ResolveSpoolIncomingPath()
-    {
-        var configured = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
-        var root = string.IsNullOrWhiteSpace(configured)
-            ? Path.Combine(Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT") ?? Directory.GetCurrentDirectory(), "data", "spool")
-            : Path.GetFullPath(configured);
-        return Path.Combine(root, "incoming");
-    }
+    private string ResolveSpoolIncomingPath() => store.Options.ResolveSpoolIncoming();
 
     private static string ResolveReadyFile(string incoming, string requested)
     {

@@ -45,8 +45,7 @@ public sealed partial class DuckDbEvidenceStore
         await InitializeAsync(ct);
         using var lease = await RentReadConnectionAsync(ct);
         var connection = lease.Connection;
-        var spoolRoot = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH")
-            ?? Path.Combine(Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT") ?? Directory.GetCurrentDirectory(), "data", "spool");
+        var spoolRoot = Options.ResolveSpoolRoot();
         var incoming = Path.Combine(spoolRoot, "incoming");
         var readyFiles = Directory.Exists(incoming)
             ? Directory.EnumerateFiles(incoming, "*.ndjson.ready").ToArray()
@@ -54,9 +53,7 @@ public sealed partial class DuckDbEvidenceStore
         var processingFiles = Directory.Exists(incoming)
             ? Directory.EnumerateFiles(incoming, "*.ndjson.processing").ToArray()
             : [];
-        var schedulerSources = (Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES")
-                ?? "nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory")
-            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        var schedulerSources = Options.Scheduler.SourceCodes();
         return new
         {
             storageBackend = "duckdb",
@@ -85,7 +82,7 @@ public sealed partial class DuckDbEvidenceStore
             },
             scheduler = new
             {
-                enabled = string.Equals(Environment.GetEnvironmentVariable("VULTRACK_SCHEDULER_ENABLED"), "true", StringComparison.OrdinalIgnoreCase),
+                enabled = Options.Scheduler.Enabled,
                 sources = schedulerSources,
                 sourceStatus = schedulerSources.Select(source => ReadSpoolSourceStatus(spoolRoot, source)).ToArray()
             }

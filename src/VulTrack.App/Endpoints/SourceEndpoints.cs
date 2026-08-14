@@ -6,17 +6,14 @@ public static class SourceEndpoints
 {
     public static WebApplication MapSourceEndpoints(this WebApplication app)
     {
-        app.MapGet("/api/v1/source.list", () => ApiResult.Ok(DuckDbConfiguredSources()));
+        app.MapGet("/api/v1/source.list", (VulTrackOptions options) => ApiResult.Ok(DuckDbConfiguredSources(options)));
         return app;
     }
 
-    internal static object[] DuckDbConfiguredSources()
+    internal static object[] DuckDbConfiguredSources(VulTrackOptions options)
     {
-        var spoolRoot = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH")
-            ?? Path.Combine(Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT") ?? Directory.GetCurrentDirectory(), "data", "spool");
-        return (Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES") ?? "nvd-cve,osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory")
-            .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
+        var spoolRoot = options.ResolveSpoolRoot();
+        return options.Scheduler.SourceCodes()
             .Select(code =>
             {
                 JsonNode? state = null;
