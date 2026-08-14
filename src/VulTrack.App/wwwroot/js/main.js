@@ -24,7 +24,7 @@ import { runVulnerabilitySearch, loadVulnerabilityByIdentifier, keepCurrentDetai
 import { runComponentSearch } from './components.js';
 import { loadSbomList } from './sbom.js';
 import { loadStatus, loadStatusPage } from './status.js';
-import { loadAdminPage } from './admin.js';
+import { loadAdminPage, stopAdminAutoRefresh } from './admin.js';
 
 el.themeSwatches.forEach((button) => {
   button.addEventListener('click', () => {
@@ -127,6 +127,7 @@ function activateMode(tab, options = {}) {
   if (!tab) return;
   setDetailOnlyView(false);
   state.mode = tab.dataset.mode;
+  if (state.mode !== 'admin') stopAdminAutoRefresh();
   if (state.mode !== 'sbom') setSbomDetailView(false);
   document.body.dataset.mode = state.mode;
   state.page = 1;

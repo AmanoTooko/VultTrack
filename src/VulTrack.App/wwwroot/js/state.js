@@ -239,10 +239,10 @@ export function syntaxHintHtml(mode) {
       ['Sources', 'Schedule and latest run']
     ],
     admin: [
-      ['Sources', 'Enable or disable'],
-      ['Run mode', 'scheduled, manual, or init'],
-      ['Schedule', 'cron expression'],
-      ['Save', 'Persist source settings']
+      ['Overview', 'Store stats and runtime'],
+      ['Sources', 'Fetcher status by category'],
+      ['Coverage', 'Per-source and ecosystem'],
+      ['Operations', 'Spool ingest, catalog rebuild']
     ]
   }[mode] || [];
   return items.map(([label, value]) => `<span>${escapeHtml(label)} <code>${escapeHtml(value)}</code></span>`).join('');
@@ -254,7 +254,7 @@ export function modeTitle(mode) {
     component: 'Components',
     sbom: 'SBOM uploads',
     status: 'Pipeline status',
-    admin: 'Fetcher administration'
+    admin: 'Administration'
   }[mode] || 'Vulnerabilities';
 }
 
@@ -264,7 +264,7 @@ export function modeDescription(mode) {
     component: 'Search package names, purl coordinates, vendor hints, ecosystems, and versions.',
     sbom: 'Upload, match, inspect, and export CycloneDX SBOM findings with PURL and CPE evidence.',
     status: 'Fast source snapshot with optional exact counts for raw-row queues.',
-    admin: 'Review fetcher sources and save enablement, run mode, and schedule settings.'
+    admin: 'Evidence store overview, fetcher source health, coverage, and maintenance operations.'
   }[mode] || '';
 }
 
