@@ -24,7 +24,8 @@ import {
   renderExternalLink,
   renderDataGap,
   sourceTag,
-  formatJsonKey
+  formatJsonKey,
+  renderSkeletonDetail
 } from './format.js';
 
 export async function runVulnerabilitySearch(query) {
@@ -70,7 +71,7 @@ export function bindVulnerabilityLinks(container) {
 export async function loadVulnerabilityByIdentifier(identifier, options = {}) {
   setDetailOnlyView(true);
   showDetailPane();
-  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading</h2></div>';
+  el.detailPane.innerHTML = renderSkeletonDetail();
   try {
     const item = await api(`/api/v1/vulnerability.getByIdentifier?identifier=${encodeURIComponent(identifier)}`);
     const data = await loadVulnerabilityDetail(item.id, { identifier: item.primaryIdentifier, updateRoute: false, section: options.section });
@@ -87,7 +88,7 @@ export async function loadVulnerabilityDetail(id, options = {}) {
     item.classList.toggle('is-active', item.dataset.vulnerabilityId === id);
   });
   showDetailPane();
-  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading</h2></div>';
+  el.detailPane.innerHTML = renderSkeletonDetail();
   try {
     const data = await api(`/api/v1/vulnerability.detail?id=${encodeURIComponent(id)}&source=duckdb`);
     renderDetail(data);
@@ -102,20 +103,29 @@ export async function loadVulnerabilityDetail(id, options = {}) {
 }
 
 function vulnerabilityResult(item) {
-  const names = (item.affectedComponentNames || []).slice(0, 3);
+  const allNames = item.affectedComponentNames || [];
+  const names = allNames.slice(0, 2);
+  const extraCount = Math.max(0, Number(item.affectedComponentCount || allNames.length) - names.length);
   const displayId = displayIdentifier(item);
+  const klass = severityClass(item.severityLabel, item.maxCvssScore);
   return `
-    <a class="result-item" href="${cveRoute(displayId)}" data-vulnerability-id="${escapeAttr(item.id)}" data-vulnerability-identifier="${escapeAttr(displayId)}">
-      <div class="result-main">
-        <span class="result-title">${escapeHtml(displayId)}</span>
-        ${severityBadge(item.severityLabel, item.maxCvssScore)}
+    <a class="result-item vuln-item" href="${cveRoute(displayId)}" data-vulnerability-id="${escapeAttr(item.id)}" data-vulnerability-identifier="${escapeAttr(displayId)}">
+      <div class="vuln-sev">
+        <span class="badge ${klass} vuln-sev-badge">${escapeHtml(item.severityLabel || 'unrated')}</span>
+        <span class="cvss-chip" title="Max CVSS score">${item.maxCvssScore != null ? Number(item.maxCvssScore).toFixed(1) : 'N/A'}</span>
       </div>
-      <div class="result-summary">${escapeHtml(item.title || '')}</div>
-      <div class="result-meta">
-        ${item.publishedAt ? `<span class="badge">published ${date(item.publishedAt)}</span>` : ''}
-        ${item.modifiedAt ? `<span class="badge">updated ${date(item.modifiedAt)}</span>` : ''}
-        ${names.length ? `<span class="badge" title="${escapeAttr(names.join(', '))}">${escapeHtml(names.join(', '))}</span>` : ''}
-        ${item.affectedComponentCount ? `<span class="badge muted">${fmt(item.affectedComponentCount)} affected</span>` : ''}
+      <div class="vuln-body">
+        <div class="vuln-head">
+          <span class="result-title vuln-id">${escapeHtml(displayId)}</span>
+          <span class="vuln-date" title="published ${date(item.publishedAt)}">upd ${date(item.modifiedAt)}</span>
+        </div>
+        <div class="result-summary">${escapeHtml(item.title || '')}</div>
+        ${names.length ? `
+          <div class="result-meta vuln-chips">
+            ${names.map(name => `<span class="badge vuln-chip" title="${escapeAttr(allNames.join(', '))}">${escapeHtml(name)}</span>`).join('')}
+            ${extraCount ? `<span class="badge none vuln-chip-more">+${fmt(extraCount)}</span>` : ''}
+          </div>
+        ` : ''}
       </div>
     </a>
   `;

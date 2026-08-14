@@ -19,7 +19,7 @@ import {
   searchRoute,
   modeRoute
 } from './state.js';
-import { escapeHtml } from './format.js';
+import { escapeHtml, renderSkeletonRows } from './format.js';
 import { runVulnerabilitySearch, loadVulnerabilityByIdentifier, keepCurrentDetailSectionAnchored } from './vulnerabilities.js';
 import { runComponentSearch } from './components.js';
 import { loadSbomList } from './sbom.js';
@@ -176,7 +176,7 @@ async function runSearch(options = {}) {
   hideDetailPane();
   updatePager();
   if (el.resultsMeta) el.resultsMeta.textContent = searchMetaText(query);
-  el.resultList.innerHTML = '<div class="muted result-item">Loading</div>';
+  el.resultList.innerHTML = renderSkeletonRows(6);
   try {
     if (state.mode === 'component') {
       await runComponentSearch(query);

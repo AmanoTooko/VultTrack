@@ -6,7 +6,7 @@ import {
   renderAuthRequired,
   bindLoginPrompt
 } from './state.js';
-import { escapeHtml, escapeAttr, fmt, dateTime, slug } from './format.js';
+import { escapeHtml, escapeAttr, fmt, dateTime, slug, renderSkeletonDetail } from './format.js';
 
 export async function loadStatus() {
   try {
@@ -34,7 +34,7 @@ export async function loadStatusPage() {
     bindLoginPrompt();
     return;
   }
-  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading status</h2></div>';
+  el.detailPane.innerHTML = renderSkeletonDetail();
   try {
     const data = await api('/api/v1/system.status?fast=true');
     state.statusData = data;
@@ -47,7 +47,7 @@ export async function loadStatusPage() {
 
 async function loadExactStatusPage() {
   showDetailPane();
-  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading exact status</h2><p>This scans raw status rows and can take a few seconds.</p></div>';
+  el.detailPane.innerHTML = `${renderSkeletonDetail()}<p class="muted skeleton-note">Exact refresh scans raw status rows and can take a few seconds.</p>`;
   try {
     const data = await api('/api/v1/system.status');
     state.statusData = data;
@@ -180,7 +180,7 @@ function renderSourceStatusRow(source) {
   return `
     <div class="source-status-row" id="source-${escapeAttr(slug(source.code))}">
       <div class="source-name-cell">
-        <strong>${escapeHtml(source.code)}</strong>
+        <strong><span class="status-dot ${statusClass}" aria-hidden="true"></span>${escapeHtml(source.code)}</strong>
         <small>${escapeHtml(source.name || source.pluginName || '')}</small>
       </div>
       <div>

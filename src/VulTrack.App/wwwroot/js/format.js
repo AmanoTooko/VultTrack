@@ -203,6 +203,45 @@ export function sourceTag(code) {
   return `<span class="badge tag-source">${escapeHtml(code || '?')}</span>`;
 }
 
+export function renderSkeletonRows(count = 6) {
+  const rows = [];
+  for (let i = 0; i < count; i += 1) {
+    rows.push(`
+      <div class="skeleton-row" aria-hidden="true">
+        <div class="skeleton-side">
+          <span class="skeleton skeleton-badge"></span>
+          <span class="skeleton skeleton-chip"></span>
+        </div>
+        <div class="skeleton-lines">
+          <span class="skeleton skeleton-line w-35"></span>
+          <span class="skeleton skeleton-line w-90"></span>
+          <span class="skeleton skeleton-line w-60"></span>
+        </div>
+      </div>
+    `);
+  }
+  return `<div class="skeleton-list" role="status" aria-label="Loading">${rows.join('')}</div>`;
+}
+
+export function renderSkeletonDetail() {
+  return `
+    <div class="skeleton-detail" role="status" aria-label="Loading">
+      <div class="skeleton skeleton-hero" aria-hidden="true"></div>
+      <div class="skeleton-grid" aria-hidden="true">
+        <span class="skeleton skeleton-card"></span>
+        <span class="skeleton skeleton-card"></span>
+        <span class="skeleton skeleton-card"></span>
+        <span class="skeleton skeleton-card"></span>
+      </div>
+      <div class="skeleton-lines" aria-hidden="true">
+        <span class="skeleton skeleton-line w-70"></span>
+        <span class="skeleton skeleton-line w-90"></span>
+        <span class="skeleton skeleton-line w-50"></span>
+      </div>
+    </div>
+  `;
+}
+
 export function formatJsonKey(value) {
   return String(value)
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')

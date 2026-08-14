@@ -10,7 +10,7 @@ import {
   modeRoute,
   modeDescription
 } from './state.js';
-import { escapeHtml, escapeAttr, date, severityBadge } from './format.js';
+import { escapeHtml, escapeAttr, date, severityBadge, renderSkeletonDetail } from './format.js';
 import { bindVulnerabilityLinks, displayIdentifier } from './vulnerabilities.js';
 
 export async function loadSbomList(options = {}) {
@@ -94,7 +94,7 @@ function setupSbomUpload() {
 export async function loadSbomDetail(sbomId, options = {}) {
   setSbomDetailView(true);
   showDetailPane();
-  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading...</h2></div>';
+  el.detailPane.innerHTML = renderSkeletonDetail();
   try {
     const data = await api(`/api/v1/sbom.get?id=${encodeURIComponent(sbomId)}`);
     renderSbomDetail(data, sbomId);

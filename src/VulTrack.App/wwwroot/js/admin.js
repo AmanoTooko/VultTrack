@@ -7,11 +7,15 @@ import {
   bindLoginPrompt,
   modeDescription
 } from './state.js';
-import { escapeHtml, escapeAttr, fmt, dateTime } from './format.js';
+import { escapeHtml, escapeAttr, fmt, dateTime, renderSkeletonDetail } from './format.js';
 
 const ADMIN_REFRESH_MS = 30_000;
+const ECO_TOP_COUNT = 20;
 let adminRefreshTimer = null;
 let adminBusy = false;
+let ecoCoverageRows = [];
+let ecoFilterText = '';
+let ecoShowAll = false;
 
 export function stopAdminAutoRefresh() {
   if (adminRefreshTimer) {
@@ -30,7 +34,7 @@ export async function loadAdminPage() {
     bindLoginPrompt();
     return;
   }
-  el.detailPane.innerHTML = '<div class="empty-state"><h2>Loading dashboard</h2></div>';
+  el.detailPane.innerHTML = renderSkeletonDetail();
   try {
     await refreshAdminDashboard({ silent: false });
     adminRefreshTimer = setInterval(() => {
@@ -82,6 +86,7 @@ function renderAdminDashboard(data, failures, silent) {
     </article>
   `;
   bindAdminOperations();
+  bindEcoCoverageControls();
 }
 
 function renderAdminHero(data) {
@@ -364,7 +369,10 @@ function renderCoverageSection(coverage) {
     `;
   }
   const sources = Array.isArray(coverage.sources) ? coverage.sources : [];
-  const ecosystems = Array.isArray(coverage.ecosystems) ? coverage.ecosystems : [];
+  const ecosystems = (Array.isArray(coverage.ecosystems) ? coverage.ecosystems : [])
+    .slice()
+    .sort((a, b) => Number(b.components || 0) - Number(a.components || 0));
+  ecoCoverageRows = ecosystems;
   const maxRecords = Math.max(1, ...sources.map(row => Number(row.records || 0)));
   return `
     <section class="detail-section" aria-labelledby="adminCoverageHeading">
@@ -374,8 +382,11 @@ function renderCoverageSection(coverage) {
       </div>
       <div class="admin-coverage-grid">
         <div class="admin-coverage-panel">
-          <h4 class="admin-coverage-title">Records per source</h4>
-          <div class="admin-table-scroll">
+          <div class="section-title-row">
+            <h4 class="admin-coverage-title">Records per source</h4>
+            <span class="badge">${fmt(sources.length)}</span>
+          </div>
+          <div class="admin-table-scroll admin-coverage-scroll">
             <table class="table admin-coverage-table">
               <thead>
                 <tr><th scope="col">Source</th><th scope="col">Records</th><th scope="col">Vulnerabilities</th><th scope="col">Latest modified</th></tr>
@@ -401,30 +412,88 @@ function renderCoverageSection(coverage) {
           </div>
         </div>
         <div class="admin-coverage-panel">
-          <h4 class="admin-coverage-title">Ecosystem coverage</h4>
-          <div class="admin-table-scroll">
-            <table class="table admin-coverage-table">
+          <div class="section-title-row">
+            <h4 class="admin-coverage-title">Ecosystem coverage</h4>
+            <span class="badge">${fmt(ecosystems.length)}</span>
+          </div>
+          <div class="admin-coverage-tools">
+            <input id="ecoCoverageFilter" class="coverage-filter" type="search" autocomplete="off" placeholder="Filter ecosystems" aria-label="Filter ecosystems">
+            <button id="ecoCoverageToggle" class="tab" type="button" aria-pressed="false"></button>
+          </div>
+          <div class="admin-table-scroll admin-coverage-scroll">
+            <table class="table admin-coverage-table admin-coverage-eco">
               <thead>
                 <tr><th scope="col">Ecosystem</th><th scope="col">Components</th><th scope="col">Vulns</th><th scope="col">Ranged</th><th scope="col">PURL</th><th scope="col">CPE</th></tr>
               </thead>
-              <tbody>
-                ${ecosystems.length ? ecosystems.map(row => `
-                  <tr>
-                    <td>${escapeHtml(row.ecosystem)}</td>
-                    <td>${fmt(row.components)}</td>
-                    <td>${fmt(row.vulnerabilities)}</td>
-                    <td>${pctShare(row.ranged_components, row.components)}</td>
-                    <td>${pctShare(row.purl_components, row.components)}</td>
-                    <td>${pctShare(row.cpe_components, row.components)}</td>
-                  </tr>
-                `).join('') : '<tr><td colspan="6" class="muted">No affected components yet</td></tr>'}
-              </tbody>
+              <tbody id="ecoCoverageBody"></tbody>
             </table>
           </div>
+          <p class="admin-coverage-note muted" id="ecoCoverageNote"></p>
         </div>
       </div>
     </section>
   `;
+}
+
+function ecoCoverageRowHtml(row) {
+  return `
+    <tr>
+      <td>${escapeHtml(row.ecosystem)}</td>
+      <td>${fmt(row.components)}</td>
+      <td>${fmt(row.vulnerabilities)}</td>
+      <td>${pctShare(row.ranged_components, row.components)}</td>
+      <td>${pctShare(row.purl_components, row.components)}</td>
+      <td>${pctShare(row.cpe_components, row.components)}</td>
+    </tr>
+  `;
+}
+
+function bindEcoCoverageControls() {
+  const filterInput = el.detailPane.querySelector('#ecoCoverageFilter');
+  const toggle = el.detailPane.querySelector('#ecoCoverageToggle');
+  if (!filterInput && !toggle) return;
+  if (filterInput) {
+    filterInput.value = ecoFilterText;
+    filterInput.addEventListener('input', () => {
+      ecoFilterText = filterInput.value;
+      refreshEcoCoverageTable();
+    });
+  }
+  if (toggle) {
+    toggle.addEventListener('click', () => {
+      ecoShowAll = !ecoShowAll;
+      refreshEcoCoverageTable();
+    });
+  }
+  refreshEcoCoverageTable();
+}
+
+function refreshEcoCoverageTable() {
+  const body = el.detailPane.querySelector('#ecoCoverageBody');
+  if (!body) return;
+  const toggle = el.detailPane.querySelector('#ecoCoverageToggle');
+  const note = el.detailPane.querySelector('#ecoCoverageNote');
+  const filter = ecoFilterText.trim().toLowerCase();
+  const matched = filter
+    ? ecoCoverageRows.filter(row => String(row.ecosystem || '').toLowerCase().includes(filter))
+    : ecoCoverageRows;
+  const limited = !filter && !ecoShowAll && matched.length > ECO_TOP_COUNT;
+  const visible = limited ? matched.slice(0, ECO_TOP_COUNT) : matched;
+  body.innerHTML = visible.length
+    ? visible.map(ecoCoverageRowHtml).join('')
+    : `<tr><td colspan="6" class="muted">${filter ? 'No ecosystems match this filter' : 'No affected components yet'}</td></tr>`;
+  if (toggle) {
+    toggle.hidden = Boolean(filter) || ecoCoverageRows.length <= ECO_TOP_COUNT;
+    toggle.textContent = ecoShowAll ? `Show top ${ECO_TOP_COUNT}` : `Show all ${fmt(matched.length)}`;
+    toggle.setAttribute('aria-pressed', String(ecoShowAll));
+  }
+  if (note) {
+    note.textContent = filter
+      ? `${fmt(visible.length)} of ${fmt(ecoCoverageRows.length)} ecosystems match`
+      : limited
+        ? `Top ${ECO_TOP_COUNT} of ${fmt(ecoCoverageRows.length)} ecosystems by component count`
+        : `${fmt(ecoCoverageRows.length)} ecosystems`;
+  }
 }
 
 function pctShare(part, total) {

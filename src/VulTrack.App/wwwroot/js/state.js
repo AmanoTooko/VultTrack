@@ -86,9 +86,11 @@ export function applyThemeColor(color) {
   const normalized = normalizeHexColor(color) || '#1f5f8b';
   state.themeColor = normalized;
   localStorage.setItem('vultrack.themeColor', normalized);
-  document.documentElement.style.setProperty('--accent', normalized);
-  document.documentElement.style.setProperty('--accent-soft', mixHex(normalized, '#ffffff', 0.84));
-  document.documentElement.style.setProperty('--accent-wash', mixHex(normalized, '#ffffff', 0.94));
+  const rootStyle = document.documentElement.style;
+  rootStyle.setProperty('--accent', normalized);
+  rootStyle.setProperty('--accent-bright', mixHex(normalized, '#ffffff', 0.42));
+  rootStyle.setProperty('--accent-soft', mixHex(normalized, '#0a0f15', 0.78));
+  rootStyle.setProperty('--accent-wash', mixHex(normalized, '#0a0f15', 0.92));
   if (el.themeColorInput) el.themeColorInput.value = normalized;
   el.themeSwatches.forEach((button) => {
     button.classList.toggle('is-active', normalizeHexColor(button.dataset.themeColor) === normalized);
