@@ -9,11 +9,12 @@ public sealed class DuckDbFirstScheduler(
     ILogger<DuckDbFirstScheduler> logger) : BackgroundService
 {
     private readonly SemaphoreSlim cycleLock = new(1, 1);
+    private readonly HashSet<string> deferredChangedKeys = new(StringComparer.OrdinalIgnoreCase);
+    private bool deferredFullCatalogRebuild;
+    private bool deferredAffectedRebuild;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!string.Equals(Environment.GetEnvironmentVariable("VULTRACK_STORAGE_BACKEND"), "duckdb", StringComparison.OrdinalIgnoreCase))
-            return;
         if (!EnvBool("VULTRACK_SCHEDULER_ENABLED", false))
         {
             logger.LogInformation("DuckDB-first scheduler is disabled.");
@@ -23,6 +24,7 @@ public sealed class DuckDbFirstScheduler(
         var interval = TimeSpan.FromSeconds(EnvInt("DUCKDB_FETCH_INTERVAL_SECONDS", 21600, 60));
         var initialDelay = TimeSpan.FromSeconds(EnvInt("DUCKDB_FETCH_INITIAL_DELAY_SECONDS", 15, 0));
         await ConsumeReadyFilesAsync(stoppingToken);
+        await FlushDeferredCatalogRebuildAsync(stoppingToken);
         if (initialDelay > TimeSpan.Zero) await Task.Delay(initialDelay, stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
@@ -75,6 +77,7 @@ public sealed class DuckDbFirstScheduler(
                     logger.LogError(ex, "DuckDB-first scheduled source {SourceCode} failed; continuing with the remaining sources.", source);
                 }
             }
+            await FlushDeferredCatalogRebuildAsync(ct);
         }
         finally
         {
@@ -90,6 +93,7 @@ public sealed class DuckDbFirstScheduler(
         {
             await RunFetcherAsync(sourceCode, force, ct);
             await ConsumeReadyFilesAsync(ct);
+            await FlushDeferredCatalogRebuildAsync(ct);
         }
         finally
         {
@@ -111,12 +115,45 @@ public sealed class DuckDbFirstScheduler(
         }
         while (Directory.Exists(SpoolIncomingPath()) && HasGenericReadyFiles())
         {
-            var result = await normalizer.IngestSpoolAsync(new DuckDbSpoolIngestRequest(BatchSize: 5000, MaxFiles: 1000), ct);
+            var result = await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(BatchSize: 5000, MaxFiles: 1000, DeferCatalogRebuild: true), ct);
             if (result.files.Count == 0) break;
+            deferredChangedKeys.UnionWith(result.deferredChangedKeys);
+            deferredFullCatalogRebuild |= result.deferredFullCatalogRebuild;
+            deferredAffectedRebuild |= result.deferredAffectedRebuild;
             logger.LogInformation(
-                "DuckDB-first scheduler consumed {Files} files; catalog={Vulnerabilities}, facts={Facts}.",
-                result.files.Count, result.catalog.Vulnerabilities, result.evidence.affectedFacts);
+                "DuckDB-first scheduler consumed {Files} files; changedKeys={ChangedKeys} (catalog rebuild deferred to cycle end).",
+                result.files.Count, result.deferredChangedKeys.Count);
         }
+    }
+
+    private async Task FlushDeferredCatalogRebuildAsync(CancellationToken ct)
+    {
+        if (deferredChangedKeys.Count == 0 && !deferredFullCatalogRebuild && !deferredAffectedRebuild) return;
+        var changedKeys = deferredChangedKeys.ToArray();
+        var fullCatalogRebuild = deferredFullCatalogRebuild
+            || changedKeys.Length > DuckDbEvidenceNormalizer.FullCatalogRebuildKeyThreshold;
+        var requiresAffectedRebuild = deferredAffectedRebuild;
+        deferredChangedKeys.Clear();
+        deferredFullCatalogRebuild = false;
+        deferredAffectedRebuild = false;
+
+        logger.LogInformation(
+            "DuckDB-first deferred catalog rebuild starting: changedKeys={ChangedKeys}, fullRebuild={FullRebuild}, affectedRebuild={AffectedRebuild}.",
+            changedKeys.Length, fullCatalogRebuild, requiresAffectedRebuild);
+        var catalog = fullCatalogRebuild
+            ? await store.RebuildCatalogAsync(ct)
+            : await store.RebuildCatalogForKeysAsync(changedKeys, ct);
+        if (requiresAffectedRebuild)
+        {
+            if (fullCatalogRebuild)
+                await store.RebuildAffectedComponentsFromCatalogAsync(ct);
+            else
+                await store.RebuildAffectedComponentsForKeysAsync(changedKeys, ct);
+        }
+        logger.LogInformation(
+            "DuckDB-first deferred catalog rebuild completed: vulnerabilities={Vulnerabilities}, identifiers={Identifiers}.",
+            catalog.Vulnerabilities, catalog.Identifiers);
     }
 
     private async Task RunFetcherAsync(string sourceCode, bool force, CancellationToken ct)

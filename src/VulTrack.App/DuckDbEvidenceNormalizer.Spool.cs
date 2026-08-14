@@ -6,7 +6,12 @@ using System.Text.RegularExpressions;
 
 namespace VulTrack.App;
 
-public sealed record DuckDbSpoolIngestRequest(string? File = null, int BatchSize = 2000, int MaxFiles = 1, bool DeleteOnSuccess = true);
+public sealed record DuckDbSpoolIngestRequest(
+    string? File = null,
+    int BatchSize = 2000,
+    int MaxFiles = 1,
+    bool DeleteOnSuccess = true,
+    bool DeferCatalogRebuild = false);
 
 public sealed record DuckDbSpoolFileResult(
     string file,
@@ -21,10 +26,14 @@ public sealed record DuckDbSpoolIngestResult(
     bool ok,
     IReadOnlyList<DuckDbSpoolFileResult> files,
     DuckDbCatalogStats catalog,
-    DuckDbEvidenceStats evidence);
+    DuckDbEvidenceStats evidence,
+    IReadOnlyList<string> deferredChangedKeys,
+    bool deferredFullCatalogRebuild,
+    bool deferredAffectedRebuild);
 
 public sealed partial class DuckDbEvidenceNormalizer
 {
+    internal const int FullCatalogRebuildKeyThreshold = 50_000;
     private sealed record SpoolFileIngestOutcome(
         DuckDbSpoolFileResult Result,
         IReadOnlySet<string> ChangedKeys,
@@ -70,16 +79,27 @@ public sealed partial class DuckDbEvidenceNormalizer
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
             var fullCatalogRebuild = outcomes.Any(outcome => outcome.RequiresFullCatalogRebuild)
-                || changedKeys.Length > 50_000;
-            var catalog = fullCatalogRebuild
-                ? await store.RebuildCatalogAsync(ct)
-                : await store.RebuildCatalogForKeysAsync(changedKeys, ct);
-            if (outcomes.Any(outcome => outcome.RequiresAffectedRebuild))
+                || changedKeys.Length > FullCatalogRebuildKeyThreshold;
+            var requiresAffectedRebuild = outcomes.Any(outcome => outcome.RequiresAffectedRebuild);
+            var catalog = new DuckDbCatalogStats(0, 0, 0);
+            if (request.DeferCatalogRebuild)
             {
-                if (fullCatalogRebuild)
-                    await store.RebuildAffectedComponentsFromCatalogAsync(ct);
-                else
-                    await store.RebuildAffectedComponentsForKeysAsync(changedKeys, ct);
+                logger.LogInformation(
+                    "DuckDB-first catalog rebuild deferred: changedKeys={ChangedKeys}, fullRebuild={FullRebuild}, affectedRebuild={AffectedRebuild}.",
+                    changedKeys.Length, fullCatalogRebuild, requiresAffectedRebuild);
+            }
+            else
+            {
+                catalog = fullCatalogRebuild
+                    ? await store.RebuildCatalogAsync(ct)
+                    : await store.RebuildCatalogForKeysAsync(changedKeys, ct);
+                if (requiresAffectedRebuild)
+                {
+                    if (fullCatalogRebuild)
+                        await store.RebuildAffectedComponentsFromCatalogAsync(ct);
+                    else
+                        await store.RebuildAffectedComponentsForKeysAsync(changedKeys, ct);
+                }
             }
 
             FinalizeStagedFiles(outcomes, request.DeleteOnSuccess);
@@ -88,7 +108,10 @@ public sealed partial class DuckDbEvidenceNormalizer
                 true,
                 outcomes.Select(outcome => outcome.Result).ToArray(),
                 catalog,
-                await store.StatsAsync(ct));
+                await store.StatsAsync(ct),
+                changedKeys,
+                fullCatalogRebuild,
+                requiresAffectedRebuild);
         }
         catch
         {

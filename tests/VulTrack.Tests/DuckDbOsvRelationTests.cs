@@ -97,6 +97,52 @@ public sealed class DuckDbOsvRelationTests
         }
     }
 
+    [Fact]
+    public async Task DeferredIngest_ReturnsChangedKeysWithoutRebuildingCatalog()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-deferred-tests", Guid.NewGuid().ToString("N"));
+        var previousSpoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
+        Directory.CreateDirectory(Path.Combine(root, "incoming"));
+        Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "deferred.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var normalizer = new DuckDbEvidenceNormalizer(
+                new UnusedServiceProvider(), store, NullLogger<DuckDbEvidenceNormalizer>.Instance);
+
+            var fileName = "osv-deferred-s0000.ndjson.ready";
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "incoming", fileName),
+                SpoolLine() + Environment.NewLine);
+            var result = await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true, DeferCatalogRebuild: true),
+                CancellationToken.None);
+
+            Assert.True(result.ok);
+            Assert.False(result.deferredFullCatalogRebuild);
+            Assert.True(result.deferredAffectedRebuild);
+            var changedKey = Assert.Single(result.deferredChangedKeys);
+            Assert.Equal("DEBIAN-CVE-2026-10001", changedKey);
+            Assert.Null(await store.GetCatalogByIdentifierAsync("DEBIAN-CVE-2026-10001", CancellationToken.None));
+
+            await store.RebuildCatalogForKeysAsync(result.deferredChangedKeys, CancellationToken.None);
+            await store.RebuildAffectedComponentsForKeysAsync(result.deferredChangedKeys, CancellationToken.None);
+            Assert.NotNull(await store.GetCatalogByIdentifierAsync("DEBIAN-CVE-2026-10001", CancellationToken.None));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", previousSpoolPath);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     private static string SpoolLine() => JsonSerializer.Serialize(new
     {
         schemaVersion = 1,

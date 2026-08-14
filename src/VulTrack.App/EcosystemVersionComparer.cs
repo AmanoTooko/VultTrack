@@ -5,8 +5,16 @@ namespace VulTrack.App;
 
 public static class EcosystemVersionComparer
 {
+    public const int CacheCapacity = 65_536;
     private static readonly ConcurrentDictionary<string, bool?> Cache = new();
     private static readonly Regex ConstraintPattern = new(@"(<=|>=|==|=|<|>)\s*([^\s,]+)", RegexOptions.Compiled);
+
+    private static void CacheResult(string cacheKey, bool? result)
+    {
+        // Bounded cache: once the cap is hit, drop everything and start over.
+        if (Cache.Count >= CacheCapacity) Cache.Clear();
+        Cache.TryAdd(cacheKey, result);
+    }
 
     public static bool? Matches(string version, string? range, string? ecosystem = null)
     {
@@ -26,7 +34,7 @@ public static class EcosystemVersionComparer
                 var exactHashMatch = constraint.Op is "=" or "==" &&
                                      string.Equals(NormalizeCommitLikeVersion(version), NormalizeCommitLikeVersion(constraint.Version), StringComparison.OrdinalIgnoreCase);
                 if (exactHashMatch) continue;
-                Cache.TryAdd(cacheKey, null);
+                CacheResult(cacheKey, null);
                 return null;
             }
 
@@ -42,12 +50,12 @@ public static class EcosystemVersionComparer
             };
             if (!matched)
             {
-                Cache.TryAdd(cacheKey, false);
+                CacheResult(cacheKey, false);
                 return false;
             }
         }
 
-        Cache.TryAdd(cacheKey, true);
+        CacheResult(cacheKey, true);
         return true;
     }
 

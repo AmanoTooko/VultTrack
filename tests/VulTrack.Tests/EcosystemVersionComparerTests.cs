@@ -63,4 +63,14 @@ public class EcosystemVersionComparerTests
         Assert.True(EcosystemVersionComparer.Matches("a1b2c3d", "= a1b2c3d", "npm"));
         Assert.Null(EcosystemVersionComparer.Matches("a1b2c3d", "= deadbee", "npm"));
     }
+
+    [Fact]
+    public void Cache_IsBoundedAndStaysCorrectAfterEviction()
+    {
+        for (var i = 0; i < EcosystemVersionComparer.CacheCapacity + 100; i++)
+            Assert.True(EcosystemVersionComparer.Matches($"10.0.{i}", "> 1.0.0", "npm"));
+
+        Assert.True(EcosystemVersionComparer.Matches("1.2.3", "< 2.0.0", "npm"));
+        Assert.False(EcosystemVersionComparer.Matches("2.0.0", "< 2.0.0", "npm"));
+    }
 }

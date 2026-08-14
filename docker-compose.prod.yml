@@ -16,6 +16,8 @@ services:
       VULTRACK_STORAGE_BACKEND: duckdb
       VULTRACK_DUCKDB_ENABLED: "true"
       VULTRACK_DUCKDB_PATH: /workspace/data/duckdb/vultrack.duckdb
+      VULTRACK_DUCKDB_MEMORY_LIMIT: ${VULTRACK_DUCKDB_MEMORY_LIMIT:-3g}
+      VULTRACK_DUCKDB_THREADS: ${VULTRACK_DUCKDB_THREADS:-4}
       VULTRACK_SPOOL_PATH: /workspace/data/spool
       VULTRACK_STARTUP_MAINTENANCE: "false"
     mem_limit: "5g"
