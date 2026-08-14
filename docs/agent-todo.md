@@ -2,6 +2,8 @@
 
 Last updated: 2026-05-09 Asia/Shanghai.
 
+> **Obsolete:** this file describes the superseded PostgreSQL-first MVP. The current architecture is DuckDB-first; see `docs/design/duckdb-first-architecture.md`. Sections below referencing PostgreSQL staging, `raw.normalizePending`, Adminer, or the PG queue are historical only.
+
 ## Current MVP State
 
 VulTrack has a working fetch -> staging -> normalize -> query path.
@@ -113,6 +115,8 @@ Post-batch database snapshot:
 
 ## Current Runtime Notes
 
+(Obsolete — PostgreSQL/Adminer are removed from the default stack; the runtime is now the single `VulTrack.App` service with embedded DuckDB. See `docs/design/duckdb-first-architecture.md`.)
+
 Local services used during development:
 
 - Postgres: `localhost:5432`, database `vultrack`, user `vultrack`.
@@ -170,8 +174,8 @@ Query and matching:
 
 Scheduler and queue:
 
-- Keep Postgres as the authoritative queue for MVP.
-- Add `FOR UPDATE SKIP LOCKED` claiming for concurrent normalizer workers.
+- (Obsolete — superseded by `DuckDbFirstScheduler`; see `docs/design/duckdb-first-architecture.md`.) ~~Keep Postgres as the authoritative queue for MVP.~~
+- (Obsolete.) ~~Add `FOR UPDATE SKIP LOCKED` claiming for concurrent normalizer workers.~~ DuckDB writes are serialized by the single-writer scheduler instead.
 - Introduce Redis later only as an optional short-lived queue/cache layer, not as the source of truth.
 
 Frontend:

@@ -6,7 +6,7 @@ VulTrack is a vulnerability intelligence pipeline for collecting raw advisories,
 
 - Pluggable Node.js fetchers for NVD, CVE List v5, OSV-family feeds, GHSA, distro advisories, registry package catalogs, EPSS, KEV, and related sources.
 - Atomic NDJSON fetch spool with direct DuckDB catalog, evidence, affected-component, PoC, threat-score, AI, and SBOM storage.
-- .NET API and DuckDB-first normalization engine; PostgreSQL remains available only through legacy deployment manifests.
+- .NET API and DuckDB-first normalization engine; the embedded DuckDB file is the only store (PostgreSQL and Redis are removed from the default stack).
 - Static frontend served either by the .NET app or by the `frontend` nginx container.
 - Operational scripts for database backup/restore, smoke tests, fetcher runs, and full/parallel normalization.
 
@@ -28,7 +28,7 @@ Run tests:
 
 ```bash
 npm test
-docker exec -w /workspace vultrack-api dotnet test tests/VulTrack.Tests/VulTrack.Tests.csproj
+docker run --rm -v $PWD:/src -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet test VulTrack.slnx
 ```
 
 Run fetchers:
@@ -38,7 +38,7 @@ npm run fetch -- --source nvd-cve
 npm run fetch:all:smoke
 ```
 
-Monitor services, fetchers, pending normalization, storage mode, snapshots, and largest PostgreSQL tables:
+Monitor services, fetchers, pending normalization, storage mode, snapshots, and DuckDB file stats:
 
 ```bash
 npm run status
@@ -83,7 +83,8 @@ Migration measurements:
 
 - Fetchers: `plugins/fetchers/`
 - Fetcher guide: `plugins/fetchers/README.md`
-- Database schema: `db/init/001_schema.sql`
+- DuckDB schema: `src/VulTrack.App/DuckDbEvidenceStore.cs` (owned in code; `db/init/*.sql` is the legacy PostgreSQL schema)
+- Current architecture: `docs/design/duckdb-first-architecture.md`
 - API and normalizers: `src/VulTrack.App/`
 - Frontend container: `frontend/`
 - Design docs: `docs/design/`
@@ -98,7 +99,7 @@ Local secrets and machine-specific settings belong in `.env`. Do not commit `.en
 
 Common environment variables:
 
-- `DATABASE_URL`
+- `DATABASE_URL` (legacy PostgreSQL only; not used by the default DuckDB-first stack)
 - `VULTRACK_ADMIN_USERNAME`
 - `VULTRACK_ADMIN_PASSWORD`
 - `NVD_API_KEY`
