@@ -5,6 +5,50 @@ namespace VulTrack.Tests;
 
 public sealed class DuckDbCatalogSearchTests
 {
+    [Fact]
+    public async Task CatalogIdentifierOwnerKeepsIdAndKeyPairedAcrossFullAndKeyedRebuilds()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-catalog-owner-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "catalog.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var firstId = Guid.Parse("ffffffff-ffff-5fff-8fff-ffffffffffff");
+            var secondId = Guid.Parse("00000000-0000-5000-8000-000000000000");
+            var first = CatalogOwnerRecord("ASB-A-100", firstId, ["ASB-A-100", "A-SHARED"]);
+            var second = CatalogOwnerRecord("ASB-A-200", secondId, ["ASB-A-200", "A-SHARED"]);
+
+            await store.ReplaceCatalogRecordsAsync([first, second], CancellationToken.None);
+            await store.RebuildCatalogAsync(CancellationToken.None);
+
+            var fullOwner = await store.GetCatalogByIdentifierAsync("A-SHARED", CancellationToken.None);
+            Assert.NotNull(fullOwner);
+            Assert.Equal("ASB-A-100", fullOwner.PrimaryIdentifier);
+            Assert.Equal(firstId, fullOwner.Id);
+
+            await store.ReplaceCatalogRecordsAsync(
+                [CatalogOwnerRecord("ASB-A-100", firstId, ["ASB-A-100"])],
+                CancellationToken.None);
+            await store.RebuildCatalogForKeysAsync(["ASB-A-100"], CancellationToken.None);
+
+            var keyedOwner = await store.GetCatalogByIdentifierAsync("A-SHARED", CancellationToken.None);
+            Assert.NotNull(keyedOwner);
+            Assert.Equal("ASB-A-200", keyedOwner.PrimaryIdentifier);
+            Assert.Equal(secondId, keyedOwner.Id);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Theory]
     [InlineData("pkg:deb/debian/openssl@3.0.11?distro=debian-12", "debian:12")]
     [InlineData("pkg:deb/ubuntu/openssl@3.0.11?distro=ubuntu-22.04", "ubuntu:22.04")]
@@ -18,6 +62,24 @@ public sealed class DuckDbCatalogSearchTests
 
         Assert.Equal(expectedEcosystem, query.Ecosystem);
     }
+
+    private static DuckDbCatalogRecord CatalogOwnerRecord(
+        string key,
+        Guid id,
+        IReadOnlyList<string> identifiers) =>
+        new(
+            "osv",
+            key,
+            id,
+            key,
+            key,
+            key,
+            "active",
+            "2026-08-16T00:00:00Z",
+            "2026-08-16T00:00:00Z",
+            null,
+            $"{key}-hash",
+            identifiers);
 
     [Fact]
     public async Task ExplicitPurl_WithDistroQualifier_DoesNotCrossDistributionReleases()

@@ -68,6 +68,10 @@ serve an empty catalog.
       relationship evidence and never determine identity. Multiple direct CVEs are retained as
       searchable relation evidence instead of competing canonical aliases. Commit: `b755978` plus
       the GHSA bulk follow-up.
+- [x] Keep catalog identifier ownership internally consistent. Full rebuilds select
+      `vulnerability_id` and `vulnerability_key` from the same canonical owner, and keyed rebuilds
+      globally recompute every shared alias touched by the changed keys. This prevents alias lookup
+      from resolving through one key's ID to a different vulnerability.
 - [ ] Complete the cafemini shadow rebuild from official OSV `all.zip` plus GitHub Advisory
       Database `github-reviewed`, then validate identity, severity, references, affected facts,
       search, and API behavior before switching the cafemini database path. Never rewrite the

@@ -137,7 +137,9 @@ public sealed partial class DuckDbEvidenceStore
                 Execute(connection, "delete from vulnerabilities");
                 Execute(connection, """
                     insert into vulnerability_identifiers (identifier, vulnerability_id, vulnerability_key)
-                    select identifier, min(vulnerability_id), min(vulnerability_key)
+                    select identifier,
+                           arg_min(vulnerability_id, vulnerability_key),
+                           min(vulnerability_key)
                     from source_record_identifiers
                     where regexp_full_match(identifier, '^(CVE-[0-9]{4}-[0-9]{4,}|[A-Z][A-Z0-9_.]*-[A-Z0-9][A-Z0-9_.:-]*)$')
                       and (not starts_with(identifier, 'CVE-') or identifier = vulnerability_key)
@@ -298,23 +300,39 @@ public sealed partial class DuckDbEvidenceStore
                       select id from vulnerabilities where primary_identifier in ({keyList})
                     )
                     """);
-                Execute(connection, $"delete from vulnerability_identifiers where vulnerability_key in ({keyList})");
-                Execute(connection, $"delete from vulnerabilities where primary_identifier in ({keyList})");
                 Execute(connection, $$"""
-                    insert into vulnerability_identifiers (identifier, vulnerability_id, vulnerability_key)
-                    select identifier, min(vulnerability_id), min(vulnerability_key)
+                    create or replace temp table catalog_impacted_identifiers as
+                    select identifier
+                    from vulnerability_identifiers
+                    where vulnerability_key in ({{keyList}})
+                    union
+                    select identifier
                     from source_record_identifiers
                     where vulnerability_key in ({{keyList}})
-                      and regexp_full_match(identifier, '^(CVE-[0-9]{4}-[0-9]{4,}|[A-Z][A-Z0-9_.]*-[A-Z0-9][A-Z0-9_.:-]*)$')
-                      and (not starts_with(identifier, 'CVE-') or identifier = vulnerability_key)
-                      and source_code not in ('exploitdb', 'poc-in-github', 'nuclei-templates', 'metasploit', 'trickest-cve', 'seebug')
+                    """);
+                Execute(connection, """
+                    delete from vulnerability_identifiers
+                    where identifier in (select identifier from catalog_impacted_identifiers)
+                    """);
+                Execute(connection, $"delete from vulnerabilities where primary_identifier in ({keyList})");
+                Execute(connection, """
+                    insert into vulnerability_identifiers (identifier, vulnerability_id, vulnerability_key)
+                    select sri.identifier,
+                           arg_min(sri.vulnerability_id, sri.vulnerability_key),
+                           min(sri.vulnerability_key)
+                    from source_record_identifiers sri
+                    join catalog_impacted_identifiers impacted on impacted.identifier = sri.identifier
+                    where true
+                      and regexp_full_match(sri.identifier, '^(CVE-[0-9]{4}-[0-9]{4,}|[A-Z][A-Z0-9_.]*-[A-Z0-9][A-Z0-9_.:-]*)$')
+                      and (not starts_with(sri.identifier, 'CVE-') or sri.identifier = sri.vulnerability_key)
+                      and sri.source_code not in ('exploitdb', 'poc-in-github', 'nuclei-templates', 'metasploit', 'trickest-cve', 'seebug')
                       and exists (
                         select 1 from source_records s
-                        where s.source_code = source_record_identifiers.source_code
-                          and s.source_record_id = source_record_identifiers.source_record_id
+                        where s.source_code = sri.source_code
+                          and s.source_record_id = sri.source_record_id
                           and coalesce(s.normalizer_version, '') <> 'evidence-projection-unlinked-v1'
                       )
-                    group by identifier
+                    group by sri.identifier
                     """);
                 Execute(connection, $$"""
                     insert into vulnerabilities
@@ -414,6 +432,7 @@ public sealed partial class DuckDbEvidenceStore
                     """);
                 InsertSearchTokensForKeys(connection, keyList);
                 RefreshLatestCatalog(connection);
+                Execute(connection, "drop table catalog_impacted_identifiers");
                 Execute(connection, "commit");
             }
             catch
