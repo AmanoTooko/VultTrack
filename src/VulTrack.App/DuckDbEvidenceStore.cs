@@ -54,6 +54,8 @@ public sealed partial class DuckDbEvidenceStore(IConfiguration configuration, Vu
         try
         {
             using var connection = OpenConnection();
+            foreach (var statement in LegacyArtIndexDropStatements)
+                Execute(connection, statement);
             foreach (var statement in SchemaStatements)
                 Execute(connection, statement);
             foreach (var table in ResetTables)
