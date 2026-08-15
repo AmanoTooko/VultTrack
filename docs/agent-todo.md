@@ -72,6 +72,11 @@ serve an empty catalog.
       Database `github-reviewed`, then validate identity, severity, references, affected facts,
       search, and API behavior before switching the cafemini database path. Never rewrite the
       live 13 GB DuckDB in place.
+      Use `npm run osv:bulk-samples` first to prove real 0/1/2/maximum CVE relation boundaries
+      through the same Normalizer path. The final shadow must start as a consistent copy of the
+      current live database so NVD, EPSS, exploit, and AI evidence are preserved.
+      OSV records that repeat the same IDs in both `upstream` and `related` are projected once as
+      upstream; only relation IDs unique to `related` stay in the related set.
 
 ## P1 — Performance
 

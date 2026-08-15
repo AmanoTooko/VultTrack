@@ -54,6 +54,7 @@ public sealed class DuckDbOsvRelationTests
                 "https://github.com/advisories/GHSA-AAAA-BBBB-0001",
                 detail["references"]![0]!["url"]!.GetValue<string>());
             Assert.Equal("CVE-2026-41999", detail["vulnerability"]!["upstreamIdentifiers"]![0]!.GetValue<string>());
+            Assert.Equal("OSV-2026-RELATED", detail["vulnerability"]!["relatedIdentifiers"]![0]!.GetValue<string>());
 
             var promoted = await store.GetCatalogByIdentifierAsync("GHSA-AAAA-BBBB-0002", CancellationToken.None);
             Assert.NotNull(promoted);
@@ -68,7 +69,7 @@ public sealed class DuckDbOsvRelationTests
             var ambiguousRelations = await store.GetRelationsByVulnerabilityIdsAsync(
                 [ambiguous.Id], CancellationToken.None);
             Assert.Equal(
-                ["CVE-2026-41003", "CVE-2026-41004"],
+                ["CVE-2026-41003", "CVE-2026-41004", "OSV-2026-RELATED"],
                 Assert.Single(ambiguousRelations).Value.RelatedIdentifiers);
         }
         finally
@@ -419,6 +420,7 @@ public sealed class DuckDbOsvRelationTests
                 id = advisoryId,
                 aliases,
                 upstream = new[] { "CVE-2026-41999" },
+                related = new[] { "CVE-2026-41999", "OSV-2026-RELATED" },
                 summary = $"{advisoryId} summary",
                 details = $"{advisoryId} details",
                 severity = new[]

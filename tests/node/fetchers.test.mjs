@@ -192,6 +192,52 @@ test('GHSA repository baseline imports reviewed advisories, segments, and resume
   }
 });
 
+test('OSV bulk selector keeps real boundary categories without duplicating spool records', async () => {
+  const { profileOsvRecord, selectOsvRecords } = await import('../../scripts/select-osv-bulk-samples.mjs');
+  const records = [
+    boundaryOsv('GHSA-AAAA-BBBB-0001', [], []),
+    boundaryOsv('OSV-ONE', ['CVE-2026-10001'], ['CVE-2026-20001']),
+    boundaryOsv('OSV-TWO', ['CVE-2026-10002', 'CVE-2026-10003'], ['CVE-2026-20002', 'CVE-2026-20003']),
+    boundaryOsv(
+      'DEBIAN-CVE-2026-30001',
+      ['CVE-2026-30001', 'CVE-2026-30002', 'CVE-2026-30003'],
+      ['CVE-2026-40001', 'CVE-2026-40002', 'CVE-2026-40003', 'CVE-2026-40004'],
+      true)
+  ];
+
+  const profile = profileOsvRecord(records[3]);
+  assert.equal(profile.embeddedCveId, true);
+  assert.equal(profile.aliasCveCount, 3);
+  assert.equal(profile.upstreamCveCount, 4);
+  assert.equal(profile.hasCompleteEvidence, true);
+
+  const selection = selectOsvRecords(records);
+  assert.equal(selection.totalRecords, 4);
+  assert.deepEqual(selection.aliasCveHistogram, { 0: 1, 1: 1, 2: 1, 3: 1 });
+  assert.deepEqual(selection.upstreamCveHistogram, { 0: 1, 1: 1, 2: 1, 4: 1 });
+  assert.equal(selection.selections['alias-cve-maximum'], 'DEBIAN-CVE-2026-30001');
+  assert.equal(selection.selections['upstream-cve-maximum'], 'DEBIAN-CVE-2026-30001');
+  assert.equal(selection.selections['cve-less-ghsa'], 'GHSA-AAAA-BBBB-0001');
+  assert.equal(selection.selections['embedded-cve-id'], 'DEBIAN-CVE-2026-30001');
+  assert.equal(selection.records.length, 4);
+  assert.deepEqual(
+    selection.records.find((item) => item.profile.id === 'DEBIAN-CVE-2026-30001').categories,
+    ['alias-cve-maximum', 'complete-evidence', 'embedded-cve-id', 'upstream-cve-maximum']);
+});
+
+function boundaryOsv(id, aliases, upstream, complete = false) {
+  return {
+    id,
+    aliases,
+    upstream,
+    ...(complete ? {
+      severity: [{ type: 'CVSS_V3', score: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H' }],
+      references: [{ type: 'ADVISORY', url: `https://example.test/${id}` }],
+      affected: [{ package: { ecosystem: 'npm', name: id.toLowerCase() } }]
+    } : {})
+  };
+}
+
 function ghsaOsv(id, modified) {
   return {
     schema_version: '1.4.0',

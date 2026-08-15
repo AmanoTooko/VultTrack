@@ -169,6 +169,21 @@ FETCHER_INCLUDE_INIT=1 npm run fetch -- --source android-osv-init
 npm run fetch -- --source ghsa-init
 ```
 
+在全量覆盖 shadow DuckDB 前，可先从同一个 OSV `all.zip` 选择真实边界样本。该命令只扫描
+archive，并输出标准 `osv-init` spool 和 `manifest.json`，不会直接写 DuckDB：
+
+```bash
+npm run osv:bulk-samples -- \
+  --zip=data/mirrors/osv-all.zip \
+  --output=data/osv-bulk-samples \
+  --concurrency=8
+```
+
+如果 zip 不存在，脚本会从官方 GCS `all.zip` 下载；`--refresh` 强制更新。manifest 包含
+direct CVE alias 与 upstream CVE 的 0/1/2/最大值样本、完整分布、CVE-less GHSA、identifier
+内嵌 CVE，以及同时具有 severity/references/affected 的记录。生成的 spool 必须先喂给隔离
+sample DuckDB 的真实 Normalizer 验证，不能放入 live spool 目录。
+
 ## 运行所有 Fetcher
 
 `run-all.mjs` 默认动态发现 `sources/*.mjs`，并跳过 `runMode = 'init'` 的初始化源与 `runMode = 'manual'` 的手动源（生产环境由 .NET scheduler 串行调度，不经过 run-all）：

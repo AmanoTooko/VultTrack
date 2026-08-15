@@ -552,7 +552,9 @@ public sealed partial class DuckDbEvidenceNormalizer
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToArray();
                     upstreamIdentifiers = OsvIdentifierExtractor.ExtractUpstream(payload);
-                    relatedIdentifiers = OsvIdentifierExtractor.ExtractRelated(payload);
+                    relatedIdentifiers = OsvIdentifierExtractor.ExtractRelated(payload)
+                        .Except(upstreamIdentifiers, StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
                     if (directCveAliases.Length > 1)
                     {
                         // Several direct CVE aliases are ambiguous identity evidence. Keep the
@@ -562,7 +564,7 @@ public sealed partial class DuckDbEvidenceNormalizer
                             .Distinct(StringComparer.OrdinalIgnoreCase)
                             .ToArray();
                     }
-                    normalizationVersion = "osv-relations-v3";
+                    normalizationVersion = "osv-relations-v4";
                     key = osvId;
                     title = payload["summary"]?.GetValue<string>();
                     description = payload["details"]?.GetValue<string>() ?? title;
@@ -663,7 +665,7 @@ public sealed partial class DuckDbEvidenceNormalizer
             // The original identifier stays below as a searchable alias. Upstream/related IDs are
             // never passed to the resolver because relationships are not identity assertions.
             key = promotedKey;
-            normalizationVersion = "identity-links-v4";
+            normalizationVersion = "identity-links-v5";
         }
         identifiers = identifiers
             .Append(key)
