@@ -28,7 +28,7 @@ public static class AdminEndpoints
         app.MapPost("/api/v1/admin.duckdbAi.import", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore duckDb, DuckDbAiImportRequest request, CancellationToken ct) =>
         {
             if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
-            return ApiResult.Ok(await duckDb.ImportAiAnalysesAsync(request.Path, ct));
+            return ApiResult.Ok(await duckDb.ImportAiAnalysesAsync(request.Path, request.ExpectedRows, ct));
         });
 
         app.MapGet("/api/v1/admin.duckdbEvidence.stats", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, CancellationToken ct) =>

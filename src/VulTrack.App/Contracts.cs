@@ -8,7 +8,7 @@ public sealed record VulnerabilitySearchRequest(
 
 public sealed record AdminLoginRequest(string Username, string Password);
 
-public sealed record DuckDbAiImportRequest(string Path);
+public sealed record DuckDbAiImportRequest(string Path, long? ExpectedRows = null);
 
 public sealed record DuckDbSourceFetchRequest(
     string SourceCode,

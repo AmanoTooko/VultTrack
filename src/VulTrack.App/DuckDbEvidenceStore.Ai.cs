@@ -4,11 +4,22 @@ namespace VulTrack.App;
 
 public sealed partial class DuckDbEvidenceStore
 {
-    public async Task<DuckDbAiImportResult> ImportAiAnalysesAsync(string path, CancellationToken ct)
+    public async Task<DuckDbAiImportResult> ImportAiAnalysesAsync(string path, long? expectedRows, CancellationToken ct)
     {
-        await InitializeAsync(ct);
+        if (expectedRows is <= 0)
+            throw new ArgumentOutOfRangeException(nameof(expectedRows), "Expected rows must be positive when supplied.");
+        var importRoot = Path.GetFullPath(Path.Combine(Options.RepoRoot ?? Directory.GetCurrentDirectory(), "import"));
         var fullPath = Path.GetFullPath(path);
-        if (!File.Exists(fullPath)) throw new FileNotFoundException("AI analysis import file not found.", fullPath);
+        if (!string.Equals(Path.GetDirectoryName(fullPath), importRoot, StringComparison.Ordinal))
+            throw new UnauthorizedAccessException($"AI analysis imports must be regular files directly under {importRoot}.");
+        var importFile = new FileInfo(fullPath);
+        if (!importFile.Exists) throw new FileNotFoundException("AI analysis import file not found.", fullPath);
+        if (importFile.LinkTarget is not null)
+            throw new UnauthorizedAccessException("Symbolic AI analysis import files are not allowed.");
+        if (!fullPath.EndsWith(".csv", StringComparison.OrdinalIgnoreCase)
+            && !fullPath.EndsWith(".csv.gz", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException("AI analysis import file must end in .csv or .csv.gz.");
+        await InitializeAsync(ct);
         await _writeLock.WaitAsync(ct);
         try
         {
@@ -19,6 +30,10 @@ public sealed partial class DuckDbEvidenceStore
                 Execute(connection, "drop table if exists temp_ai_import");
                 Execute(connection, $"create temp table temp_ai_import as select * from read_csv_auto({SqlValue(fullPath)}, header=true, all_varchar=true)");
                 var inputRows = Count(connection, "temp_ai_import");
+                if (inputRows == 0)
+                    throw new InvalidDataException("AI analysis import contains no data rows.");
+                if (expectedRows is not null && inputRows != expectedRows.Value)
+                    throw new InvalidDataException($"AI analysis import row count mismatch: expected={expectedRows.Value}, actual={inputRows}.");
                 using var matchedCommand = connection.CreateCommand();
                 matchedCommand.CommandText = """
                     select count(*)
@@ -52,6 +67,8 @@ public sealed partial class DuckDbEvidenceStore
                     where nullif(trim(i.primary_identifier), '') is not null
                     """);
                 var storedRows = Count(connection, "ai_vulnerability_analyses");
+                if (storedRows != inputRows)
+                    throw new InvalidDataException($"AI analysis import did not preserve every row: input={inputRows}, stored={storedRows}.");
                 Execute(connection, "drop table temp_ai_import");
                 Execute(connection, "commit");
                 return new DuckDbAiImportResult(inputRows, matchedRows, inputRows - matchedRows, storedRows);
