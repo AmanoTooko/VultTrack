@@ -139,15 +139,12 @@ AI 分析是唯一不可从公开源重建的数据。迁移前至少保留 Orac
 （压缩文件共 63,248 行，含表头）。不要为此把生产 DuckDB 或原始 1 GB CSV
 下载到本地外置 SSD；服务器已有压缩副本时应原地使用。
 
-恢复不保留生产 API。GitHub Actions 从临时的 `tools/VulTrack.AiRecovery` 发布
-`linux/amd64,linux/arm64` 多架构镜像，只打 commit SHA、不打 `latest`。停止 API
-写入后，以 `--network none --read-only --rm` 运行同一 manifest 对应本机架构的
-镜像；数据库目录读写挂载，服务器已有 gzip 只读挂载。工具使用与应用一致的
-`DuckDB.NET.Data`/`DuckDB.NET.Bindings.Full 1.5.3`，单事务完成输入 63,247 行、
-目录映射、JSON/数值、stage/target 全行一致和显式索引为 0 的校验；任一步不符
-必须 rollback。先在 Cafemini 验证同一 digest，再在 Oracle ARM 执行。两端恢复、
-计数与固定样本抽查完成后，从仓库/CI 删除 recovery 项目和构建步骤，并删除服务器
-上的恢复镜像；只保留权威压缩备份及校验清单。最终应用镜像不包含导入能力。
+恢复不增加生产 API 或专用镜像。正式应用完成 DuckDB 切换、API 暂停写入后，
+由服务器本地的一次性脚本直接打开 DuckDB，读取服务器已有 gzip，并在单事务中
+完成输入 63,247 行、目录映射、JSON/数值、stage/target 全行一致和显式索引为 0
+的校验；任一步不符必须 rollback。先在 Cafemini 恢复并验证，再在 Oracle ARM
+执行相同脚本。两端计数与固定样本抽查完成后立即删除脚本和临时文件，只保留
+权威压缩备份及校验清单；应用镜像与 GitHub Actions 不包含导入能力。
 
 ## 5. 从开源数据重建
 
