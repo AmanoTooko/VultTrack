@@ -10,7 +10,7 @@ namespace VulTrack.Tests;
 public sealed class DuckDbOsvRelationTests
 {
     [Fact]
-    public async Task UpstreamAndRelatedIds_AreSearchableWithoutMergingAdvisoriesIntoCves()
+    public async Task DownstreamAdvisoryMergesIntoItsCve_ButPayloadCveMetadataNeverMerges()
     {
         var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-relation-tests", Guid.NewGuid().ToString("N"));
         var previousSpoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
@@ -59,18 +59,24 @@ public sealed class DuckDbOsvRelationTests
                 new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true),
                 CancellationToken.None);
 
+            // DEBIAN-CVE-2026-10001 is a downstream view of exactly one CVE, so the CVE owns the
+            // catalog entry and the Debian identifier survives as a searchable alias.
             var advisory = await store.GetCatalogByIdentifierAsync("DEBIAN-CVE-2026-10001", CancellationToken.None);
             Assert.NotNull(advisory);
-            Assert.Equal("DEBIAN-CVE-2026-10001", advisory.PrimaryIdentifier);
+            Assert.Equal("CVE-2026-10001", advisory.PrimaryIdentifier);
             Assert.Null(await store.GetCatalogByIdAsync(staleId, CancellationToken.None));
             Assert.Contains("GHSA-AAAA-BBBB-CCCC", advisory.Identifiers);
-            Assert.DoesNotContain("CVE-2026-10001", advisory.Identifiers);
+            Assert.Contains("DEBIAN-CVE-2026-10001", advisory.Identifiers);
+            // Payload metadata (database_specific.cve_ids, per-package cves) names related CVEs,
+            // not this record's identity. Merging on those collapsed unrelated advisories together.
             Assert.DoesNotContain("CVE-2026-99999", advisory.Identifiers);
+            Assert.DoesNotContain("CVE-2026-99998", advisory.Identifiers);
 
             var viaUpstream = await store.GetCatalogByIdentifierAsync("CVE-2026-10001", CancellationToken.None);
             Assert.NotNull(viaUpstream);
             Assert.Equal(advisory.Id, viaUpstream.Id);
             Assert.Null(await store.GetCatalogByIdentifierAsync("CVE-2026-99999", CancellationToken.None));
+            Assert.Null(await store.GetCatalogByIdentifierAsync("CVE-2026-99998", CancellationToken.None));
 
             var relations = await store.GetRelationsByVulnerabilityIdsAsync([advisory.Id], CancellationToken.None);
             var relation = Assert.Single(relations).Value;
@@ -129,7 +135,7 @@ public sealed class DuckDbOsvRelationTests
             Assert.False(result.deferredFullCatalogRebuild);
             Assert.True(result.deferredAffectedRebuild);
             var changedKey = Assert.Single(result.deferredChangedKeys);
-            Assert.Equal("DEBIAN-CVE-2026-10001", changedKey);
+            Assert.Equal("CVE-2026-10001", changedKey);
             Assert.Null(await store.GetCatalogByIdentifierAsync("DEBIAN-CVE-2026-10001", CancellationToken.None));
 
             await store.RebuildCatalogForKeysAsync(result.deferredChangedKeys, CancellationToken.None);
@@ -142,6 +148,188 @@ public sealed class DuckDbOsvRelationTests
             Directory.Delete(root, recursive: true);
         }
     }
+
+    [Fact]
+    public async Task UpstreamRelationsNeverChangeAdvisoryIdentity()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-multicve-tests", Guid.NewGuid().ToString("N"));
+        var previousSpoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
+        Directory.CreateDirectory(Path.Combine(root, "incoming"));
+        Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "multicve.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var normalizer = new DuckDbEvidenceNormalizer(
+                new UnusedServiceProvider(), store, NullLogger<DuckDbEvidenceNormalizer>.Instance);
+
+            var fileName = "osv-multicve-s0000.ndjson.ready";
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "incoming", fileName),
+                string.Join(
+                    Environment.NewLine,
+                    UpstreamOnlySpoolLine("USN-7123-1", ["CVE-2026-20001", "CVE-2026-20002"]),
+                    UpstreamOnlySpoolLine("USN-7124-1", ["CVE-2026-20003"])) + Environment.NewLine);
+            await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true),
+                CancellationToken.None);
+
+            // Fixing two CVEs at once is ambiguous: filing it under one would drop its link to the
+            // other, so the advisory keeps its own entry and both upstream links stay.
+            var multi = await store.GetCatalogByIdentifierAsync("USN-7123-1", CancellationToken.None);
+            Assert.NotNull(multi);
+            Assert.Equal("USN-7123-1", multi.PrimaryIdentifier);
+            var relations = await store.GetRelationsByVulnerabilityIdsAsync([multi.Id], CancellationToken.None);
+            Assert.Equal(
+                ["CVE-2026-20001", "CVE-2026-20002"],
+                Assert.Single(relations).Value.UpstreamIdentifiers);
+
+            // A single upstream CVE is still a relationship, not an identity assertion.
+            var single = await store.GetCatalogByIdentifierAsync("USN-7124-1", CancellationToken.None);
+            Assert.NotNull(single);
+            Assert.Equal("USN-7124-1", single.PrimaryIdentifier);
+            var singleRelations = await store.GetRelationsByVulnerabilityIdsAsync([single.Id], CancellationToken.None);
+            Assert.Equal(
+                ["CVE-2026-20003"],
+                Assert.Single(singleRelations).Value.UpstreamIdentifiers);
+            var viaRelation = await store.GetCatalogByIdentifierAsync("CVE-2026-20003", CancellationToken.None);
+            Assert.NotNull(viaRelation);
+            Assert.Equal(single.Id, viaRelation.Id);
+            Assert.Equal("USN-7124-1", viaRelation.PrimaryIdentifier);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", previousSpoolPath);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task MergedDistroAdvisoriesKeepTheirOwnAffectedRangesAsSeparateSourceFacts()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-distro-tests", Guid.NewGuid().ToString("N"));
+        var previousSpoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
+        Directory.CreateDirectory(Path.Combine(root, "incoming"));
+        Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "distro.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var normalizer = new DuckDbEvidenceNormalizer(
+                new UnusedServiceProvider(), store, NullLogger<DuckDbEvidenceNormalizer>.Instance);
+
+            var fileName = "osv-distro-s0000.ndjson.ready";
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "incoming", fileName),
+                string.Join(
+                    Environment.NewLine,
+                    DistroSpoolLine("UBUNTU-CVE-2026-30001", "1.11"),
+                    DistroSpoolLine("DEBIAN-CVE-2026-30001", "1.12"),
+                    DistroSpoolLine("ROOT-APP-MAVEN-CVE-2026-30001", "1.13"),
+                    DistroSpoolLine("BELL-CVE-2026-30001", "1.14")) + Environment.NewLine);
+            await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true),
+                CancellationToken.None);
+
+            var merged = await store.GetCatalogByIdentifierAsync("CVE-2026-30001", CancellationToken.None);
+            Assert.NotNull(merged);
+            Assert.Equal("CVE-2026-30001", merged.PrimaryIdentifier);
+            foreach (var distroId in new[]
+                     {
+                         "UBUNTU-CVE-2026-30001", "DEBIAN-CVE-2026-30001",
+                         "ROOT-APP-MAVEN-CVE-2026-30001", "BELL-CVE-2026-30001"
+                     })
+            {
+                Assert.Contains(distroId, merged.Identifiers);
+                var viaDistro = await store.GetCatalogByIdentifierAsync(distroId, CancellationToken.None);
+                Assert.NotNull(viaDistro);
+                Assert.Equal(merged.Id, viaDistro.Id);
+            }
+
+            // Conflicting per-distro ranges must stay visible as distinct source facts rather than
+            // being collapsed into one range by the merge.
+            var facts = await store.QueryAffectedFactsManyAsync(
+                ["CVE-2026-30001"], ct: CancellationToken.None);
+            var ranges = Assert.Single(facts).Value
+                .Select(row => row["version_range_raw"]?.ToString())
+                .OrderBy(value => value, StringComparer.Ordinal)
+                .ToArray();
+            Assert.Equal(4, ranges.Length);
+            Assert.All(new[] { "1.11", "1.12", "1.13", "1.14" },
+                expected => Assert.Contains(ranges, range => range is not null && range.Contains(expected)));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", previousSpoolPath);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static string UpstreamOnlySpoolLine(string advisoryId, string[] upstream) =>
+        JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            sourceCode = "osv",
+            runId = "relations",
+            externalKey = advisoryId,
+            externalId = advisoryId,
+            modifiedAt = "2026-08-10T00:00:00Z",
+            recordHash = $"{advisoryId}-v1",
+            payload = new
+            {
+                id = advisoryId,
+                upstream,
+                summary = $"{advisoryId} advisory"
+            }
+        });
+
+    private static string DistroSpoolLine(string advisoryId, string fixedVersion) =>
+        JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            sourceCode = "osv",
+            runId = "distro",
+            externalKey = advisoryId,
+            externalId = advisoryId,
+            modifiedAt = "2026-08-10T00:00:00Z",
+            recordHash = $"{advisoryId}-v1",
+            payload = new
+            {
+                id = advisoryId,
+                summary = $"{advisoryId} advisory",
+                affected = new[]
+                {
+                    new
+                    {
+                        package = new { ecosystem = "PyPI", name = "Django", purl = "pkg:pypi/django" },
+                        ranges = new[]
+                        {
+                            new
+                            {
+                                type = "ECOSYSTEM",
+                                events = new[]
+                                {
+                                    new Dictionary<string, string> { ["introduced"] = "0" },
+                                    new Dictionary<string, string> { ["fixed"] = fixedVersion }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
 
     private static string SpoolLine() => JsonSerializer.Serialize(new
     {

@@ -548,9 +548,7 @@ public sealed partial class DuckDbEvidenceNormalizer
                     upstreamIdentifiers = OsvIdentifierExtractor.ExtractUpstream(payload);
                     relatedIdentifiers = OsvIdentifierExtractor.ExtractRelated(payload);
                     normalizationVersion = "osv-relations-v2";
-                    key = identifiers.FirstOrDefault(value => value.StartsWith("CVE-", StringComparison.OrdinalIgnoreCase))
-                        ?? identifiers.FirstOrDefault()
-                        ?? osvId;
+                    key = osvId;
                     title = payload["summary"]?.GetValue<string>();
                     description = payload["details"]?.GetValue<string>() ?? title;
                     status = payload["withdrawn"] is null ? "active" : "withdrawn";
@@ -567,7 +565,7 @@ public sealed partial class DuckDbEvidenceNormalizer
             case "npm-audit":
                 {
                     identifiers = GenericIdentifiers(envelope, payload, externalId);
-                    key = PreferredIdentifier(identifiers, externalId);
+                    key = externalId;
                     title = StringValue(payload["summary"]);
                     description = StringValue(payload["description"]) ?? title;
                     status = StringValue(payload["withdrawn_at"]) is null ? "active" : "withdrawn";
@@ -629,7 +627,7 @@ public sealed partial class DuckDbEvidenceNormalizer
             default:
                 {
                     identifiers = GenericIdentifiers(envelope, payload, externalId);
-                    key = PreferredIdentifier(identifiers, externalId);
+                    key = externalId;
                     title = FirstString(payload, "title", "summary", "name", "vulnerabilityName");
                     description = FirstString(payload, "description", "details", "shortDescription", "summary") ?? title;
                     status = FirstString(payload, "status", "state") ?? "active";
@@ -644,6 +642,14 @@ public sealed partial class DuckDbEvidenceNormalizer
         }
 
         key = Identifier.Normalize(key);
+        var promotedKey = Identifier.ResolveCanonicalIdentity(key, identifiers);
+        if (!string.Equals(promotedKey, key, StringComparison.OrdinalIgnoreCase))
+        {
+            // The original identifier stays below as a searchable alias. Upstream/related IDs are
+            // never passed to the resolver because relationships are not identity assertions.
+            key = promotedKey;
+            normalizationVersion = "identity-links-v3";
+        }
         identifiers = identifiers
             .Append(key)
             .Where(value => !string.IsNullOrWhiteSpace(value))
@@ -688,7 +694,7 @@ public sealed partial class DuckDbEvidenceNormalizer
                 null,
                 StringValue(payload["dateAdded"]));
         }
-        var vulnerabilityId = DeterministicGuid($"vulnerability:{key}");
+        var vulnerabilityId = Identifier.DeterministicVulnerabilityId(key);
         return new ParsedSpoolRecord(
             EmptyRecord(evidenceSourceCode, rawId, key, externalId) with
             {
