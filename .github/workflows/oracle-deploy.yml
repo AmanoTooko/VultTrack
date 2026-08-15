@@ -85,10 +85,18 @@ jobs:
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          GHCR_USERNAME: ${{ github.actor }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_SHA: ${{ inputs.release_sha }}
           DUCKDB_PATH: ${{ inputs.duckdb_path }}
         run: |
+          set -euo pipefail
           port="${DEPLOY_PORT:-22}"
+          [[ "$GHCR_USERNAME" =~ ^[A-Za-z0-9-]+$ ]]
+
+          # Run every non-secret guard and configure the release before the
+          # credential-bearing deployment invocation. This SSH stdin contains
+          # no credential.
           ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
             -i ~/.ssh/vultrack_deploy -p "$port" "$DEPLOY_USER@$DEPLOY_HOST" \
             bash -s -- "$RELEASE_SHA" "$DUCKDB_PATH" <<'REMOTE'
@@ -119,9 +127,20 @@ jobs:
           DUCKDB_PATH="$duckdb_path" \
           SCHEDULER_ENABLED=false \
             "$app_dir/scripts/configure-prod-release.sh"
+          REMOTE
 
-          REQUIRE_SCHEDULER_DISABLED=true "$app_dir/scripts/deploy-prod.sh"
+          # The token is supplied only on this pipe. The remote script reads
+          # one line, logs in with --password-stdin, and removes its temporary
+          # Docker credentials on EXIT.
+          printf '%s\n' "$GHCR_TOKEN" | \
+            ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+              -i ~/.ssh/vultrack_deploy -p "$port" "$DEPLOY_USER@$DEPLOY_HOST" \
+              "GHCR_USERNAME=$GHCR_USERNAME GHCR_PASSWORD_STDIN=true /home/ubuntu/vultrack/scripts/deploy-prod.sh"
 
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -i ~/.ssh/vultrack_deploy -p "$port" "$DEPLOY_USER@$DEPLOY_HOST" \
+            bash -s <<'REMOTE'
+          set -euo pipefail
           for attempt in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:3000/api/v1/system.health >/dev/null \
               && curl -fsS http://127.0.0.1:3000/api/v1/system.ready >/dev/null; then

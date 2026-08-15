@@ -122,6 +122,26 @@ if command -v systemctl >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   sudo systemctl restart vultrack-docker-forward.service || true
 fi
 
+if [[ "${GHCR_PASSWORD_STDIN:-false}" == "true" ]]; then
+  : "${GHCR_USERNAME:?GHCR_USERNAME is required when GHCR_PASSWORD_STDIN=true}"
+  ghcr_token=""
+  if ! IFS= read -r ghcr_token; then
+    echo "GHCR password was not supplied on stdin" >&2
+    exit 1
+  fi
+  docker_config_dir="$(mktemp -d "${TMPDIR:-/tmp}/vultrack-docker-config.XXXXXX")"
+  chmod 700 "$docker_config_dir"
+  export DOCKER_CONFIG="$docker_config_dir"
+  cleanup_docker_config() {
+    docker logout ghcr.io >/dev/null 2>&1 || true
+    rm -rf -- "$docker_config_dir"
+  }
+  trap cleanup_docker_config EXIT
+  printf '%s' "$ghcr_token" | docker login ghcr.io \
+    --username "$GHCR_USERNAME" --password-stdin >/dev/null
+  unset ghcr_token
+fi
+
 compose=(docker compose --env-file .env.production -f docker-compose.prod.yml)
 "${compose[@]}" pull
 "${compose[@]}" up -d --remove-orphans
