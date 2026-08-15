@@ -99,6 +99,8 @@ test('DuckDB scheduler defaults to blocking automatic baseline imports on every 
   assert.match(scheduler, /options\.Scheduler\.AllowAutomaticInit/);
   assert.match(scheduler, /"nvd-cve" or "nvd-cve-init" => "nvd-cve-init"/);
   assert.match(scheduler, /"osv" or "osv-init" => "osv-init"/);
+  assert.match(scheduler, /"ghsa" or "ghsa-init" => "ghsa-init"/);
+  assert.match(scheduler, /GHSA_BOOTSTRAP_WATERMARK/);
   assert.match(scheduler, /checkpoint\?\["initComplete"\].*== false\)\s*return RequireAutomaticInit/s);
   assert.match(scheduler, /sourceCode\.EndsWith\("-init"[\s\S]*return RequireAutomaticInit/);
   assert.match(scheduler, /HasSourceRecordsAsync\(sourceCode, ct\)\) return sourceCode;\s*return RequireAutomaticInit/s);
@@ -110,6 +112,123 @@ test('DuckDB scheduler defaults to blocking automatic baseline imports on every 
     assert.doesNotMatch(compose, /^\s+DUCKDB_ALLOW_AUTOMATIC_INIT:/m);
   }
 });
+
+test('GHSA repository baseline imports reviewed advisories, segments, and resumes', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-ghsa-init-'));
+  const repository = path.join(root, 'repository');
+  const spool = path.join(root, 'spool');
+  const previous = Object.fromEntries([
+    'VULTRACK_SPOOL_PATH',
+    'GHSA_ADVISORY_REPOSITORY',
+    'GHSA_ADVISORY_MIRROR_PATH',
+    'GHSA_INIT_SEGMENT_SIZE',
+    'FETCHER_MAX_RECORDS'
+  ].map((key) => [key, process.env[key]]));
+  try {
+    await fs.mkdir(path.join(repository, 'advisories', 'github-reviewed', '2026', '01'), { recursive: true });
+    await fs.mkdir(path.join(repository, 'advisories', 'unreviewed', '2026', '01'), { recursive: true });
+    const reviewed = [
+      ghsaOsv('GHSA-AAAA-BBBB-0001', '2026-01-01T00:00:00Z'),
+      { id: 'NOT-GHSA-0002', modified: '2026-01-02T00:00:00Z' },
+      ghsaOsv('GHSA-AAAA-BBBB-0003', '2026-01-03T00:00:00Z'),
+      ghsaOsv('GHSA-AAAA-BBBB-0004', '2026-01-04T00:00:00Z')
+    ];
+    for (let index = 0; index < reviewed.length; index++) {
+      await fs.writeFile(
+        path.join(repository, 'advisories', 'github-reviewed', '2026', '01', `${index}.json`),
+        JSON.stringify(reviewed[index]));
+    }
+    await fs.writeFile(
+      path.join(repository, 'advisories', 'unreviewed', '2026', '01', 'ignored.json'),
+      JSON.stringify(ghsaOsv('GHSA-UNRE-VIEW-0001', '2026-01-05T00:00:00Z')));
+    const git = (...args) => spawnSync('git', ['-C', repository, ...args], { encoding: 'utf8' });
+    assert.equal(git('init', '-b', 'main').status, 0);
+    assert.equal(git('config', 'user.email', 'test@vultrack.local').status, 0);
+    assert.equal(git('config', 'user.name', 'VulTrack Test').status, 0);
+    assert.equal(git('add', '.').status, 0);
+    assert.equal(git('commit', '-m', 'fixtures').status, 0);
+
+    process.env.VULTRACK_SPOOL_PATH = spool;
+    process.env.GHSA_ADVISORY_REPOSITORY = repository;
+    process.env.GHSA_ADVISORY_MIRROR_PATH = path.join(root, 'mirror');
+    process.env.GHSA_INIT_SEGMENT_SIZE = '1';
+    process.env.FETCHER_MAX_RECORDS = '2';
+    const first = await runFetcherModule('ghsa-init');
+    assert.equal(first.fetchedCount, 2);
+    assert.equal(first.checkpoint.initComplete, false);
+    assert.equal(first.checkpoint.offset, 3);
+    assert.equal(first.checkpoint.skippedEntries, 1);
+    assert.equal(first.checkpoint.latestModified, '2026-01-03T00:00:00Z');
+
+    process.env.FETCHER_MAX_RECORDS = '10';
+    const second = await runFetcherModule('ghsa-init');
+    assert.equal(second.fetchedCount, 1);
+    assert.equal(second.checkpoint.initComplete, true);
+    assert.equal(second.checkpoint.offset, 4);
+    assert.equal(second.checkpoint.skippedEntries, 1);
+    assert.equal(second.checkpoint.incrementalSince, first.checkpoint.incrementalSince);
+    assert.equal(second.checkpoint.latestModified, '2026-01-04T00:00:00Z');
+
+    const files = (await fs.readdir(path.join(spool, 'incoming'))).sort();
+    assert.equal(files.length, 3);
+    const lines = [];
+    for (const file of files) {
+      lines.push(...(await fs.readFile(path.join(spool, 'incoming', file), 'utf8'))
+        .trim().split('\n').filter(Boolean).map(JSON.parse));
+    }
+    assert.deepEqual(lines.map((line) => line.externalKey).sort(), [
+      'GHSA-AAAA-BBBB-0001',
+      'GHSA-AAAA-BBBB-0003',
+      'GHSA-AAAA-BBBB-0004'
+    ]);
+    assert.ok(lines.every((line) => line.sourceCode === 'ghsa-init'));
+    assert.ok(lines.every((line) => line.externalKey !== 'GHSA-UNRE-VIEW-0001'));
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+function ghsaOsv(id, modified) {
+  return {
+    schema_version: '1.4.0',
+    id,
+    modified,
+    published: modified,
+    aliases: [],
+    summary: `Fixture ${id}`,
+    details: `Details for ${id}`,
+    affected: [{
+      package: { ecosystem: 'npm', name: 'fixture-package', purl: 'pkg:npm/fixture-package' },
+      ranges: [{ type: 'SEMVER', events: [{ introduced: '0' }, { fixed: '2.0.0' }] }]
+    }],
+    severity: [{ type: 'CVSS_V3', score: 'CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H' }],
+    references: [{ type: 'ADVISORY', url: `https://github.com/advisories/${id}` }]
+  };
+}
+
+async function runFetcherModule(sourceCode) {
+  const { withClient, getSource, startRun, saveCheckpoint, flushWriteBatch, finishRun } =
+    await import('../../plugins/fetchers/lib/db.mjs');
+  const mod = await import(`../../plugins/fetchers/sources/${sourceCode}.mjs`);
+  return withClient(async (client) => {
+    const source = await getSource(client, sourceCode);
+    const run = await startRun(client, source.id, 'test');
+    const result = await mod.run(client, { source, run });
+    await flushWriteBatch(client);
+    await saveCheckpoint(client, source.id, result.checkpoint);
+    await finishRun(client, run.id, {
+      status: 'succeeded',
+      fetchedCount: result.fetchedCount,
+      parsedCount: result.parsedCount,
+      checkpoint: result.checkpoint
+    });
+    return result;
+  });
+}
 
 test('Compose env files are not overridden by hardcoded runtime defaults', async () => {
   const runtimeKeys = [

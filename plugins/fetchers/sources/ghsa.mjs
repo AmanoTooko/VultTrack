@@ -37,7 +37,7 @@ export async function run(client, ctx) {
 
   // Checkpoint: use updatedSince for incremental sync
   const checkpoint = ctx.source.checkpoint_json ?? {};
-  const updatedSince = checkpoint.updatedSince ?? null;
+  const updatedSince = checkpoint.updatedSince ?? process.env.GHSA_BOOTSTRAP_WATERMARK ?? null;
 
   let nextUrl = `https://api.github.com/advisories?per_page=100&type=reviewed&sort=updated&direction=desc`;
   let count = 0;

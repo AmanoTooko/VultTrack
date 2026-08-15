@@ -138,6 +138,8 @@ nvd-cve-init       # NVD JSON mirror baseline
 nvd-cve            # NVD API 2.0 lastModStartDate incremental
 osv-init           # OSV global all.zip baseline
 osv                # OSV global modified_id.csv incremental
+ghsa-init          # GitHub Advisory Database github-reviewed baseline
+ghsa               # GitHub Advisory API incremental
 android-osv-init   # OSV Android all.zip baseline
 android-osv        # OSV Android modified_id.csv incremental
 maven-osv-init     # OSV Maven all.zip baseline
@@ -149,6 +151,14 @@ cve-list-v5        # Optional/manual CVE List v5 mirror; not part of default ini
 
 默认 CVE 主链路使用 `nvd-cve-init` 建立官方 NVD 基线，再用 `nvd-cve` 做 NVD API 2.0 增量。`cve-list-v5` 与 NVD 在 CVE 描述和元数据上高度重叠，且缺少 NVD 的 CVSS、CPE configurations 和 NVD modified 时间语义，因此只保留为手动审计/补充源，不参与默认 init、canonical rebuild 或定时抓取。
 
+GHSA 主链路使用 `ghsa-init` 浅克隆 GitHub 官方
+`github/advisory-database` 仓库，只导入 `advisories/github-reviewed` 下由 git 跟踪的 OSV
+JSON；未审核目录不会进入基线。导入 checkpoint 固定仓库 revision 和文件 offset，spool
+按 `GHSA_INIT_SEGMENT_SIZE`（默认 5000）分段，所以中断后可从同一 revision 继续且不会重复。
+完成基线后，scheduler 把基线开始时记录的 `incrementalSince` 传给 `ghsa` REST 增量，覆盖
+长时间基线执行期间发生的更新。可用 `GHSA_ADVISORY_REPOSITORY` 和
+`GHSA_ADVISORY_MIRROR_PATH` 指向内部镜像；repository baseline 不依赖 GitHub API token。
+
 `maven-advisory` 是组件定向查询 fetcher，依赖 `MAVEN_COMPONENTS`，没有独立的 Maven 全量漏洞流。Maven 生态全量/增量来源使用 `maven-osv-init` 和 `maven-osv`。
 
 需要显式跑初始化时：
@@ -156,6 +166,7 @@ cve-list-v5        # Optional/manual CVE List v5 mirror; not part of default ini
 ```bash
 npm run fetch -- --source cve-list-v5
 FETCHER_INCLUDE_INIT=1 npm run fetch -- --source android-osv-init
+npm run fetch -- --source ghsa-init
 ```
 
 ## 运行所有 Fetcher

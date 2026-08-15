@@ -11,6 +11,7 @@ public sealed partial class DuckDbEvidenceNormalizer(
     {
         "nvd-cve-init" => "nvd-cve",
         "osv-init" => "osv",
+        "ghsa-init" => "ghsa",
         "android-osv-init" => "android-osv",
         "google-osv-init" => "google-osv",
         "maven-osv-init" => "maven-osv",

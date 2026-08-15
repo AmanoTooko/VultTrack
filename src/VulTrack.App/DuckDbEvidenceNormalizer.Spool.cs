@@ -528,6 +528,7 @@ public sealed partial class DuckDbEvidenceNormalizer
                 }
             case "osv":
             case "osv-init":
+            case "ghsa-init":
             case "android-osv":
             case "android-osv-init":
             case "google-osv":
@@ -541,13 +542,27 @@ public sealed partial class DuckDbEvidenceNormalizer
                 {
                     var osvId = payload["id"]?.GetValue<string>() ?? externalId;
                     var aliases = StringArray(payload["aliases"]);
+                    var directCveAliases = aliases
+                        .Select(Identifier.Normalize)
+                        .Where(Identifier.IsCve)
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToArray();
                     identifiers = OsvIdentifierExtractor.Extract(osvId, aliases, payload)
                         .Select(Identifier.Normalize)
                         .Distinct(StringComparer.OrdinalIgnoreCase)
                         .ToArray();
                     upstreamIdentifiers = OsvIdentifierExtractor.ExtractUpstream(payload);
                     relatedIdentifiers = OsvIdentifierExtractor.ExtractRelated(payload);
-                    normalizationVersion = "osv-relations-v2";
+                    if (directCveAliases.Length > 1)
+                    {
+                        // Several direct CVE aliases are ambiguous identity evidence. Keep the
+                        // advisory independent, but retain every CVE as a searchable relation.
+                        relatedIdentifiers = relatedIdentifiers
+                            .Concat(directCveAliases)
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToArray();
+                    }
+                    normalizationVersion = "osv-relations-v3";
                     key = osvId;
                     title = payload["summary"]?.GetValue<string>();
                     description = payload["details"]?.GetValue<string>() ?? title;
@@ -648,7 +663,7 @@ public sealed partial class DuckDbEvidenceNormalizer
             // The original identifier stays below as a searchable alias. Upstream/related IDs are
             // never passed to the resolver because relationships are not identity assertions.
             key = promotedKey;
-            normalizationVersion = "identity-links-v3";
+            normalizationVersion = "identity-links-v4";
         }
         identifiers = identifiers
             .Append(key)

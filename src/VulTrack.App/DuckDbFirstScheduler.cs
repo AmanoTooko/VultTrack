@@ -235,6 +235,14 @@ public sealed class DuckDbFirstScheduler(
             if (!string.IsNullOrWhiteSpace(watermark))
                 start.Environment["OSV_BOOTSTRAP_WATERMARK"] = watermark;
         }
+        if (sourceCode.Equals("ghsa", StringComparison.OrdinalIgnoreCase)
+            && ReadCheckpoint("ghsa")?["updatedSince"] is null)
+        {
+            var baseline = ReadCheckpoint("ghsa-init");
+            var watermark = baseline?["incrementalSince"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(watermark))
+                start.Environment["GHSA_BOOTSTRAP_WATERMARK"] = watermark;
+        }
         if (force) start.Environment["FETCHER_FORCE"] = "1";
         if (limit > 0)
             start.Environment["FETCHER_MAX_RECORDS"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture);
@@ -297,6 +305,7 @@ public sealed class DuckDbFirstScheduler(
         {
             "nvd-cve" or "nvd-cve-init" => "nvd-cve-init",
             "osv" or "osv-init" => "osv-init",
+            "ghsa" or "ghsa-init" => "ghsa-init",
             _ => null
         };
         if (baselineSource is null) return sourceCode;

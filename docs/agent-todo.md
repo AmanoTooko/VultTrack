@@ -1,6 +1,6 @@
 # VulTrack Agent TODO
 
-Last updated: 2026-08-15 Asia/Shanghai.
+Last updated: 2026-08-16 Asia/Shanghai.
 
 **Read this file first.** It is the authoritative work queue and handoff state for AI agents.
 Architecture truth is `docs/design/duckdb-first-architecture.md`; schema truth is
@@ -62,6 +62,16 @@ serve an empty catalog.
       the end. The normalizer returns deferred rebuild state and the scheduler coalesces it
       across all ready files and sources.
       Location: `DuckDbEvidenceNormalizer.Spool.cs`, `DuckDbFirstScheduler.cs`.
+- [x] Resolve canonical identity from direct aliases: one direct CVE promotes an OSV/GHSA/BDSA
+      advisory to that CVE; zero or multiple direct CVEs keep the advisory independent. Embedded
+      terminal CVEs such as `DEBIAN-CVE-*` also resolve to the CVE. `upstream` and `related` remain
+      relationship evidence and never determine identity. Multiple direct CVEs are retained as
+      searchable relation evidence instead of competing canonical aliases. Commit: `b755978` plus
+      the GHSA bulk follow-up.
+- [ ] Complete the cafemini shadow rebuild from official OSV `all.zip` plus GitHub Advisory
+      Database `github-reviewed`, then validate identity, severity, references, affected facts,
+      search, and API behavior before switching the cafemini database path. Never rewrite the
+      live 13 GB DuckDB in place.
 
 ## P1 — Performance
 

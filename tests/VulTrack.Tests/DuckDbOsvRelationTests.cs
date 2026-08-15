@@ -10,6 +10,75 @@ namespace VulTrack.Tests;
 public sealed class DuckDbOsvRelationTests
 {
     [Fact]
+    public async Task GhsaBulkRecordsUseOsvFactsAndKeepAmbiguousAdvisoriesIndependent()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-ghsa-bulk-tests", Guid.NewGuid().ToString("N"));
+        var previousSpoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
+        Directory.CreateDirectory(Path.Combine(root, "incoming"));
+        Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "ghsa-bulk.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var normalizer = new DuckDbEvidenceNormalizer(
+                new UnusedServiceProvider(), store, NullLogger<DuckDbEvidenceNormalizer>.Instance);
+
+            var fileName = "ghsa-init-bulk-s0000.ndjson.ready";
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "incoming", fileName),
+                string.Join(
+                    Environment.NewLine,
+                    GhsaInitSpoolLine("GHSA-AAAA-BBBB-0001", []),
+                    GhsaInitSpoolLine("GHSA-AAAA-BBBB-0002", ["CVE-2026-41002"]),
+                    GhsaInitSpoolLine("GHSA-AAAA-BBBB-0003", ["CVE-2026-41003", "CVE-2026-41004"])) + Environment.NewLine);
+            await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true),
+                CancellationToken.None);
+
+            var independent = await store.GetCatalogByIdentifierAsync("GHSA-AAAA-BBBB-0001", CancellationToken.None);
+            Assert.NotNull(independent);
+            Assert.Equal("GHSA-AAAA-BBBB-0001", independent.PrimaryIdentifier);
+            var detail = JsonSerializer.SerializeToNode(
+                await store.GetCatalogDetailAsync(independent.Id, CancellationToken.None))!.AsObject();
+            Assert.Equal(9.8m, detail["vulnerability"]!["maxCvssScore"]!.GetValue<decimal>());
+            Assert.Single(detail["affectedFacts"]!.AsArray());
+            Assert.Equal(">= 0, < 2.0.0", detail["affectedFacts"]![0]!["version_range_raw"]!.GetValue<string>());
+            Assert.Single(detail["references"]!.AsArray());
+            Assert.Equal(
+                "https://github.com/advisories/GHSA-AAAA-BBBB-0001",
+                detail["references"]![0]!["url"]!.GetValue<string>());
+            Assert.Equal("CVE-2026-41999", detail["vulnerability"]!["upstreamIdentifiers"]![0]!.GetValue<string>());
+
+            var promoted = await store.GetCatalogByIdentifierAsync("GHSA-AAAA-BBBB-0002", CancellationToken.None);
+            Assert.NotNull(promoted);
+            Assert.Equal("CVE-2026-41002", promoted.PrimaryIdentifier);
+            Assert.Contains("GHSA-AAAA-BBBB-0002", promoted.Identifiers);
+
+            var ambiguous = await store.GetCatalogByIdentifierAsync("GHSA-AAAA-BBBB-0003", CancellationToken.None);
+            Assert.NotNull(ambiguous);
+            Assert.Equal("GHSA-AAAA-BBBB-0003", ambiguous.PrimaryIdentifier);
+            Assert.DoesNotContain("CVE-2026-41003", ambiguous.Identifiers);
+            Assert.DoesNotContain("CVE-2026-41004", ambiguous.Identifiers);
+            var ambiguousRelations = await store.GetRelationsByVulnerabilityIdsAsync(
+                [ambiguous.Id], CancellationToken.None);
+            Assert.Equal(
+                ["CVE-2026-41003", "CVE-2026-41004"],
+                Assert.Single(ambiguousRelations).Value.RelatedIdentifiers);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", previousSpoolPath);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task DownstreamAdvisoryMergesIntoItsCve_ButPayloadCveMetadataNeverMerges()
     {
         var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-relation-tests", Guid.NewGuid().ToString("N"));
@@ -323,6 +392,61 @@ public sealed class DuckDbOsvRelationTests
                                 {
                                     new Dictionary<string, string> { ["introduced"] = "0" },
                                     new Dictionary<string, string> { ["fixed"] = fixedVersion }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+    private static string GhsaInitSpoolLine(string advisoryId, string[] aliases) =>
+        JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            sourceCode = "ghsa-init",
+            runId = "ghsa-bulk",
+            externalKey = advisoryId,
+            externalId = advisoryId,
+            sourceUrl = $"https://github.com/advisories/{advisoryId}",
+            publishedAt = "2026-08-01T00:00:00Z",
+            modifiedAt = "2026-08-10T00:00:00Z",
+            recordHash = $"{advisoryId}-v1",
+            identifiers = new[] { advisoryId }.Concat(aliases).ToArray(),
+            payload = new
+            {
+                schema_version = "1.4.0",
+                id = advisoryId,
+                aliases,
+                upstream = new[] { "CVE-2026-41999" },
+                summary = $"{advisoryId} summary",
+                details = $"{advisoryId} details",
+                severity = new[]
+                {
+                    new
+                    {
+                        type = "CVSS_V3",
+                        score = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+                    }
+                },
+                references = new[]
+                {
+                    new { type = "ADVISORY", url = $"https://github.com/advisories/{advisoryId}" }
+                },
+                affected = new[]
+                {
+                    new
+                    {
+                        package = new { ecosystem = "npm", name = "fixture-package", purl = "pkg:npm/fixture-package" },
+                        ranges = new[]
+                        {
+                            new
+                            {
+                                type = "SEMVER",
+                                events = new[]
+                                {
+                                    new Dictionary<string, string> { ["introduced"] = "0" },
+                                    new Dictionary<string, string> { ["fixed"] = "2.0.0" }
                                 }
                             }
                         }
