@@ -1,5 +1,9 @@
 # Trivy SBOM matching benchmark
 
+> **Historical PG-first benchmark.** The reset/normalize commands and `DATABASE_URL` flow in
+> this document are retired. Current matching benchmarks use `npm run benchmark:trivy`
+> against the DuckDB-first API.
+
 Trivy is a comparison oracle, not an absolute truth source. A difference is a triage item until the upstream advisory confirms whether the installed version is affected.
 
 ## Matching standard

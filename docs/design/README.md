@@ -13,11 +13,10 @@
    endpoint 与验证状态。
 3. [`../deployment/oracle-arm.md`](../deployment/oracle-arm.md)：生产 ARM 部署、
    迁移、回滚与资源门禁。
-4. [`contracts/api-rpc.md`](./contracts/api-rpc.md)：仍有效的 GET/POST RPC 风格
-   与响应 envelope；其中 PostgreSQL 存储描述已过时。
-5. [`../reference/fetchers.md`](../reference/fetchers.md) 与
-   [`../../plugins/fetchers/README.md`](../../plugins/fetchers/README.md)：source
-   行为、checkpoint 与 spool 协议。
+4. `src/VulTrack.App/Endpoints/` 与 `SbomEndpoints.cs`：实际 API 路由；
+   [`contracts/api-rpc.md`](./contracts/api-rpc.md) 只是历史 API 草案。
+5. [`../../plugins/fetchers/README.md`](../../plugins/fetchers/README.md)：当前 source
+   行为、checkpoint 与 spool 协议。`docs/reference/fetchers.md` 是 PG-first 历史参考。
 
 代码中的最终事实来源：
 
@@ -39,6 +38,7 @@
 - `modules/*`
 - `plugins/*`
 - `testing/test-plan.md`
+- `contracts/api-rpc.md`
 
 历史文档中的 `DATABASE_URL`、`stg_*`、PG normalizer、Redis、Adminer、独立
 plugin protocol、Kubernetes 等内容均不属于当前架构。若历史文档与代码或

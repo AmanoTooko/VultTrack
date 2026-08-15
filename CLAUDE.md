@@ -12,9 +12,9 @@ Current state: DuckDB-first single binary. One .NET 10 service `VulTrack.App` is
 
 - Current work queue and handoff state: `docs/agent-todo.md` (read this first).
 - Current architecture: `docs/design/duckdb-first-architecture.md`.
-- Migration rationale: `docs/proposals/affected-duckdb-migration.md`.
-- API contract intent: `docs/design/contracts/api-rpc.md`.
-- Actual DuckDB schema ownership: `src/VulTrack.App/DuckDbEvidenceStore.cs`.
+- Completed migration history: `docs/proposals/affected-duckdb-migration.md`.
+- Actual API routes: `src/VulTrack.App/Endpoints/` and `src/VulTrack.App/SbomEndpoints.cs`.
+- Actual DuckDB schema ownership: `src/VulTrack.App/DuckDbEvidenceStore.Schema.cs`.
 - Fetcher behavior: `plugins/fetchers/README.md` and `plugins/fetchers/sources/*.mjs`.
 
 Legacy design docs: everything else under `docs/design/` describes the superseded PG-first design; consult only for historical intent, not for implementation truth.
@@ -24,7 +24,7 @@ Legacy design docs: everything else under `docs/design/` describes the supersede
 - Build a modular monolith as a single binary, not microservices.
 - Main runtime is one `.NET 10 LTS` service: `VulTrack.App` (API, `DuckDbFirstScheduler`, normalizers, matching, detail snapshots).
 - DuckDB (embedded file, default `data/duckdb/vultrack-evidence.duckdb`, overridable via `VULTRACK_DUCKDB_PATH`) is the ONLY store: catalog, evidence, affected components, exploits, threat scores, AI analyses, SBOM. No PostgreSQL server in the default stack.
-- Host-specific DuckDB paths differ. cafemini's live database is `data/duckdb/vultrack.duckdb` (~13.5 GB) and its `vultrack-evidence.duckdb` is an empty 13 MB file; never remove that host's explicit `VULTRACK_DUCKDB_PATH` or the API will serve an empty catalog.
+- Host-specific DuckDB paths differ. cafemini's live database is `data/duckdb/vultrack.duckdb` (~13.5 GB) and its `vultrack-evidence.duckdb` is an empty placeholder; never remove that host's explicit `VULTRACK_DUCKDB_PATH` or the API will serve an empty catalog.
 - Node.js fetchers (`plugins/fetchers/sources/*.mjs`, ~46 sources) run as child processes and write atomic gzipped NDJSON spool files to `data/spool/incoming/`; a file becomes visible to the scheduler only when promoted with the `.ready` suffix.
 - FIRST EPSS uses a native gzip CSV snapshot pipeline, not the NDJSON spool.
 - `DuckDbFirstScheduler` runs fetchers serially and ingests spool files directly into DuckDB; there is no staging database.
@@ -35,7 +35,7 @@ Legacy design docs: everything else under `docs/design/` describes the supersede
 
 ```text
 src/
-  VulTrack.App/          # single project; Endpoints are mapped from Program.cs + SbomEndpoints.cs
+  VulTrack.App/          # single project; endpoint groups live under Endpoints/ + SbomEndpoints.cs
 plugins/
   fetchers/
     sources/*.mjs        # Node fetcher child processes
@@ -48,7 +48,7 @@ docs/
   design/                # legacy PG-first docs + duckdb-first-architecture.md
   proposals/
 data/
-  spool/incoming/        # fetcher output spool (.ndjson.gz + .ready promotion)
+  spool/incoming/        # fetcher output spool (.ndjson.partial -> .ndjson.ready)
   duckdb/                # embedded DuckDB file
   raw-objects/ mirrors/ logs/ vulnerability-details/
 ```
@@ -65,7 +65,7 @@ data/
 
 ## Database Rules
 
-- DuckDB schema lives in code: `DuckDbEvidenceStore.cs` creates and owns all tables (`source_records`, `vulnerabilities`, `vulnerability_latest`, `vulnerability_identifiers`, `affected_facts`, `affected_components`, `severity_scores`, `evidence_references`, `weaknesses`, `cpe_entries`, `exploits`, `threat_scores`, `ai_vulnerability_analyses`, `sbom_uploads`, `sbom_components`, `sbom_matches`, ...). Do not add SQL migration files; evolve schema inside the store with `create table if not exists` / guarded alters.
+- DuckDB schema lives in code: `DuckDbEvidenceStore.Schema.cs` creates and owns all tables (`source_records`, `vulnerabilities`, `vulnerability_latest`, `vulnerability_identifiers`, `affected_facts`, `affected_components`, `severity_scores`, `evidence_references`, `weaknesses`, `cpe_entries`, `exploits`, `threat_scores`, `ai_vulnerability_analyses`, `sbom_uploads`, `sbom_components`, `sbom_matches`, ...). Do not add SQL migration files; evolve schema inside the store with `create table if not exists` / guarded alters.
 - The catalog is rebuilt inside DuckDB from `source_records`; `vulnerability_latest` is a 5000-row materialized latest table, not a full listing.
 - Preserve all source-level facts in `source_records`; do not overwrite one source with another.
 - Store CVSS/vendor severity as rows in `severity_scores`; only projection fields go on `vulnerabilities`.
@@ -76,7 +76,7 @@ data/
 ## Fetcher Rules
 
 - Fetchers are plain Node.js ESM scripts under `plugins/fetchers/sources/`, executed as child processes by the .NET scheduler. There is no sandbox, no `plugin.json`, and no stdin/stdout plugin protocol.
-- Each fetcher writes gzipped NDJSON to `data/spool/incoming/` and atomically promotes it via the `.ready` suffix; the scheduler only ingests `*.ndjson.ready` files.
+- Each fetcher writes NDJSON to `data/spool/incoming/` and atomically promotes it via the `.ready` suffix; the scheduler only ingests `*.ndjson.ready` files.
 - Shared helpers live in `plugins/fetchers/lib/`; use them instead of duplicating HTTP/retry/checkpoint logic.
 - Fetchers must be idempotent, support incremental checkpoints, and respect `FETCHER_MAX_RECORDS` / source limits.
 - Fetcher crashes or invalid output must not crash `VulTrack.App`; the scheduler isolates failures per source.
@@ -92,7 +92,7 @@ data/
 ## Coding Standards
 
 - Prefer clear, boring code over clever abstractions.
-- Single project `VulTrack.App`; keep endpoint mappings in `Program.cs`/`SbomEndpoints.cs` and services as flat siblings.
+- Single project `VulTrack.App`; keep endpoint mappings in `Endpoints/`/`SbomEndpoints.cs` and services as flat siblings.
 - Use dependency injection for services and cancellation tokens on async I/O.
 - Make fetch cycles and normalization idempotent and retry-safe.
 - Use structured logging with stable event names.

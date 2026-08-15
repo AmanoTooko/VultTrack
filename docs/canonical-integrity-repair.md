@@ -1,5 +1,9 @@
 # Canonical integrity repair
 
+> **Historical PG-first runbook.** Its npm commands and PostgreSQL backup/reset workflow no
+> longer exist. Do not execute it against the current DuckDB-first runtime; use the current
+> status/rebuild endpoints and `docs/deployment/oracle-arm.md` instead.
+
 Use this runbook when exact CVE searches return another CVE, detail pages contain
 unrelated source records, or CPE facts exist without CPE projections.
 

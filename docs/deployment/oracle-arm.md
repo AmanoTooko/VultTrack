@@ -77,7 +77,7 @@ VULTRACK_ADMIN_PASSWORD=<strong-random-password>
 
 VULTRACK_STORAGE_BACKEND=duckdb
 VULTRACK_DUCKDB_ENABLED=true
-# 当前 Oracle/Cafemini 已有库均使用这个文件名；不得改成默认名后启动空库。
+# 2026-08-15 Oracle 实机已有文件名；每台主机必须单独核对，不能照抄。
 VULTRACK_DUCKDB_PATH=/workspace/data/duckdb/vultrack.duckdb
 VULTRACK_DUCKDB_MEMORY_LIMIT=3g
 VULTRACK_DUCKDB_THREADS=4
@@ -136,19 +136,13 @@ AI 分析是唯一不可从公开源重建的数据。迁移前至少保留 Orac
 （压缩文件共 63,248 行，含表头）。不要为此把生产 DuckDB 或原始 1 GB CSV
 下载到本地外置 SSD；服务器已有压缩副本时应原地使用。
 
-将服务器备份目录中的 `ai-analyses.csv.gz` 以同文件系统硬链接放到 Compose 的
-只读 `import/` 目录，避免再次写入 145 MB。API 就绪、scheduler 关闭后执行：
-
-```bash
-API_BASE_URL=http://127.0.0.1:3000 \
-VULTRACK_AI_IMPORT_PATH=/workspace/import/ai-analyses.csv.gz \
-VULTRACK_AI_EXPECTED_ROWS=63247 \
-npm run ai:import-duckdb
-```
-
-导入接口只接受 `/workspace/import` 根目录内的常规 `.csv`/`.csv.gz` 文件；空文件、
-行数不符或有记录未写入都会回滚。成功后核对 `inputRows=storedRows=63247`、
-matched/unmatched 数量、数据库 AI 计数，并随机抽查若干分析。不要删除权威压缩备份。
+恢复不保留生产 API。停止 API 写入后，在 Cafemini 内部临时目录生成一个使用
+`DuckDB.NET.Data`/`DuckDB.NET.Bindings.Full 1.5.3` 的一次性控制台工具；分别发布
+`linux-x64` 与 `linux-arm64`，ARM 版本只在 Cafemini 交叉发布，不在 Oracle 构建。
+工具直接读取服务器已有的 gzip，单事务完成临时表读取、`inputRows=63247` 校验、
+AI 表替换、`storedRows=63247` 校验和 commit；任一步不符必须 rollback。成功后核对
+matched/unmatched、AI 表计数并随机抽查，再删除临时源码、二进制和容器，只保留
+权威压缩备份及校验清单。最终应用镜像不包含 AI 导入 endpoint 或脚本。
 
 ## 5. 从开源数据重建
 

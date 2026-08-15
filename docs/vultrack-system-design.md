@@ -1,5 +1,8 @@
 # VulTrack 漏洞追踪系统设计初稿
 
+> **历史设计**：这是已被 DuckDB-first 单体架构取代的 PG-first 初稿，不是当前
+> 实现或部署说明。参见 `docs/design/duckdb-first-architecture.md`。
+
 资料调研日期: 2026-05-07
 
 ## 1. 设计目标

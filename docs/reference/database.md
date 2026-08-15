@@ -1,5 +1,9 @@
 # VulTrack 数据库参考
 
+> **历史文档（PG-first）**：本文记录已移除的 PostgreSQL/Adminer/staging 方案，
+> 不能用于当前部署或运维。当前数据库事实以
+> `docs/design/duckdb-first-architecture.md` 和 `DuckDbEvidenceStore.Schema.cs` 为准。
+
 ## 连接信息
 
 | 参数 | 值 |

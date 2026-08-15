@@ -1,5 +1,8 @@
 # VulTrack 漏洞追踪系统设计方案 v2
 
+> **历史设计**：这是已被 DuckDB-first 单体架构取代的 PG-first v2 方案，不是
+> 当前实现或部署说明。参见 `docs/design/duckdb-first-architecture.md`。
+
 资料调研日期: 2026-05-07
 
 本版针对第一版做收敛: 避免微服务化，暂时不引入 OpenSearch、Temporal、NATS、独立工作流系统。核心服务使用 .NET 10，采集器、解析器、版本 resolver、来源详情渲染器和 LLM matcher 以插件方式运行，PostgreSQL 承担主存储和主搜索能力，Redis 只用于队列、分布式锁、短期缓存和任务状态。

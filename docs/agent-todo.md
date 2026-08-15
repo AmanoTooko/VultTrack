@@ -51,10 +51,9 @@ serve an empty catalog.
 - [x] Drop the PostgreSQL step from `deploy-prod.sh` (root cause of the CI deploy failure
       `no such service: postgres`) and add memory/disk/branch/env preflight checks.
 - [ ] Redeploy cafemini onto the current branch so the real readiness probe takes effect.
-- [ ] Back up `ai_vulnerability_analyses` off-host and verify the restore before any
-      destructive cleanup. This table is the only asset that cannot be re-downloaded.
-- [ ] Cap DuckDB memory and threads in every compose file. Unbounded DuckDB takes ~80 % of host
-      RAM; the container budget is far smaller, so this is an active OOM risk.
+- [x] Back up `ai_vulnerability_analyses` to Oracle, cafemini, and local storage; verify matching
+      SHA-256, gzip integrity, and 63,247 data rows. Restore verification remains a deployment gate.
+- [x] Cap DuckDB memory and threads in every compose file and in out-of-container defaults.
 - [x] Serialize SBOM candidate matching with the single-writer lock. The path creates a temp
       table and uses COPY, so it intentionally uses a dedicated connection while holding
       `_writeLock` rather than borrowing a read-pool connection.

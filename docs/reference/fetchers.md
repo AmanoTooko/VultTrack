@@ -1,5 +1,9 @@
 # VulTrack Fetcher 使用文档
 
+> **历史文档（PG-first）**：其中的 `DATABASE_URL`、staging/upsert 和 Adminer
+> 流程已停用。当前 fetcher/checkpoint/spool 协议以
+> `plugins/fetchers/README.md` 与实现代码为准。
+
 ## 概述
 
 Fetcher 是独立的 Node.js 程序，从外部漏洞/威胁情报源采集数据，写入 PostgreSQL staging 表。每个 source 对应一个 `plugins/fetchers/sources/{source-code}.mjs` 模块。

@@ -1,5 +1,9 @@
 # Affected Data DuckDB Migration Proposal
 
+> **Completed historical proposal.** The final runtime is DuckDB-only; PostgreSQL is no
+> longer retained for queue or metadata duties. This document explains migration history,
+> not the current operating model.
+
 ## Summary
 
 The affected-component data path should move from PostgreSQL to DuckDB. PostgreSQL is still useful for vulnerability metadata, source run state, raw object references, and small queues, but the affected facts/components workload is append-heavy, mostly read-only after normalization, and dominated by analytical candidate scans. DuckDB is a better fit for this shape.

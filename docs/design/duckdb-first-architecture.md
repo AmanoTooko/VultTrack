@@ -1,6 +1,7 @@
 # DuckDB-First 架构（当前实际架构）
 
-本文档描述 VulTrack **当前**的架构。除本文档与 `docs/proposals/affected-duckdb-migration.md` 之外，`docs/design/` 下其余文档描述的是已被取代的 PostgreSQL-first 设计，仅具历史参考价值。
+本文档描述 VulTrack **当前**的架构。`docs/design/` 下其余 PostgreSQL-first
+文档以及已完成的迁移 proposal 仅具历史参考价值。
 
 ## 总览
 
@@ -14,10 +15,12 @@ VulTrack 是一个 DuckDB-first 的单体单进程应用：
 ## Spool 抓取管线
 
 1. `plugins/fetchers/sources/*.mjs`（约 46 个源）是普通 Node.js ESM 脚本，由 .NET 调度器以子进程方式执行。没有沙箱、没有 `plugin.json`、没有 stdin/stdout 插件协议；共享辅助代码在 `plugins/fetchers/lib/`。
-2. 每个 fetcher 将记录写成 gzip 压缩的 NDJSON 文件放入 `data/spool/incoming/`，写完后通过改名为 `*.ndjson.ready` 后缀原子性地发布。调度器**只**消费带 `.ready` 后缀的文件。
+2. 每个 fetcher 将记录写成逐行 JSON 的 NDJSON 文件放入 `data/spool/incoming/`，写完后通过改名为 `*.ndjson.ready` 后缀原子性地发布。调度器**只**消费带 `.ready` 后缀的文件。
 3. `DuckDbFirstScheduler` 串行运行 fetcher（同一时间只有一个抓取周期），把 ready 文件直接导入 DuckDB 的 `source_records`，成功后删除临时 spool 文件。失败按源隔离，不会拖垮 API 进程。
 4. FIRST EPSS 是例外：走原生 gzip CSV 快照管线（`DuckDbEvidenceStore.Epss.cs` / `DuckDbEvidenceNormalizer.Epss.cs`），不走 NDJSON spool。
-5. 空库时调度器自动运行/恢复 NVD 与 OSV 基线；基线检查点完成后，后续周期只跑增量 fetcher。
+5. 空库默认不会自动初始化。只有显式启用 scheduler 且设置
+   `DUCKDB_ALLOW_AUTOMATIC_INIT=true` 才允许 init source；生产基线应通过认证的
+   bootstrap 流程主动执行。基线检查点完成后，后续周期只跑增量 fetcher。
 
 ## DuckDB Schema 归属
 
@@ -58,7 +61,8 @@ VulTrack 是一个 DuckDB-first 的单体单进程应用：
 - `docs/design/testing/test-plan.md`
 - `docs/design/contracts/api-rpc.md`（API 风格约定仍有效，但其中 PG 相关存储描述已过时）
 
-仍具时效性：`docs/proposals/affected-duckdb-migration.md`（迁移理由与风险说明）。
+`docs/proposals/affected-duckdb-migration.md` 是已经完成的迁移提案，仅用于解释
+历史理由与风险，不再描述当前运行时。
 
 ## 关键约束（Gotchas）
 

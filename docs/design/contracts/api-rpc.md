@@ -1,5 +1,9 @@
 # API 契约: RPC 风格 GET/POST
 
+> **历史 API 草案**：GET/POST RPC 与 `ApiResult` envelope 风格仍可作背景，但本文
+> 多数路由和 PG 存储描述未实现或已移除。实际路由以
+> `src/VulTrack.App/Endpoints/` 和 `SbomEndpoints.cs` 为准。
+
 ## 1. 约束
 
 - 只允许 `GET` 和 `POST`。
