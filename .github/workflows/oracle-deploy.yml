@@ -1,0 +1,134 @@
+name: Deploy Oracle ARM
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_sha:
+        description: Full main-branch commit SHA whose multiarch images already passed CI
+        required: true
+        type: string
+      duckdb_path:
+        description: Verified in-container path of the existing Oracle DuckDB
+        required: true
+        default: /workspace/data/duckdb/vultrack.duckdb
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: vultrack-oracle-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate requested release
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DUCKDB_PATH: ${{ inputs.duckdb_path }}
+        run: |
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$DUCKDB_PATH" =~ ^/workspace/data/[A-Za-z0-9._/-]+$ ]]
+          [[ "$DUCKDB_PATH" != *..* ]]
+          git fetch --no-tags origin main
+          test "$(git rev-parse origin/main)" = "$RELEASE_SHA"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify official multiarch images
+        env:
+          RELEASE_SHA: ${{ inputs.release_sha }}
+        run: |
+          for image in vultrack-api vultrack-frontend; do
+            image_ref="ghcr.io/amanotooko/$image:$RELEASE_SHA"
+            manifest="$(docker buildx imagetools inspect "$image_ref")"
+            grep -q 'linux/amd64' <<<"$manifest"
+            grep -q 'linux/arm64' <<<"$manifest"
+            digest="$(awk '/^Digest:/ {print $2; exit}' <<<"$manifest")"
+            test -n "$digest"
+            printf -- '- `%s` manifest `%s`\n' "$image_ref" "$digest" >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Check deployment secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/vultrack_deploy
+          chmod 600 ~/.ssh/vultrack_deploy
+
+      - name: Preflight, configure, and deploy
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          RELEASE_SHA: ${{ inputs.release_sha }}
+          DUCKDB_PATH: ${{ inputs.duckdb_path }}
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -i ~/.ssh/vultrack_deploy -p "$port" "$DEPLOY_USER@$DEPLOY_HOST" \
+            bash -s -- "$RELEASE_SHA" "$DUCKDB_PATH" <<'REMOTE'
+          set -euo pipefail
+          release_sha="$1"
+          duckdb_path="$2"
+          app_dir=/home/ubuntu/vultrack
+
+          [[ "$release_sha" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$duckdb_path" =~ ^/workspace/data/[A-Za-z0-9._/-]+$ ]]
+          [[ "$duckdb_path" != *..* ]]
+          test "$(uname -m)" = aarch64
+          test -d "$app_dir/.git"
+          test -z "$(git -C "$app_dir" status --porcelain --untracked-files=no)"
+          test "$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)" -ge 4194304
+          test "$(df -Pk "$app_dir" | awk 'NR == 2 {print $4}')" -ge 20971520
+          test -f "$app_dir/.env.production"
+          test ! -L "$app_dir/.env.production"
+          test -f "$app_dir/data/${duckdb_path#/workspace/data/}"
+          test ! -L "$app_dir/data/${duckdb_path#/workspace/data/}"
+
+          git -C "$app_dir" fetch origin main
+          test "$(git -C "$app_dir" rev-parse origin/main)" = "$release_sha"
+          git -C "$app_dir" merge --ff-only origin/main
+          test "$(git -C "$app_dir" rev-parse HEAD)" = "$release_sha"
+
+          RELEASE_SHA="$release_sha" \
+          DUCKDB_PATH="$duckdb_path" \
+          SCHEDULER_ENABLED=false \
+            "$app_dir/scripts/configure-prod-release.sh"
+
+          REQUIRE_SCHEDULER_DISABLED=true "$app_dir/scripts/deploy-prod.sh"
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:3000/api/v1/system.health >/dev/null \
+              && curl -fsS http://127.0.0.1:3000/api/v1/system.ready >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Frontend proxy health/readiness check timed out" >&2
+          exit 1
+          REMOTE

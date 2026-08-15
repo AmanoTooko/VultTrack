@@ -63,15 +63,16 @@ if [[ "$duckdb_path" != /workspace/data/* || "$duckdb_path" == */../* || "$duckd
   echo "VULTRACK_DUCKDB_PATH must be explicitly set below /workspace/data" >&2
   exit 1
 fi
-host_duckdb_path="$(realpath -m -- "$APP_DIR/data/${duckdb_path#/workspace/data/}")"
+host_duckdb_candidate="$APP_DIR/data/${duckdb_path#/workspace/data/}"
+if [[ -L "$host_duckdb_candidate" ]]; then
+  echo "Refusing symbolic DuckDB path: $host_duckdb_candidate" >&2
+  exit 1
+fi
+host_duckdb_path="$(realpath -m -- "$host_duckdb_candidate")"
 case "$host_duckdb_path" in
   "$APP_DIR"/data/*) ;;
   *) echo "Resolved DuckDB path escapes $APP_DIR/data: $host_duckdb_path" >&2; exit 1 ;;
 esac
-if [[ -L "$host_duckdb_path" ]]; then
-  echo "Refusing symbolic DuckDB path: $host_duckdb_path" >&2
-  exit 1
-fi
 if [[ ! -f "$host_duckdb_path" ]]; then
   if [[ "${ALLOW_EMPTY_DUCKDB_INIT:-false}" != "true" ]]; then
     echo "DuckDB file does not exist: $host_duckdb_path" >&2

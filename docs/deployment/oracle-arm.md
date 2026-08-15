@@ -37,6 +37,13 @@ VULTRACK_FRONTEND_IMAGE=ghcr.io/amanotooko/vultrack-frontend:<git-sha>
 自动部署默认关闭。只有仓库变量 `VULTRACK_AUTO_DEPLOY=true` 时，GitHub
 Actions 才会执行生产部署。
 
+首次迁移使用手动 workflow `Deploy Oracle ARM`：输入已经通过 CI 且仍是
+`origin/main` HEAD 的完整 commit SHA，以及实机核对过的 DuckDB 容器路径。workflow
+会确认 API/frontend tag 同时包含 amd64 与 arm64、记录 manifest digest、在远端
+再次核对内存/磁盘/路径/干净 worktree，原子更新 `.env.production`，并强制
+`scheduler=false` 后部署。首次迁移 workflow 不提供启用 scheduler 的选项；只有
+监督 fetch/normalizer 通过后才单独开启。
+
 生产 Compose 故意不为镜像 tag 或 DuckDB 路径提供 fallback；直接运行时若漏掉
 `--env-file .env.production` 会立即失败，不能绕过路径与固定镜像门禁。
 
