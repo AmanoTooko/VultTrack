@@ -301,60 +301,32 @@ public sealed partial class DuckDbEvidenceStore
           matched_version varchar
         )
         """,
-        """
-        create index if not exists ix_duck_affected_facts_vulnerability_key on affected_facts(vulnerability_key)
-        """,
-        """
-        create index if not exists ix_duck_source_records_key on source_records(vulnerability_key)
-        """,
-        """
-        create index if not exists ix_duck_vulnerabilities_primary on vulnerabilities(primary_identifier)
-        """,
-        """
-        create index if not exists ix_duck_vulnerabilities_id on vulnerabilities(id)
-        """,
-        """
-        create index if not exists ix_duck_vulnerability_identifiers_value on vulnerability_identifiers(identifier)
-        """,
-        """
-        create index if not exists ix_duck_vulnerability_search_tokens_token on vulnerability_search_tokens(token)
-        """,
-        """
-        create index if not exists ix_duck_source_record_relations_vulnerability_id on source_record_relations(vulnerability_id)
-        """,
-        """
-        create index if not exists ix_duck_source_record_relations_related_identifier on source_record_relations(related_identifier)
-        """,
-        """
-        create index if not exists ix_duck_ai_vulnerability on ai_vulnerability_analyses(vulnerability_id)
-        """,
-        """
-        create index if not exists ix_duck_severity_scores_vulnerability_key on severity_scores(vulnerability_key)
-        """,
-        """
-        create index if not exists ix_duck_evidence_references_vulnerability_key on evidence_references(vulnerability_key)
-        """,
-        """
-        create index if not exists ix_duck_weaknesses_vulnerability_key on weaknesses(vulnerability_key)
-        """,
-        """
-        create index if not exists ix_duck_threat_scores_vulnerability_key on threat_scores(vulnerability_key)
-        """,
-        """
-        create index if not exists ix_duck_affected_components_vulnerability_id on affected_components(vulnerability_id)
-        """,
-        """
-        create index if not exists ix_duck_affected_components_purl_without_version on affected_components(purl_without_version)
-        """,
-        """
-        create index if not exists ix_duck_affected_components_package_lower on affected_components(package_name_lower)
-        """,
-        """
-        create index if not exists ix_duck_sbom_components_sbom on sbom_components(sbom_id)
-        """,
-        """
-        create index if not exists ix_duck_sbom_matches_sbom on sbom_matches(sbom_id)
-        """
+        // DuckDB 1.5.x can persist corrupted ART state after incremental
+        // UPDATE/DELETE workloads and invalidate the whole database on the
+        // next write. VulTrack has no PK/UNIQUE constraints, so dropping every
+        // explicit ART index removes that failure mode while snapshots and
+        // columnar scans continue to serve reads.
+        "drop index if exists ix_duck_affected_facts_vulnerability_key",
+        "drop index if exists ix_duck_source_records_key",
+        "drop index if exists ix_duck_vulnerabilities_primary",
+        "drop index if exists ix_duck_vulnerabilities_id",
+        "drop index if exists ix_duck_vulnerability_identifiers_value",
+        "drop index if exists ix_duck_vulnerability_search_tokens_token",
+        "drop index if exists ix_duck_source_record_relations_vulnerability_id",
+        "drop index if exists ix_duck_source_record_relations_related_identifier",
+        "drop index if exists ix_duck_ai_vulnerability",
+        "drop index if exists ix_duck_severity_scores_vulnerability_key",
+        "drop index if exists ix_duck_evidence_references_vulnerability_key",
+        "drop index if exists ix_duck_weaknesses_vulnerability_key",
+        "drop index if exists ix_duck_threat_scores_vulnerability_key",
+        "drop index if exists ix_duck_affected_components_vulnerability_id",
+        "drop index if exists ix_duck_affected_components_cpe",
+        "drop index if exists ix_duck_affected_components_purl",
+        "drop index if exists ix_duck_affected_components_purl_without_version",
+        "drop index if exists ix_duck_affected_components_package_lower",
+        "drop index if exists ix_duck_affected_components_display_lower",
+        "drop index if exists ix_duck_sbom_components_sbom",
+        "drop index if exists ix_duck_sbom_matches_sbom"
     ];
 
     private const string AffectedComponentsTableStatement = """
@@ -379,12 +351,7 @@ public sealed partial class DuckDbEvidenceStore
         )
         """;
 
-    private static readonly string[] AffectedComponentIndexStatements =
-    [
-        "create index if not exists ix_duck_affected_components_vulnerability_id on affected_components(vulnerability_id)",
-        "create index if not exists ix_duck_affected_components_purl_without_version on affected_components(purl_without_version)",
-        "create index if not exists ix_duck_affected_components_package_lower on affected_components(package_name_lower)"
-    ];
+    private static readonly string[] AffectedComponentIndexStatements = [];
 
     private static readonly string[] AffectedComponentDropIndexStatements =
     [
@@ -396,13 +363,7 @@ public sealed partial class DuckDbEvidenceStore
         "drop index if exists ix_duck_affected_components_display_lower"
     ];
 
-    private static readonly string[] CatalogIndexStatements =
-    [
-        "create index if not exists ix_duck_vulnerabilities_primary on vulnerabilities(primary_identifier)",
-        "create index if not exists ix_duck_vulnerabilities_id on vulnerabilities(id)",
-        "create index if not exists ix_duck_vulnerability_identifiers_value on vulnerability_identifiers(identifier)",
-        "create index if not exists ix_duck_vulnerability_search_tokens_token on vulnerability_search_tokens(token)"
-    ];
+    private static readonly string[] CatalogIndexStatements = [];
 
     private static readonly string[] CatalogDropIndexStatements =
     [

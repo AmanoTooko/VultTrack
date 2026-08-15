@@ -1,4 +1,5 @@
 using System.Text.Json;
+using DuckDB.NET.Data;
 using Microsoft.Extensions.Configuration;
 using VulTrack.App;
 
@@ -7,6 +8,37 @@ namespace VulTrack.Tests;
 [Collection("DuckDbSpoolEnvironment")]
 public sealed class DuckDbPrimaryStatusTests
 {
+    [Fact]
+    public async Task Initialization_RemovesExplicitArtIndexes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-primary-status-tests", Guid.NewGuid().ToString("N"));
+        var databasePath = Path.Combine(root, "no-art-indexes.duckdb");
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = databasePath,
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using (var store = new DuckDbEvidenceStore(configuration))
+                await store.InitializeAsync(CancellationToken.None);
+
+            using var connection = new DuckDBConnection($"Data Source={databasePath}");
+            connection.Open();
+            using var command = connection.CreateCommand();
+            command.CommandText = "select count(*) from duckdb_indexes() where index_name like 'ix_duck_%'";
+
+            Assert.Equal(0L, Convert.ToInt64(command.ExecuteScalar()));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task StringSkipReason_RemainsAValidSuccessfulSourceStatus()
     {

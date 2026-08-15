@@ -40,6 +40,11 @@ public sealed class DuckDbFirstScheduler(
             }
             catch (Exception ex)
             {
+                if (IsFatalDuckDbInvalidation(ex))
+                {
+                    logger.LogCritical(ex, "DuckDB was invalidated by a fatal storage error; stopping the scheduler to prevent repeated writes. Restart only after the database and indexes have been checked.");
+                    return;
+                }
                 logger.LogError(ex, "DuckDB-first scheduler cycle failed; the next cycle will retry.");
             }
             await Task.Delay(interval, stoppingToken);
@@ -75,6 +80,7 @@ public sealed class DuckDbFirstScheduler(
                 }
                 catch (Exception ex)
                 {
+                    if (IsFatalDuckDbInvalidation(ex)) throw;
                     logger.LogError(ex, "DuckDB-first scheduled source {SourceCode} failed; continuing with the remaining sources.", source);
                 }
             }
@@ -86,13 +92,16 @@ public sealed class DuckDbFirstScheduler(
         }
     }
 
-    public async Task RunSourceAsync(string sourceCode, bool force, CancellationToken ct)
+    public Task RunSourceAsync(string sourceCode, bool force, CancellationToken ct)
+        => RunSourceAsync(sourceCode, force, limit: 0, ct);
+
+    public async Task RunSourceAsync(string sourceCode, bool force, int limit, CancellationToken ct)
     {
         if (!await cycleLock.WaitAsync(0, ct))
             throw new InvalidOperationException("A DuckDB-first fetch cycle is already running.");
         try
         {
-            await RunFetcherAsync(sourceCode, force, ct);
+            await RunFetcherAsync(sourceCode, force, limit, ct);
             await ConsumeReadyFilesAsync(ct);
             await FlushDeferredCatalogRebuildAsync(ct);
         }
@@ -157,7 +166,10 @@ public sealed class DuckDbFirstScheduler(
             catalog.Vulnerabilities, catalog.Identifiers);
     }
 
-    private async Task RunFetcherAsync(string sourceCode, bool force, CancellationToken ct)
+    private Task RunFetcherAsync(string sourceCode, bool force, CancellationToken ct)
+        => RunFetcherAsync(sourceCode, force, limit: 0, ct);
+
+    private async Task RunFetcherAsync(string sourceCode, bool force, int limit, CancellationToken ct)
     {
         var root = options.RepoRoot ?? "/workspace";
         var start = new ProcessStartInfo
@@ -184,6 +196,8 @@ public sealed class DuckDbFirstScheduler(
                 start.Environment["OSV_BOOTSTRAP_WATERMARK"] = watermark;
         }
         if (force) start.Environment["FETCHER_FORCE"] = "1";
+        if (limit > 0)
+            start.Environment["FETCHER_MAX_RECORDS"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         using var process = Process.Start(start) ?? throw new InvalidOperationException($"Unable to start fetcher {sourceCode}.");
         var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
@@ -272,4 +286,16 @@ public sealed class DuckDbFirstScheduler(
     private static string LastLine(string value) => value
         .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
         .LastOrDefault() ?? string.Empty;
+
+    private static bool IsFatalDuckDbInvalidation(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current.Message.Contains("database has been invalidated", StringComparison.OrdinalIgnoreCase)
+                || current.Message.Contains("Failed to delete all rows from index", StringComparison.OrdinalIgnoreCase)
+                || current.Message.Contains("Corrupted ART index", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
 }

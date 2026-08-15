@@ -130,7 +130,7 @@ dotnet SDK is not assumed to be installed on the host; always run dotnet build/t
 ## Known Gotchas
 
 - DuckDB is single-writer per file; all writes must be serialized. Readers should share the store's managed connection.
-- DuckDB 1.5.x ART index delete hazard: avoid deleting rows from tables with ART indexes in hot paths; prefer table-swap rebuilds or delete-and-append on unindexed columns.
+- DuckDB 1.5.x ART index state can become persistently corrupted under incremental UPDATE/DELETE workloads. Explicit ART indexes are currently removed during schema initialization; do not re-enable them until the upstream issue is closed and production-scale churn benchmarks pass.
 - `vulnerability_latest` is capped at 5000 rows; it is a "latest" materialization, not the full catalog.
 - Spool promotion is atomic via the `.ready` suffix; never ingest files without the suffix and never rename partially written files.
 - The catalog is rebuilt from `source_records` inside DuckDB; do not hand-edit projection tables.
