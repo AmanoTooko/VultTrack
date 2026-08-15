@@ -29,4 +29,11 @@ public static class ApiResult
         error = new { code = "AUTH_REQUIRED", message },
         requestId = Guid.NewGuid().ToString("N")[..8]
     }, statusCode: StatusCodes.Status401Unauthorized);
+
+    public static IResult Unavailable(string code, string message) => Results.Json(new
+    {
+        ok = false,
+        error = new { code, message },
+        requestId = Guid.NewGuid().ToString("N")[..8]
+    }, statusCode: StatusCodes.Status503ServiceUnavailable);
 }

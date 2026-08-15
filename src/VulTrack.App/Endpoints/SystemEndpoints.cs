@@ -11,10 +11,18 @@ public static class SystemEndpoints
             dotnet = Environment.Version.ToString()
         }));
 
-        app.MapGet("/api/v1/system.ready", async (DuckDbEvidenceStore duckDb, CancellationToken ct) =>
+        app.MapGet("/api/v1/system.ready", async (DuckDbEvidenceStore duckDb, ILoggerFactory loggerFactory, CancellationToken ct) =>
         {
-            await duckDb.InitializeAsync(ct);
-            return ApiResult.Ok(new { status = "ready", storageBackend = "duckdb", path = duckDb.DatabasePath });
+            try
+            {
+                await duckDb.CheckReadyAsync(ct);
+                return ApiResult.Ok(new { status = "ready", storageBackend = "duckdb", path = duckDb.DatabasePath });
+            }
+            catch (Exception ex)
+            {
+                loggerFactory.CreateLogger("Readiness").LogError(ex, "DuckDB readiness probe failed.");
+                return ApiResult.Unavailable("DUCKDB_NOT_READY", "DuckDB is not ready for queries.");
+            }
         });
 
         app.MapGet("/api/v1/system.status", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore duckDb, CancellationToken ct) =>

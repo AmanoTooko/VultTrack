@@ -4,6 +4,15 @@ namespace VulTrack.App;
 
 public sealed partial class DuckDbEvidenceStore
 {
+    public async Task CheckReadyAsync(CancellationToken ct)
+    {
+        await InitializeAsync(ct);
+        using var lease = await RentReadConnectionAsync(ct);
+        using var command = lease.Connection.CreateCommand();
+        command.CommandText = "select 1 from vulnerabilities limit 1";
+        await command.ExecuteScalarAsync(ct);
+    }
+
     public async Task<DuckDbSourceProjectionState> GetSourceProjectionStateAsync(string sourceCode, CancellationToken ct)
     {
         await InitializeAsync(ct);
