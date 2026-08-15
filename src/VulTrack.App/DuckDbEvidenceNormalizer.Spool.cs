@@ -575,6 +575,37 @@ public sealed partial class DuckDbEvidenceNormalizer
                     severity = ExtractOsvSeverity(payload["severity"]).ToList();
                     references = ExtractReferences(payload["references"]).ToList();
                     weaknesses = [];
+                    if (IsEvidenceOnlyDistributionProjection(
+                            osvId, title, description, affected, severity, references))
+                    {
+                        if (directCveAliases.Length == 1)
+                        {
+                            // A direct alias is stronger identity evidence than a relationship.
+                            key = directCveAliases[0];
+                            normalizationVersion = "evidence-projection-v1";
+                        }
+                        else
+                        {
+                            var relationCves = upstreamIdentifiers
+                                .Concat(relatedIdentifiers)
+                                .Where(Identifier.IsCve)
+                                .Distinct(StringComparer.OrdinalIgnoreCase)
+                                .ToArray();
+                            if (directCveAliases.Length == 0 && relationCves.Length == 1)
+                            {
+                                // MINI/CGA records carry downstream package ranges but no advisory
+                                // content. A unique related CVE is the owner of those source facts.
+                                key = relationCves[0];
+                                normalizationVersion = "evidence-projection-v1";
+                            }
+                            else
+                            {
+                                // Keep ambiguous raw evidence and relations without creating an
+                                // empty top-level vulnerability in the searchable catalog.
+                                normalizationVersion = "evidence-projection-unlinked-v1";
+                            }
+                        }
+                    }
                     break;
                 }
             case "ghsa":
@@ -659,6 +690,7 @@ public sealed partial class DuckDbEvidenceNormalizer
         }
 
         key = Identifier.Normalize(key);
+        var sourceIdentityKey = Identifier.Normalize(externalId);
         var promotedKey = Identifier.ResolveCanonicalIdentity(key, identifiers);
         if (!string.Equals(promotedKey, key, StringComparison.OrdinalIgnoreCase))
         {
@@ -668,10 +700,12 @@ public sealed partial class DuckDbEvidenceNormalizer
             normalizationVersion = "identity-links-v6";
         }
         upstreamIdentifiers = upstreamIdentifiers
-            .Where(identifier => !string.Equals(identifier, key, StringComparison.OrdinalIgnoreCase))
+            .Where(identifier => !string.Equals(identifier, key, StringComparison.OrdinalIgnoreCase)
+                                 && !string.Equals(identifier, sourceIdentityKey, StringComparison.OrdinalIgnoreCase))
             .ToArray();
         relatedIdentifiers = relatedIdentifiers
-            .Where(identifier => !string.Equals(identifier, key, StringComparison.OrdinalIgnoreCase))
+            .Where(identifier => !string.Equals(identifier, key, StringComparison.OrdinalIgnoreCase)
+                                 && !string.Equals(identifier, sourceIdentityKey, StringComparison.OrdinalIgnoreCase))
             .Except(upstreamIdentifiers, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         identifiers = identifiers
@@ -745,6 +779,24 @@ public sealed partial class DuckDbEvidenceNormalizer
                 normalizationVersion),
             exploit,
             threatScore);
+    }
+
+    private static bool IsEvidenceOnlyDistributionProjection(
+        string osvId,
+        string? title,
+        string? description,
+        IReadOnlyList<DuckDbAffectedFact> affected,
+        IReadOnlyList<DuckDbSeverityScore> severity,
+        IReadOnlyList<DuckDbReference> references)
+    {
+        var normalized = Identifier.Normalize(osvId);
+        return (normalized.StartsWith("MINI-", StringComparison.Ordinal)
+                || normalized.StartsWith("CGA-", StringComparison.Ordinal))
+               && string.IsNullOrWhiteSpace(title)
+               && string.IsNullOrWhiteSpace(description)
+               && affected.Count > 0
+               && severity.Count == 0
+               && references.Count == 0;
     }
 
     private static string? FirstLocalizedValue(JsonNode? node, string language)

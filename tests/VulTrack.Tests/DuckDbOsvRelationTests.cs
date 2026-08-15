@@ -281,6 +281,105 @@ public sealed class DuckDbOsvRelationTests
     }
 
     [Fact]
+    public async Task EvidenceOnlyDistributionProjectionsAttachToOneCveOrStayOutOfCatalog()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-projection-tests", Guid.NewGuid().ToString("N"));
+        var previousSpoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
+        Directory.CreateDirectory(Path.Combine(root, "incoming"));
+        Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "projections.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var normalizer = new DuckDbEvidenceNormalizer(
+                new UnusedServiceProvider(), store, NullLogger<DuckDbEvidenceNormalizer>.Instance);
+
+            var fileName = "osv-projections-s0000.ndjson.ready";
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "incoming", fileName),
+                string.Join(
+                    Environment.NewLine,
+                    ProjectionSpoolLine(
+                        "MINI-AAAA-BBBB-0001",
+                        upstream: ["CVE-2026-42001", "GHSA-AAAA-BBBB-0001"]),
+                    ProjectionSpoolLine(
+                        "CGA-AAAA-BBBB-0002",
+                        related: ["CGA-AAAA-BBBB-0002", "CVE-2026-42002", "GHSA-AAAA-BBBB-0002"]),
+                    ProjectionSpoolLine(
+                        "MINI-AAAA-BBBB-0003",
+                        upstream: ["GHSA-AAAA-BBBB-0003"]),
+                    ProjectionSpoolLine(
+                        "MINI-AAAA-BBBB-0004",
+                        aliases: ["CVE-2026-42004"],
+                        upstream: ["CVE-2026-99999"]),
+                    ProjectionSpoolLine(
+                        "MINI-AAAA-BBBB-0005",
+                        aliases: ["CVE-2026-42005", "CVE-2026-42006"])) + Environment.NewLine);
+            await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true),
+                CancellationToken.None);
+
+            var mini = await store.GetCatalogByIdentifierAsync("MINI-AAAA-BBBB-0001", CancellationToken.None);
+            Assert.NotNull(mini);
+            Assert.Equal("CVE-2026-42001", mini.PrimaryIdentifier);
+            Assert.Contains("MINI-AAAA-BBBB-0001", mini.Identifiers);
+            var miniDetail = JsonSerializer.SerializeToNode(
+                await store.GetCatalogDetailAsync(mini.Id, CancellationToken.None))!.AsObject();
+            Assert.Single(miniDetail["affectedFacts"]!.AsArray());
+            Assert.Equal(
+                ["GHSA-AAAA-BBBB-0001"],
+                miniDetail["vulnerability"]!["upstreamIdentifiers"]!.AsArray()
+                    .Select(value => value!.GetValue<string>()));
+
+            var cga = await store.GetCatalogByIdentifierAsync("CGA-AAAA-BBBB-0002", CancellationToken.None);
+            Assert.NotNull(cga);
+            Assert.Equal("CVE-2026-42002", cga.PrimaryIdentifier);
+            var cgaDetail = JsonSerializer.SerializeToNode(
+                await store.GetCatalogDetailAsync(cga.Id, CancellationToken.None))!.AsObject();
+            Assert.Equal(
+                ["GHSA-AAAA-BBBB-0002"],
+                cgaDetail["vulnerability"]!["relatedIdentifiers"]!.AsArray()
+                    .Select(value => value!.GetValue<string>()));
+
+            Assert.Null(await store.GetCatalogByIdentifierAsync(
+                "MINI-AAAA-BBBB-0003", CancellationToken.None));
+
+            var directAlias = await store.GetCatalogByIdentifierAsync(
+                "MINI-AAAA-BBBB-0004", CancellationToken.None);
+            Assert.NotNull(directAlias);
+            Assert.Equal("CVE-2026-42004", directAlias.PrimaryIdentifier);
+            var directAliasDetail = JsonSerializer.SerializeToNode(
+                await store.GetCatalogDetailAsync(directAlias.Id, CancellationToken.None))!.AsObject();
+            Assert.Equal(
+                ["CVE-2026-99999"],
+                directAliasDetail["vulnerability"]!["upstreamIdentifiers"]!.AsArray()
+                    .Select(value => value!.GetValue<string>()));
+
+            Assert.Null(await store.GetCatalogByIdentifierAsync(
+                "MINI-AAAA-BBBB-0005", CancellationToken.None));
+
+            // Keyed rebuilds must keep the same suppression rule used by a full rebuild.
+            await store.RebuildCatalogForKeysAsync(
+                ["MINI-AAAA-BBBB-0003", "MINI-AAAA-BBBB-0005"], CancellationToken.None);
+            Assert.Null(await store.GetCatalogByIdentifierAsync(
+                "MINI-AAAA-BBBB-0003", CancellationToken.None));
+            Assert.Null(await store.GetCatalogByIdentifierAsync(
+                "MINI-AAAA-BBBB-0005", CancellationToken.None));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", previousSpoolPath);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task MergedDistroAdvisoriesKeepTheirOwnAffectedRangesAsSeparateSourceFacts()
     {
         var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-distro-tests", Guid.NewGuid().ToString("N"));
@@ -393,6 +492,53 @@ public sealed class DuckDbOsvRelationTests
                                 {
                                     new Dictionary<string, string> { ["introduced"] = "0" },
                                     new Dictionary<string, string> { ["fixed"] = fixedVersion }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+    private static string ProjectionSpoolLine(
+        string advisoryId,
+        string[]? aliases = null,
+        string[]? upstream = null,
+        string[]? related = null) =>
+        JsonSerializer.Serialize(new
+        {
+            schemaVersion = 1,
+            sourceCode = "osv",
+            runId = "projections",
+            externalKey = advisoryId,
+            externalId = advisoryId,
+            modifiedAt = "2026-08-10T00:00:00Z",
+            recordHash = $"{advisoryId}-v1",
+            payload = new
+            {
+                id = advisoryId,
+                aliases,
+                upstream,
+                related,
+                affected = new[]
+                {
+                    new
+                    {
+                        package = new
+                        {
+                            ecosystem = "MinimOS",
+                            name = "fixture-package",
+                            purl = "pkg:apk/minimos/fixture-package"
+                        },
+                        ranges = new[]
+                        {
+                            new
+                            {
+                                type = "ECOSYSTEM",
+                                events = new[]
+                                {
+                                    new Dictionary<string, string> { ["introduced"] = "0" },
+                                    new Dictionary<string, string> { ["fixed"] = "2.0.0" }
                                 }
                             }
                         }

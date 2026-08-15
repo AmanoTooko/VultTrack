@@ -142,6 +142,12 @@ public sealed partial class DuckDbEvidenceStore
                     where regexp_full_match(identifier, '^(CVE-[0-9]{4}-[0-9]{4,}|[A-Z][A-Z0-9_.]*-[A-Z0-9][A-Z0-9_.:-]*)$')
                       and (not starts_with(identifier, 'CVE-') or identifier = vulnerability_key)
                       and source_code not in ('exploitdb', 'poc-in-github', 'nuclei-templates', 'metasploit', 'trickest-cve', 'seebug')
+                      and exists (
+                        select 1 from source_records s
+                        where s.source_code = source_record_identifiers.source_code
+                          and s.source_record_id = source_record_identifiers.source_record_id
+                          and coalesce(s.normalizer_version, '') <> 'evidence-projection-unlinked-v1'
+                      )
                     group by identifier
                     """);
                 Execute(connection, """
@@ -179,6 +185,7 @@ public sealed partial class DuckDbEvidenceStore
                              count(*) as source_count
                       from source_records
                       where source_code <> 'nuclei-templates'
+                        and coalesce(normalizer_version, '') <> 'evidence-projection-unlinked-v1'
                       group by vulnerability_id, vulnerability_key
                     ), severity_rollup as (
                       select vulnerability_key, max(score) as max_cvss_score,
@@ -218,6 +225,12 @@ public sealed partial class DuckDbEvidenceStore
                       where regexp_full_match(identifier, '^(CVE-[0-9]{4}-[0-9]{4,}|[A-Z][A-Z0-9_.]*-[A-Z0-9][A-Z0-9_.:-]*)$')
                         and (not starts_with(identifier, 'CVE-') or identifier = vulnerability_key)
                         and source_code not in ('exploitdb', 'poc-in-github', 'nuclei-templates', 'metasploit', 'trickest-cve', 'seebug')
+                        and exists (
+                          select 1 from source_records s
+                          where s.source_code = source_record_identifiers.source_code
+                            and s.source_record_id = source_record_identifiers.source_record_id
+                            and coalesce(s.normalizer_version, '') <> 'evidence-projection-unlinked-v1'
+                        )
                       group by vulnerability_key
                     ) i on i.vulnerability_key = r.vulnerability_key
                     """);
@@ -295,6 +308,12 @@ public sealed partial class DuckDbEvidenceStore
                       and regexp_full_match(identifier, '^(CVE-[0-9]{4}-[0-9]{4,}|[A-Z][A-Z0-9_.]*-[A-Z0-9][A-Z0-9_.:-]*)$')
                       and (not starts_with(identifier, 'CVE-') or identifier = vulnerability_key)
                       and source_code not in ('exploitdb', 'poc-in-github', 'nuclei-templates', 'metasploit', 'trickest-cve', 'seebug')
+                      and exists (
+                        select 1 from source_records s
+                        where s.source_code = source_record_identifiers.source_code
+                          and s.source_record_id = source_record_identifiers.source_record_id
+                          and coalesce(s.normalizer_version, '') <> 'evidence-projection-unlinked-v1'
+                      )
                     group by identifier
                     """);
                 Execute(connection, $$"""
@@ -333,6 +352,7 @@ public sealed partial class DuckDbEvidenceStore
                       from source_records
                       where vulnerability_key in ({{keyList}})
                         and source_code <> 'nuclei-templates'
+                        and coalesce(normalizer_version, '') <> 'evidence-projection-unlinked-v1'
                       group by vulnerability_id, vulnerability_key
                     ), severity_rollup as (
                       select vulnerability_key, max(score) as max_cvss_score,
@@ -375,6 +395,12 @@ public sealed partial class DuckDbEvidenceStore
                         and regexp_full_match(identifier, '^(CVE-[0-9]{4}-[0-9]{4,}|[A-Z][A-Z0-9_.]*-[A-Z0-9][A-Z0-9_.:-]*)$')
                         and (not starts_with(identifier, 'CVE-') or identifier = vulnerability_key)
                         and source_code not in ('exploitdb', 'poc-in-github', 'nuclei-templates', 'metasploit', 'trickest-cve', 'seebug')
+                        and exists (
+                          select 1 from source_records s
+                          where s.source_code = source_record_identifiers.source_code
+                            and s.source_record_id = source_record_identifiers.source_record_id
+                            and coalesce(s.normalizer_version, '') <> 'evidence-projection-unlinked-v1'
+                        )
                       group by vulnerability_key
                     ) i on i.vulnerability_key = r.vulnerability_key
                     """);
