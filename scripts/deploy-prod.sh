@@ -12,12 +12,10 @@ if [[ "$current_branch" != "$BRANCH" ]]; then
   exit 1
 fi
 
-git fetch origin "$BRANCH"
 if ! git diff --quiet || ! git diff --cached --quiet; then
   echo "Refusing to deploy over tracked local changes in $APP_DIR" >&2
   exit 1
 fi
-git merge --ff-only "origin/$BRANCH"
 
 case "$(uname -m)" in
   aarch64|arm64|x86_64|amd64) ;;
@@ -97,6 +95,27 @@ if [[ "${REQUIRE_SCHEDULER_DISABLED:-false}" == "true" ]]; then
     exit 1
   fi
 fi
+
+admin_password="$(unquote_env_value "$(read_env_setting VULTRACK_ADMIN_PASSWORD || true)")"
+if [[ -z "$admin_password" || "$admin_password" == "admin" || "$admin_password" == "change-me" ]]; then
+  echo "VULTRACK_ADMIN_PASSWORD must be explicitly set to a non-default value" >&2
+  exit 1
+fi
+
+for image_key in VULTRACK_API_IMAGE VULTRACK_FRONTEND_IMAGE; do
+  image="$(unquote_env_value "$(read_env_setting "$image_key" || true)")"
+  if [[ -z "$image" ]]; then
+    echo "$image_key must pin an image built from a verified commit" >&2
+    exit 1
+  fi
+  if [[ "$image" == *:latest && "${ALLOW_FLOATING_IMAGE_TAG:-false}" != "true" ]]; then
+    echo "$image_key must not use the floating latest tag" >&2
+    exit 1
+  fi
+done
+
+git fetch origin "$BRANCH"
+git merge --ff-only "origin/$BRANCH"
 
 if command -v systemctl >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   sudo systemctl restart vultrack-docker-forward.service || true
