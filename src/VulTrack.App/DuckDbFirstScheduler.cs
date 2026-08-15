@@ -26,8 +26,31 @@ public sealed class DuckDbFirstScheduler(
 
         var interval = TimeSpan.FromSeconds(options.Scheduler.FetchIntervalSeconds);
         var initialDelay = TimeSpan.FromSeconds(options.Scheduler.InitialDelaySeconds);
-        await ConsumeReadyFilesAsync(stoppingToken);
-        await FlushDeferredCatalogRebuildAsync(stoppingToken);
+        // The startup drain must not be able to stop the host. A single malformed spool file
+        // (for example a stale nuclei revision) throws here, and because ExecuteAsync is a
+        // BackgroundService entry point the default BackgroundServiceExceptionBehavior of
+        // StopHost would take the whole API down with it. The failing file is already
+        // quarantined as .failed by the normalizer, so the scheduled cycle can continue.
+        try
+        {
+            await ConsumeReadyFilesAsync(stoppingToken);
+            await FlushDeferredCatalogRebuildAsync(stoppingToken);
+        }
+        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+        {
+            return;
+        }
+        catch (Exception ex)
+        {
+            if (IsFatalDuckDbInvalidation(ex))
+            {
+                Volatile.Write(ref fatalStorageError, ex);
+                logger.LogCritical(ex, "DuckDB was invalidated by a fatal storage error; stopping the scheduler to prevent repeated writes. Restart only after the database and indexes have been checked.");
+                return;
+            }
+            logger.LogError(ex, "DuckDB-first startup spool drain failed; the offending file was quarantined and the scheduled cycle will continue.");
+        }
+
         if (initialDelay > TimeSpan.Zero) await Task.Delay(initialDelay, stoppingToken);
 
         while (!stoppingToken.IsCancellationRequested)
