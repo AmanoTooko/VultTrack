@@ -10,6 +10,11 @@ public sealed record AdminLoginRequest(string Username, string Password);
 
 public sealed record DuckDbAiImportRequest(string Path);
 
+public sealed record DuckDbSourceFetchRequest(
+    string SourceCode,
+    bool Force = false,
+    int Limit = 0);
+
 public sealed record AiSummaryRequest(
     Guid Id,
     bool Force = false);

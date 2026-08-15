@@ -10,6 +10,15 @@ public static class AdminEndpoints
             return ApiResult.Ok(SourceEndpoints.DuckDbConfiguredSources(options));
         });
 
+        app.MapPost("/api/v1/admin.source.fetch", async (HttpContext context, AdminAuthService auth, DuckDbFirstScheduler scheduler, DuckDbSourceFetchRequest request, CancellationToken ct) =>
+        {
+            if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
+            if (string.IsNullOrWhiteSpace(request.SourceCode))
+                return ApiResult.Error("SOURCE_REQUIRED", "sourceCode is required.");
+            await scheduler.RunSourceAsync(request.SourceCode.Trim(), request.Force, request.Limit, ct);
+            return ApiResult.Ok(new { sourceCode = request.SourceCode.Trim(), request.Force, request.Limit });
+        });
+
         app.MapPost("/api/v1/admin.duckdbSpool.ingest", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceNormalizer normalizer, DuckDbSpoolIngestRequest request, CancellationToken ct) =>
         {
             if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
