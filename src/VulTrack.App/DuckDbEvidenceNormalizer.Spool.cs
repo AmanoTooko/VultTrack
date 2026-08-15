@@ -691,7 +691,12 @@ public sealed partial class DuckDbEvidenceNormalizer
 
         key = Identifier.Normalize(key);
         var sourceIdentityKey = Identifier.Normalize(externalId);
-        var promotedKey = Identifier.ResolveCanonicalIdentity(key, identifiers);
+        var promotedKey = string.Equals(
+            normalizationVersion,
+            "evidence-projection-unlinked-v1",
+            StringComparison.Ordinal)
+            ? key
+            : Identifier.ResolveCanonicalIdentity(key, identifiers);
         if (!string.Equals(promotedKey, key, StringComparison.OrdinalIgnoreCase))
         {
             // The original identifier stays below as a searchable alias. Upstream/related IDs are

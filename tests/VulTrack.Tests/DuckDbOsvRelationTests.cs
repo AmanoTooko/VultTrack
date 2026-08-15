@@ -320,7 +320,10 @@ public sealed class DuckDbOsvRelationTests
                         upstream: ["CVE-2026-99999"]),
                     ProjectionSpoolLine(
                         "MINI-AAAA-BBBB-0005",
-                        aliases: ["CVE-2026-42005", "CVE-2026-42006"])) + Environment.NewLine);
+                        aliases: ["CVE-2026-42005", "CVE-2026-42006"]),
+                    ProjectionSpoolLine(
+                        "CGA-AAAA-BBBB-0006",
+                        aliases: ["GHSA-AAAA-BBBB-0006"])) + Environment.NewLine);
             await normalizer.IngestSpoolAsync(
                 new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true),
                 CancellationToken.None);
@@ -363,14 +366,19 @@ public sealed class DuckDbOsvRelationTests
 
             Assert.Null(await store.GetCatalogByIdentifierAsync(
                 "MINI-AAAA-BBBB-0005", CancellationToken.None));
+            Assert.Null(await store.GetCatalogByIdentifierAsync(
+                "CGA-AAAA-BBBB-0006", CancellationToken.None));
 
             // Keyed rebuilds must keep the same suppression rule used by a full rebuild.
             await store.RebuildCatalogForKeysAsync(
-                ["MINI-AAAA-BBBB-0003", "MINI-AAAA-BBBB-0005"], CancellationToken.None);
+                ["MINI-AAAA-BBBB-0003", "MINI-AAAA-BBBB-0005", "CGA-AAAA-BBBB-0006"],
+                CancellationToken.None);
             Assert.Null(await store.GetCatalogByIdentifierAsync(
                 "MINI-AAAA-BBBB-0003", CancellationToken.None));
             Assert.Null(await store.GetCatalogByIdentifierAsync(
                 "MINI-AAAA-BBBB-0005", CancellationToken.None));
+            Assert.Null(await store.GetCatalogByIdentifierAsync(
+                "CGA-AAAA-BBBB-0006", CancellationToken.None));
         }
         finally
         {
