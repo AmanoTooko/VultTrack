@@ -10,7 +10,8 @@ Current state: DuckDB-first single binary. One .NET 10 service `VulTrack.App` is
 
 ## Source Of Truth
 
-- Current architecture: `docs/design/duckdb-first-architecture.md` (read this first).
+- Current work queue and handoff state: `docs/agent-todo.md` (read this first).
+- Current architecture: `docs/design/duckdb-first-architecture.md`.
 - Migration rationale: `docs/proposals/affected-duckdb-migration.md`.
 - API contract intent: `docs/design/contracts/api-rpc.md`.
 - Actual DuckDB schema ownership: `src/VulTrack.App/DuckDbEvidenceStore.cs`.
@@ -22,7 +23,8 @@ Legacy design docs: everything else under `docs/design/` describes the supersede
 
 - Build a modular monolith as a single binary, not microservices.
 - Main runtime is one `.NET 10 LTS` service: `VulTrack.App` (API, `DuckDbFirstScheduler`, normalizers, matching, detail snapshots).
-- DuckDB (embedded file at `data/duckdb/vultrack-evidence.duckdb`) is the ONLY store: catalog, evidence, affected components, exploits, threat scores, AI analyses, SBOM. No PostgreSQL server in the default stack.
+- DuckDB (embedded file, default `data/duckdb/vultrack-evidence.duckdb`, overridable via `VULTRACK_DUCKDB_PATH`) is the ONLY store: catalog, evidence, affected components, exploits, threat scores, AI analyses, SBOM. No PostgreSQL server in the default stack.
+- Host-specific DuckDB paths differ. cafemini's live database is `data/duckdb/vultrack.duckdb` (~13.5 GB) and its `vultrack-evidence.duckdb` is an empty 13 MB file; never remove that host's explicit `VULTRACK_DUCKDB_PATH` or the API will serve an empty catalog.
 - Node.js fetchers (`plugins/fetchers/sources/*.mjs`, ~46 sources) run as child processes and write atomic gzipped NDJSON spool files to `data/spool/incoming/`; a file becomes visible to the scheduler only when promoted with the `.ready` suffix.
 - FIRST EPSS uses a native gzip CSV snapshot pipeline, not the NDJSON spool.
 - `DuckDbFirstScheduler` runs fetchers serially and ingests spool files directly into DuckDB; there is no staging database.

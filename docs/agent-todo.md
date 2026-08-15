@@ -1,191 +1,154 @@
 # VulTrack Agent TODO
 
-Last updated: 2026-05-09 Asia/Shanghai.
+Last updated: 2026-08-15 Asia/Shanghai.
 
-> **Obsolete:** this file describes the superseded PostgreSQL-first MVP. The current architecture is DuckDB-first; see `docs/design/duckdb-first-architecture.md`. Sections below referencing PostgreSQL staging, `raw.normalizePending`, Adminer, or the PG queue are historical only.
+**Read this file first.** It is the authoritative work queue and handoff state for AI agents.
+Architecture truth is `docs/design/duckdb-first-architecture.md`; schema truth is
+`src/VulTrack.App/DuckDbEvidenceStore.cs`. When those disagree with any other doc, they win.
 
-## Current MVP State
+## Handoff Rules
 
-VulTrack has a working fetch -> staging -> normalize -> query path.
+- Update this file in the same commit as the change it describes. A stale TODO is a bug.
+- One logical change per commit. Large multi-thousand-line commits are not acceptable
+  because they cannot be reverted safely.
+- Never invent verification results. If a command was not run, say so.
+- `dotnet` is not installed on the macOS host. Build and test only inside the Docker SDK
+  image, or on the cafemini host (see Environments).
 
-Implemented ingestion/fetcher pieces:
+## Environments
 
-- Fetcher plugins under `plugins/fetchers/sources`.
-- Init fetchers are separated from daily/incremental fetchers for large file or mirror-backed sources.
-- `plugins/fetchers/README.md` documents how to add and debug fetchers.
-- `run-all` skips init fetchers by default.
+| Host | Role | Arch | Notes |
+| --- | --- | --- | --- |
+| local macOS | development | arm64 | Code only. External SSD overheats under heavy write IO, so avoid large local ingest/rebuild jobs. |
+| cafemini | primary data host + build host | arm64 | Live DuckDB is `data/duckdb/vultrack.duckdb` (~13.5 GB). Use for builds and long jobs. |
+| ubuntu remote | production | arm64 | 4c/24g, ~200 GB disk, disk pressure from the legacy PG era. Pulls images from GHCR; do not build there. |
 
-Implemented normalizer/parser pieces:
+Critical path gotcha: cafemini sets `VULTRACK_DUCKDB_PATH=/workspace/data/duckdb/vultrack.duckdb`
+explicitly. The in-code default is `vultrack-evidence.duckdb`, and on cafemini that file is a
+13 MB empty database. Never drop the explicit env var on that host, or the API will silently
+serve an empty catalog.
 
-- Canonical vulnerability identity uses `vulnerabilities.id` plus immutable `vuln:<uuid>` canonical keys.
-- Source aliases are indexed in `vulnerability_identifier_index`, grouped in `vulnerability_identifier_groups`, and linked in `vulnerability_identifier_edges`.
-- NVD CVE is the preferred display identifier when available.
-- Multi-source facts stay in source-specific tables and records.
-- Affected component facts flow through `IAffectedComponentHook` into `vulnerability_affected_components`.
-- Component catalog records from NVD CPE and package registries are normalized into `cpe_entries`, `registry_packages`, `components`, and `component_identity_index`.
+## Verified State (2026-08-15)
 
-Implemented frontend:
+- cafemini `dotnet build VulTrack.slnx`: passed, 0 errors, 1 pre-existing warning (CS9113,
+  unread `services` parameter in `DuckDbEvidenceNormalizer.cs:6`).
+- cafemini `dotnet test VulTrack.slnx`: passed, 36/36, 17 s.
+- cafemini `POST /api/v1/vulnerability.search` (`log4j`): HTTP 200 in 766 ms, returned real
+  results with affected-component mappings. Data integrity confirmed.
+- cafemini `GET /api/v1/system.ready`: HTTP 200, but the running container predates the probe
+  fix and therefore still reports readiness without a real query. Not yet redeployed.
+- Not verified: ubuntu remote cutover, local Docker DuckDB switch, AI-analysis backup restore.
 
-- Static UI served by `src/VulTrack.App/wwwroot`.
-- Supports vulnerability search, component search, component vulnerability matching, and multi-source vulnerability detail display.
+## P0 — Highest Priority
 
-## Implemented API
+- [x] Remove ART index recreation that corrupts DuckDB 1.5.x under UPDATE/DELETE churn, with a
+      regression test.
+- [x] Make `system.ready` run a real query instead of returning ready after init only, and
+      return 503 when the store cannot serve.
+- [x] Add a bounded manual fetch endpoint so ingest can be exercised without the scheduler.
+- [x] Switch prod compose to pull GHCR images, make auto-deploy opt-in, and default the
+      scheduler off so a first start never writes unexpectedly.
+- [x] Drop the PostgreSQL step from `deploy-prod.sh` (root cause of the CI deploy failure
+      `no such service: postgres`) and add memory/disk/branch/env preflight checks.
+- [ ] Redeploy cafemini onto the current branch so the real readiness probe takes effect.
+- [ ] Back up `ai_vulnerability_analyses` off-host and verify the restore before any
+      destructive cleanup. This table is the only asset that cannot be re-downloaded.
+- [ ] Cap DuckDB memory and threads in every compose file. Unbounded DuckDB takes ~80 % of host
+      RAM; the container budget is far smaller, so this is an active OOM risk.
+- [ ] Route the SBOM-matching path through the managed read pool instead of opening a bare
+      connection. It currently competes with the single writer and is the most likely trigger
+      for a second ART-style corruption.
+      Location: `DuckDbEvidenceStore.cs:288-291`, `:3152`.
+- [ ] Accumulate changed keys across the whole scheduler cycle and rebuild the catalog once at
+      the end. Today a >50 k changed-key batch can trigger a ~56 s full rebuild repeatedly
+      inside one ingest loop; a full affected rebuild costs ~18 min 52 s.
+      Location: `DuckDbEvidenceNormalizer.Spool.cs:72-83`, `DuckDbFirstScheduler.cs:112-119`.
 
-System:
+## P1 — Performance
 
-- `GET /api/v1/system.health`
-- `GET /api/v1/system.ready`
-- `GET /api/v1/system.status`
+- [ ] Replace the 640 k-row `LIKE` search (correlated subqueries, full sort, `OFFSET` paging)
+      with FTS or a normalized token table, and move to keyset/search-after paging.
+      Location: `DuckDbEvidenceStore.cs:1249-1276`.
+- [ ] Parallelize the 8 serial detail queries and put them behind the existing cache. The
+      DuckDB detail path currently bypasses both the 5-minute cache and snapshots.
+      Location: `DuckDbEvidenceStore.cs:1712-1840`.
+- [ ] Bound the unbounded static version-comparison cache, or use the already-present but idle
+      `version_match_cache` table. Current behaviour is a long-lived memory leak.
+      Location: `EcosystemVersionComparer.cs:8`.
+- [ ] Push component version filtering into SQL. The service takes 20 k candidates and filters
+      in .NET memory, so popular packages (log4j, openssl) silently under-report.
+      Location: `ComponentVulnerabilitySearchService.cs:21-38`.
+- [ ] Speed up EPSS ingest (350 k rows in ~112.9 s, ~3.1 k rows/s) by merging compact CSV
+      directly instead of per-row `JsonNode.Parse`. The delta path is currently marked unsafe
+      for production.
+      Location: `DuckDbEvidenceNormalizer.Spool.cs:129-198`.
+- [ ] Cut the ~5.1 s fixed per-source overhead: merge stats counting to once per cycle, and
+      allow independent sources to overlap within the single-writer constraint.
+      Location: `DuckDbFirstScheduler.cs:51-77`.
 
-Sources and processing:
+## P2 — Refactoring And Debt
 
-- `GET /api/v1/source.list`
-- `POST /api/v1/nvd.processPending`
-- `POST /api/v1/raw.normalizePending`
+- [ ] Decide the fate of the PostgreSQL path, then delete it or hide it behind an
+      `IEvidenceStore` abstraction. Today nearly every endpoint carries an
+      `if (duckDbPrimary) ... else Npgsql ...` branch, and the 13 PG normalizers,
+      `SourceScheduler` (733 lines), and `db/init/*.sql` are dead code in the default
+      deployment. This is the single largest structural drag on the codebase.
+- [ ] Split the `DuckDbEvidenceStore` god class (4,446 lines: DTOs + DDL + read + write + SBOM
+      + search) into Catalog / Evidence / SBOM / Schema units.
+- [ ] Move the ~30 endpoints out of `Program.cs` (2,768 lines) into per-area endpoint files,
+      following the existing `SbomEndpoints.cs` pattern.
+- [ ] Collapse scattered `Environment.GetEnvironmentVariable` reads and `appsettings.json` into
+      strongly typed Options.
+- [ ] Introduce a build step and split the 2,936-line single-file frontend `app.js`. It will
+      not survive the planned SBOM-diff and policy features in its current shape.
+- [ ] Remove the pre-existing CS9113 warning by using or deleting the unread `services`
+      parameter.
 
-Vulnerability query:
+## P3 — Documentation
 
-- `POST /api/v1/vulnerability.search`
-- `GET /api/v1/vulnerability.getByIdentifier?identifier=...`
-- `GET /api/v1/vulnerability.get?id=...`
-- `GET /api/v1/vulnerability.detail?id=...`
+- [x] Align README and architecture docs with the DuckDB-first runtime and safe-start defaults.
+- [x] Rewrite this TODO for the DuckDB-first architecture.
+- [ ] Mark every superseded PG-first doc under `docs/design/` with an explicit obsolete banner,
+      or move them to `docs/design/legacy/`. They still contradict the implementation and
+      mislead new agents.
+- [ ] Document the ubuntu-remote cutover runbook, including the 30 GB transfer budget and the
+      delete-after-download rule for large payloads.
 
-Component query:
+## P4 — Product Gaps Versus OpenCVE / Dependency-Track
 
-- `POST /api/v1/component.search`
-- `POST /api/v1/component.vulnerabilitySearch`
+Ordered by how much each closes a real competitive gap.
 
-Frontend:
+- [ ] Alerting and subscriptions: new CVE matches an uploaded SBOM, then notify via
+      webhook/email. This is the highest-value missing loop; both competitors have it and it is
+      what makes continuous monitoring useful.
+- [ ] VEX import/export and per-finding disposition state.
+- [ ] API keys plus a minimal role model. Auth is currently a single hard-coded admin.
+- [ ] Audit log. There is not even a table for it today.
+- [ ] SPDX ingest alongside CycloneDX.
+- [ ] Project/asset portfolio grouping for uploaded SBOMs.
 
-- `GET /index.html`
-- `GET /app.js`
-- `GET /styles.css`
+Known ceiling: the DuckDB single-writer design is excellent for read-heavy analysis but blocks
+multi-instance horizontal scaling and concurrent writes. Dependency-Track's strength is exactly
+the write-back-heavy continuous monitoring path, so any alerting work must respect the
+single-writer discipline rather than fight it.
 
-## Repeatable Test Commands
-
-Run the consolidated MVP test script while the API is available at `http://localhost:5099`:
+## Test Commands
 
 ```bash
+# Build and test (no dotnet SDK on the macOS host)
+docker run --rm -v "$PWD:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet build VulTrack.slnx
+docker run --rm -v "$PWD:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 dotnet test VulTrack.slnx
+
+npm test                                              # node:test fetcher tests
+API_BASE_URL=http://localhost:5099 npm run test:api    # needs a running API
 API_BASE_URL=http://localhost:5099 ./scripts/test-mvp.sh
 ```
 
-Individual checks:
+Search is `POST`, not `GET`; a `GET` returns 405 by design. Admin endpoints use session login,
+not basic auth, so `curl -u` returns 401.
 
 ```bash
-docker run --rm -v "$PWD:/workspace" -w /workspace mcr.microsoft.com/dotnet/sdk:10.0 dotnet build VulTrack.slnx
-docker run --rm -v "$PWD:/workspace" -w /workspace mcr.microsoft.com/dotnet/sdk:10.0 dotnet test VulTrack.slnx --no-build
-npm test
-API_BASE_URL=http://localhost:5099 npm run test:api
-```
-
-Recent verification records:
-
-- 2026-05-09: `dotnet build VulTrack.slnx` passed.
-- 2026-05-09: `dotnet test VulTrack.slnx --no-build` passed.
-- 2026-05-09: `npm test` passed.
-- 2026-05-09: `API_BASE_URL=http://localhost:5099 npm run test:api` passed, 6 API tests.
-- 2026-05-09: `API_BASE_URL=http://localhost:5099 ./scripts/test-mvp.sh` passed.
-- 2026-05-09: ran `POST /api/v1/raw.normalizePending` with `limitPerSource=1000`.
-  Processed `nvd-cve=1000`, `osv-family=1000`, `ghsa-family=1000`, `pypi-advisory=1000`,
-  `cve-list-v5=1000`, `threat-intel=1000`, `distro=1000`, `component-catalog=533`, all with `failed=0`.
-- 2026-05-09: parser enrichment added shared source fact extraction for descriptions, severities, references, and weaknesses.
-- 2026-05-09: after parser enrichment, ran `POST /api/v1/raw.normalizePending` with `limitPerSource=500`.
-  Processed `nvd-cve=500`, `osv-family=500`, `ghsa-family=500`, `pypi-advisory=500`,
-  `cve-list-v5=500`, `threat-intel=500`, `distro=500`, `component-catalog=250`, all with `failed=0`.
-- 2026-05-09: added source-scoped normalization API and smoke script at `scripts/normalize-source-smoke.mjs`.
-- 2026-05-09: ran source-scoped smoke with `nvd-cve`, `ghsa`, `ubuntu-osv`, `pypi-advisory`, `cisa-kev`, `nvd-cpe` at 500 each.
-  Processed `nvd-cve=500`, `ghsa=500`, `ubuntu-osv=500`, `pypi-advisory=109`,
-  `cisa-kev=500`, `nvd-cpe=500`, all with `failed=0`.
-- 2026-05-09: added full pending normalization loop script at `scripts/run-full-normalization.mjs`.
-- 2026-05-09: added database backup/restore scripts at `scripts/backup-db.sh` and `scripts/restore-db.sh`.
-- 2026-05-09: `bash -n scripts/backup-db.sh scripts/restore-db.sh` passed.
-
-Post-batch database snapshot:
-
-- `source_raw_index`: `succeeded=25105`, `pending=2804600`.
-- `vulnerabilities`: `26502`.
-- `vulnerability_records`: `45700`.
-- `vulnerability_descriptions`: `6936`.
-- `vulnerability_severity_scores`: `1560`.
-- `vulnerability_references`: `7365`.
-- `vulnerability_weaknesses`: `754`.
-- `vulnerability_affected_components`: `40173`.
-- `cpe_entries`: `1386`.
-- `registry_packages`: `20`.
-
-## Current Runtime Notes
-
-(Obsolete — PostgreSQL/Adminer are removed from the default stack; the runtime is now the single `VulTrack.App` service with embedded DuckDB. See `docs/design/duckdb-first-architecture.md`.)
-
-Local services used during development:
-
-- Postgres: `localhost:5432`, database `vultrack`, user `vultrack`.
-- API: `http://localhost:5099`.
-- Adminer: `http://localhost:8081`.
-
-Useful normalization smoke command:
-
-```bash
-curl -sS -X POST http://localhost:5099/api/v1/raw.normalizePending \
+curl -sS -X POST http://localhost:5099/api/v1/vulnerability.search \
   -H 'content-type: application/json' \
-  -d '{"limitPerSource":100}'
+  -d '{"query":"log4j","page":1,"pageSize":3}'
 ```
-
-Source-scoped smoke:
-
-```bash
-API_BASE_URL=http://localhost:5099 SOURCE_SMOKE_LIMIT=500 node scripts/normalize-source-smoke.mjs nvd-cve ghsa ubuntu-osv pypi-advisory cisa-kev nvd-cpe
-```
-
-Full normalization loop:
-
-```bash
-API_BASE_URL=http://localhost:5099 LIMIT_PER_SOURCE=50 npm run normalize:run
-```
-
-Parallel source normalization loop:
-
-```bash
-API_BASE_URL=http://localhost:5099 LIMIT_PER_SOURCE=50 NORMALIZE_PARALLELISM=4 npm run normalize:parallel
-```
-
-Useful status checks:
-
-```bash
-curl -sS http://localhost:5099/api/v1/system.status
-docker exec vultrack-postgres psql -U vultrack -d vultrack -c "select normalize_status, count(*) from source_raw_index group by 1 order by 1;"
-docker exec vultrack-postgres psql -U vultrack -d vultrack -c "select s.code, count(*) from source_raw_index r join sources s on s.id = r.source_id where r.normalize_status <> 'succeeded' group by s.code order by count(*) desc limit 25;"
-```
-
-## Next Development Queue
-
-Parser completeness:
-
-- Add shared helper methods in `NormalizerBase` for descriptions, severity scores, references, weaknesses, and source properties.
-- Extend ecosystem advisory normalizers and remaining fetcher-backed sources to populate those source fact tables, not only `vulnerability_records` and affected facts.
-- Add idempotency constraints or cleanup for duplicated `vulnerability_affected_facts`, `vulnerability_descriptions`, `vulnerability_references`, and severity rows before large repeated normalization runs.
-- Add a backfill command for old canonical rows that still use legacy CVE/GHSA canonical keys.
-
-Query and matching:
-
-- Improve `ComponentVulnerabilitySearchService` with ecosystem-specific version range resolvers.
-- Add CPE-to-package mapping hooks for NVD CPE facts.
-- Add query explain output so the frontend can show why a component matched a vulnerability.
-
-Scheduler and queue:
-
-- (Obsolete — superseded by `DuckDbFirstScheduler`; see `docs/design/duckdb-first-architecture.md`.) ~~Keep Postgres as the authoritative queue for MVP.~~
-- (Obsolete.) ~~Add `FOR UPDATE SKIP LOCKED` claiming for concurrent normalizer workers.~~ DuckDB writes are serialized by the single-writer scheduler instead.
-- Introduce Redis later only as an optional short-lived queue/cache layer, not as the source of truth.
-
-Frontend:
-
-- Add pagination and source filters.
-- Add record diff views for multi-source descriptions and affected ranges.
-- Add richer component detail pages backed by `components` and `component_identity_index`.
-
-Operations:
-
-- Add a repeatable full normalization script with resumable batch size and progress logging.
-- Add database backup/restore scripts around full update and full normalization jobs.
-- Add integration fixtures so API tests can run against a small seeded database, not only the local large dev DB.
