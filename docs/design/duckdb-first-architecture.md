@@ -63,6 +63,6 @@ VulTrack 是一个 DuckDB-first 的单体单进程应用：
 ## 关键约束（Gotchas）
 
 - DuckDB 每个文件只有一个写入者：所有写入必须经调度器/EvidenceStore 串行化，读者共享托管连接。
-- DuckDB 1.5.x 的 ART 索引删除隐患：避免在热路径上删除带 ART 索引的表行；大批量用整表 swap，小批量在未索引列上 delete-and-append。
+- DuckDB 1.5.x 的 ART 索引状态可能在增量 UPDATE/DELETE 后持久化损坏并使数据库 invalidated（上游 [duckdb/duckdb#23645](https://github.com/duckdb/duckdb/issues/23645)）。当前 schema 初始化会移除所有显式 ART 索引；在上游问题关闭且生产规模 churn benchmark 通过前不得重新启用。
 - Spool 的原子发布依赖 `.ready` 后缀：绝不消费无后缀文件，绝不重命名未写完的文件。
 - `vulnerability_latest` 与详情快照是缓存，不是事实来源；目录只能从 `source_records` 重建，禁止手工编辑投影表。
