@@ -31,8 +31,12 @@ public sealed record VulTrackOptions(
             Enabled: IsTrue(Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_ENABLED"))
                 || IsTrue(configuration["VulTrack:DuckDb:Enabled"]),
             DatabasePath: databasePath,
-            MemoryLimit: Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_MEMORY_LIMIT"),
-            Threads: Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_THREADS"),
+            // Always cap. With no limit DuckDB claims ~80% of host RAM, which overruns the
+            // container budget whenever the app runs outside docker-compose.
+            MemoryLimit: Setting(
+                "VULTRACK_DUCKDB_MEMORY_LIMIT", configuration, "VulTrack:DuckDb:MemoryLimit", DefaultDuckDbMemoryLimit),
+            Threads: Setting(
+                "VULTRACK_DUCKDB_THREADS", configuration, "VulTrack:DuckDb:Threads", DefaultDuckDbThreads),
             NucleiAllowLargeSnapshotDrop: BoolFlag("NUCLEI_ALLOW_LARGE_SNAPSHOT_DROP", false),
             NucleiLargeSnapshotDropThreshold: NucleiDropThreshold());
 
@@ -53,6 +57,10 @@ public sealed record VulTrackOptions(
         return new VulTrackOptions(repoRoot, spoolPath, duckDb, scheduler, admin, ai);
     }
 
+    // Matches the docker-compose defaults so in-container and out-of-container runs agree.
+    internal const string DefaultDuckDbMemoryLimit = "3g";
+    internal const string DefaultDuckDbThreads = "4";
+
     internal static bool IsTrue(string? value) =>
         string.Equals(value, "true", StringComparison.OrdinalIgnoreCase);
 
@@ -62,10 +70,17 @@ public sealed record VulTrackOptions(
     internal static int IntSetting(string name, int fallback, int minimum) =>
         int.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? Math.Max(minimum, value) : fallback;
 
+    // Treats blank as absent so an empty env var falls through to config and then the fallback,
+    // instead of silently disabling the setting it belongs to.
     internal static string Setting(string envName, IConfiguration configuration, string configKey, string fallback) =>
-        Environment.GetEnvironmentVariable(envName)
-        ?? configuration[configKey]
-        ?? fallback;
+        FirstNonBlank(Environment.GetEnvironmentVariable(envName), configuration[configKey], fallback);
+
+    internal static string FirstNonBlank(params string?[] values)
+    {
+        foreach (var value in values)
+            if (!string.IsNullOrWhiteSpace(value)) return value.Trim();
+        return "";
+    }
 
     internal static int IntSetting(string envName, IConfiguration configuration, string configKey, int fallback) =>
         int.TryParse(Setting(envName, configuration, configKey, ""), out var value) && value > 0 ? value : fallback;
