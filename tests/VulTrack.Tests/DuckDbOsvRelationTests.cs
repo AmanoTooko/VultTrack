@@ -150,12 +150,12 @@ public sealed class DuckDbOsvRelationTests
 
             var relations = await store.GetRelationsByVulnerabilityIdsAsync([advisory.Id], CancellationToken.None);
             var relation = Assert.Single(relations).Value;
-            Assert.Equal(["CVE-2026-10001", "CVE-2026-10002"], relation.UpstreamIdentifiers);
+            Assert.Equal(["CVE-2026-10002"], relation.UpstreamIdentifiers);
             Assert.Equal(["OSV-2026-RELATED"], relation.RelatedIdentifiers);
 
             var detail = JsonSerializer.SerializeToNode(
                 await store.GetCatalogDetailAsync(advisory.Id, CancellationToken.None))!.AsObject();
-            Assert.Equal("CVE-2026-10001", detail["vulnerability"]!["upstreamIdentifiers"]![0]!.GetValue<string>());
+            Assert.Equal("CVE-2026-10002", detail["vulnerability"]!["upstreamIdentifiers"]![0]!.GetValue<string>());
 
             var component = ComponentQuery.Normalize(null, "2.2.0", "pkg:pypi/django@2.2.0", "pypi");
             var matches = await store.QueryComponentVulnerabilityCandidatesAsync(

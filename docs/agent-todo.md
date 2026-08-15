@@ -76,7 +76,8 @@ serve an empty catalog.
       through the same Normalizer path. The final shadow must start as a consistent copy of the
       current live database so NVD, EPSS, exploit, and AI evidence are preserved.
       OSV records that repeat the same IDs in both `upstream` and `related` are projected once as
-      upstream; only relation IDs unique to `related` stay in the related set.
+      upstream; only relation IDs unique to `related` stay in the related set. Relations equal to
+      the final canonical key are omitted to prevent self-links after CVE promotion.
 
 ## P1 — Performance
 

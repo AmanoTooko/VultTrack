@@ -665,8 +665,15 @@ public sealed partial class DuckDbEvidenceNormalizer
             // The original identifier stays below as a searchable alias. Upstream/related IDs are
             // never passed to the resolver because relationships are not identity assertions.
             key = promotedKey;
-            normalizationVersion = "identity-links-v5";
+            normalizationVersion = "identity-links-v6";
         }
+        upstreamIdentifiers = upstreamIdentifiers
+            .Where(identifier => !string.Equals(identifier, key, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        relatedIdentifiers = relatedIdentifiers
+            .Where(identifier => !string.Equals(identifier, key, StringComparison.OrdinalIgnoreCase))
+            .Except(upstreamIdentifiers, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         identifiers = identifiers
             .Append(key)
             .Where(value => !string.IsNullOrWhiteSpace(value))
