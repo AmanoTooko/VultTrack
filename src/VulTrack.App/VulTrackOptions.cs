@@ -20,16 +20,16 @@ public sealed record VulTrackOptions(
         var repoRoot = Environment.GetEnvironmentVariable("VULTRACK_REPO_ROOT");
         var spoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
 
-        var duckDbPath = Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_PATH")
-            ?? configuration["VulTrack:DuckDb:Path"];
+        var duckDbPath = Setting(
+            "VULTRACK_DUCKDB_PATH", configuration, "VulTrack:DuckDb:Path", "");
         var databasePath = !string.IsNullOrWhiteSpace(duckDbPath)
             ? Path.GetFullPath(duckDbPath)
             : Path.GetFullPath(Path.Combine(
                 repoRoot ?? Directory.GetCurrentDirectory(), "data", "duckdb", "vultrack-evidence.duckdb"));
 
         var duckDb = new DuckDbOptions(
-            Enabled: IsTrue(Environment.GetEnvironmentVariable("VULTRACK_DUCKDB_ENABLED"))
-                || IsTrue(configuration["VulTrack:DuckDb:Enabled"]),
+            Enabled: BoolSetting(
+                "VULTRACK_DUCKDB_ENABLED", configuration, "VulTrack:DuckDb:Enabled", false),
             DatabasePath: databasePath,
             // Always cap. With no limit DuckDB claims ~80% of host RAM, which overruns the
             // container budget whenever the app runs outside docker-compose.
@@ -46,11 +46,12 @@ public sealed record VulTrackOptions(
             InitialDelaySeconds: IntSetting("DUCKDB_FETCH_INITIAL_DELAY_SECONDS", 15, 0),
             AllowAutomaticInit: BoolFlag("DUCKDB_ALLOW_AUTOMATIC_INIT", false),
             OsvPendingMaxBatchesPerCycle: Math.Clamp(IntSetting("OSV_PENDING_MAX_BATCHES_PER_CYCLE", 3, 1), 1, 12),
-            FetchSources: Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES") ?? SchedulerOptions.DefaultFetchSources);
+            FetchSources: FirstNonBlank(
+                Environment.GetEnvironmentVariable("DUCKDB_FETCH_SOURCES"), SchedulerOptions.DefaultFetchSources));
 
         var admin = new AdminOptions(
-            Username: Environment.GetEnvironmentVariable("VULTRACK_ADMIN_USERNAME") ?? "admin",
-            Password: Environment.GetEnvironmentVariable("VULTRACK_ADMIN_PASSWORD") ?? "admin");
+            Username: FirstNonBlank(Environment.GetEnvironmentVariable("VULTRACK_ADMIN_USERNAME"), "admin"),
+            Password: FirstNonBlank(Environment.GetEnvironmentVariable("VULTRACK_ADMIN_PASSWORD"), "change-me"));
 
         var ai = AiOptions.Load(configuration);
 
@@ -66,6 +67,15 @@ public sealed record VulTrackOptions(
 
     internal static bool BoolFlag(string name, bool fallback) =>
         bool.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? value : fallback;
+
+    internal static bool BoolSetting(
+        string envName,
+        IConfiguration configuration,
+        string configKey,
+        bool fallback) =>
+        bool.TryParse(Setting(envName, configuration, configKey, fallback.ToString()), out var value)
+            ? value
+            : fallback;
 
     internal static int IntSetting(string name, int fallback, int minimum) =>
         int.TryParse(Environment.GetEnvironmentVariable(name), out var value) ? Math.Max(minimum, value) : fallback;

@@ -43,18 +43,27 @@ public sealed class VulTrackOptionsTests
     {
         const string memoryVariable = "VULTRACK_DUCKDB_MEMORY_LIMIT";
         const string threadsVariable = "VULTRACK_DUCKDB_THREADS";
+        const string pathVariable = "VULTRACK_DUCKDB_PATH";
+        const string enabledVariable = "VULTRACK_DUCKDB_ENABLED";
         var previousMemory = Environment.GetEnvironmentVariable(memoryVariable);
         var previousThreads = Environment.GetEnvironmentVariable(threadsVariable);
+        var previousPath = Environment.GetEnvironmentVariable(pathVariable);
+        var previousEnabled = Environment.GetEnvironmentVariable(enabledVariable);
 
         Environment.SetEnvironmentVariable(memoryVariable, "   ");
         Environment.SetEnvironmentVariable(threadsVariable, "\t");
+        Environment.SetEnvironmentVariable(pathVariable, " ");
+        Environment.SetEnvironmentVariable(enabledVariable, "false");
         try
         {
+            var configuredPath = Path.Combine(Path.GetTempPath(), "configured-vultrack.duckdb");
             var configuration = new ConfigurationBuilder()
                 .AddInMemoryCollection(new Dictionary<string, string?>
                 {
                     ["VulTrack:DuckDb:MemoryLimit"] = " 2g ",
-                    ["VulTrack:DuckDb:Threads"] = " 3 "
+                    ["VulTrack:DuckDb:Threads"] = " 3 ",
+                    ["VulTrack:DuckDb:Path"] = $" {configuredPath} ",
+                    ["VulTrack:DuckDb:Enabled"] = "true"
                 })
                 .Build();
 
@@ -62,11 +71,15 @@ public sealed class VulTrackOptionsTests
 
             Assert.Equal("2g", options.DuckDb.MemoryLimit);
             Assert.Equal("3", options.DuckDb.Threads);
+            Assert.Equal(configuredPath, options.DuckDb.DatabasePath);
+            Assert.False(options.DuckDb.Enabled);
         }
         finally
         {
             Environment.SetEnvironmentVariable(memoryVariable, previousMemory);
             Environment.SetEnvironmentVariable(threadsVariable, previousThreads);
+            Environment.SetEnvironmentVariable(pathVariable, previousPath);
+            Environment.SetEnvironmentVariable(enabledVariable, previousEnabled);
         }
     }
 }

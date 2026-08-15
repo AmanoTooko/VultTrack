@@ -7,7 +7,6 @@
     "start:local": "bash scripts/start-local.sh",
     "bootstrap:duckdb": "node scripts/bootstrap-duckdb.mjs",
     "spool:ingest": "node scripts/ingest-duckdb-spool.mjs",
-    "ai:import-duckdb": "node scripts/import-duckdb-ai.mjs",
     "status": "node scripts/status-local.mjs",
     "fetch": "node plugins/fetchers/run-fetcher.mjs",
     "fetch:all:smoke": "FETCHER_MAX_RECORDS=2 node plugins/fetchers/run-all.mjs",

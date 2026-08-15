@@ -186,8 +186,6 @@ public sealed record DuckDbSbomFinding(
     string[] Identifiers,
     string[] Aliases);
 
-public sealed record DuckDbAiImportResult(long InputRows, long MatchedRows, long UnmatchedRows, long StoredRows);
-
 public sealed record DuckDbAffectedComponentProjection(
     Guid Id,
     Guid VulnerabilityId,

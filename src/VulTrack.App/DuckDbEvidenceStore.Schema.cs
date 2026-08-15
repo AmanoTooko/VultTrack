@@ -39,6 +39,34 @@ public sealed partial class DuckDbEvidenceStore
         "sbom_uploads"
     ];
 
+    // Run before all schema DML during initialization. DuckDB 1.5.x can persist corrupted ART
+    // state after incremental UPDATE/DELETE workloads. VulTrack has no PK/UNIQUE constraints,
+    // so removing the old explicit indexes eliminates that mutation path.
+    private static readonly string[] LegacyArtIndexDropStatements =
+    [
+        "drop index if exists ix_duck_affected_facts_vulnerability_key",
+        "drop index if exists ix_duck_source_records_key",
+        "drop index if exists ix_duck_vulnerabilities_primary",
+        "drop index if exists ix_duck_vulnerabilities_id",
+        "drop index if exists ix_duck_vulnerability_identifiers_value",
+        "drop index if exists ix_duck_vulnerability_search_tokens_token",
+        "drop index if exists ix_duck_source_record_relations_vulnerability_id",
+        "drop index if exists ix_duck_source_record_relations_related_identifier",
+        "drop index if exists ix_duck_ai_vulnerability",
+        "drop index if exists ix_duck_severity_scores_vulnerability_key",
+        "drop index if exists ix_duck_evidence_references_vulnerability_key",
+        "drop index if exists ix_duck_weaknesses_vulnerability_key",
+        "drop index if exists ix_duck_threat_scores_vulnerability_key",
+        "drop index if exists ix_duck_affected_components_vulnerability_id",
+        "drop index if exists ix_duck_affected_components_cpe",
+        "drop index if exists ix_duck_affected_components_purl",
+        "drop index if exists ix_duck_affected_components_purl_without_version",
+        "drop index if exists ix_duck_affected_components_package_lower",
+        "drop index if exists ix_duck_affected_components_display_lower",
+        "drop index if exists ix_duck_sbom_components_sbom",
+        "drop index if exists ix_duck_sbom_matches_sbom"
+    ];
+
     private static readonly string[] SchemaStatements =
     [
         """
@@ -300,33 +328,7 @@ public sealed partial class DuckDbEvidenceStore
           match_basis varchar,
           matched_version varchar
         )
-        """,
-        // DuckDB 1.5.x can persist corrupted ART state after incremental
-        // UPDATE/DELETE workloads and invalidate the whole database on the
-        // next write. VulTrack has no PK/UNIQUE constraints, so dropping every
-        // explicit ART index removes that failure mode while snapshots and
-        // columnar scans continue to serve reads.
-        "drop index if exists ix_duck_affected_facts_vulnerability_key",
-        "drop index if exists ix_duck_source_records_key",
-        "drop index if exists ix_duck_vulnerabilities_primary",
-        "drop index if exists ix_duck_vulnerabilities_id",
-        "drop index if exists ix_duck_vulnerability_identifiers_value",
-        "drop index if exists ix_duck_vulnerability_search_tokens_token",
-        "drop index if exists ix_duck_source_record_relations_vulnerability_id",
-        "drop index if exists ix_duck_source_record_relations_related_identifier",
-        "drop index if exists ix_duck_ai_vulnerability",
-        "drop index if exists ix_duck_severity_scores_vulnerability_key",
-        "drop index if exists ix_duck_evidence_references_vulnerability_key",
-        "drop index if exists ix_duck_weaknesses_vulnerability_key",
-        "drop index if exists ix_duck_threat_scores_vulnerability_key",
-        "drop index if exists ix_duck_affected_components_vulnerability_id",
-        "drop index if exists ix_duck_affected_components_cpe",
-        "drop index if exists ix_duck_affected_components_purl",
-        "drop index if exists ix_duck_affected_components_purl_without_version",
-        "drop index if exists ix_duck_affected_components_package_lower",
-        "drop index if exists ix_duck_affected_components_display_lower",
-        "drop index if exists ix_duck_sbom_components_sbom",
-        "drop index if exists ix_duck_sbom_matches_sbom"
+        """
     ];
 
     private const string AffectedComponentsTableStatement = """

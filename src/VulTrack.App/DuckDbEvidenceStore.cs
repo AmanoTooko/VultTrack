@@ -33,6 +33,10 @@ public sealed partial class DuckDbEvidenceStore(IConfiguration configuration, Vu
             if (_initialized) return;
             Directory.CreateDirectory(Path.GetDirectoryName(DatabasePath)!);
             using var connection = OpenConnection();
+            // Old explicit ART indexes must be removed before any startup DML. An index left
+            // by a previous build can invalidate the connection on the first UPDATE/DELETE.
+            foreach (var statement in LegacyArtIndexDropStatements)
+                Execute(connection, statement);
             foreach (var statement in SchemaStatements)
                 Execute(connection, statement);
             Volatile.Write(ref _initialized, true);

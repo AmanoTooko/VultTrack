@@ -9,10 +9,12 @@ public sealed class DuckDbFirstScheduler(
     VulTrackOptions options,
     ILogger<DuckDbFirstScheduler> logger) : BackgroundService
 {
+    public const int MaxManualFetchRecords = 50_000;
     private readonly SemaphoreSlim cycleLock = new(1, 1);
     private readonly HashSet<string> deferredChangedKeys = new(StringComparer.OrdinalIgnoreCase);
     private bool deferredFullCatalogRebuild;
     private bool deferredAffectedRebuild;
+    private Exception? fatalStorageError;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -42,6 +44,7 @@ public sealed class DuckDbFirstScheduler(
             {
                 if (IsFatalDuckDbInvalidation(ex))
                 {
+                    Volatile.Write(ref fatalStorageError, ex);
                     logger.LogCritical(ex, "DuckDB was invalidated by a fatal storage error; stopping the scheduler to prevent repeated writes. Restart only after the database and indexes have been checked.");
                     return;
                 }
@@ -53,11 +56,13 @@ public sealed class DuckDbFirstScheduler(
 
     public async Task RunCycleAsync(CancellationToken ct)
     {
+        ThrowIfStorageInvalidated();
         if (!await cycleLock.WaitAsync(0, ct)) return;
         try
         {
             foreach (var source in SourceCodes())
             {
+                ThrowIfStorageInvalidated();
                 ct.ThrowIfCancellationRequested();
                 try
                 {
@@ -97,13 +102,25 @@ public sealed class DuckDbFirstScheduler(
 
     public async Task RunSourceAsync(string sourceCode, bool force, int limit, CancellationToken ct)
     {
+        ThrowIfStorageInvalidated();
+        if (limit < 0 || limit > MaxManualFetchRecords)
+            throw new ArgumentOutOfRangeException(nameof(limit), $"Fetch limit must be 0..{MaxManualFetchRecords}.");
         if (!await cycleLock.WaitAsync(0, ct))
             throw new InvalidOperationException("A DuckDB-first fetch cycle is already running.");
         try
         {
-            await RunFetcherAsync(sourceCode, force, limit, ct);
-            await ConsumeReadyFilesAsync(ct);
-            await FlushDeferredCatalogRebuildAsync(ct);
+            try
+            {
+                await RunFetcherAsync(sourceCode, force, limit, ct);
+                await ConsumeReadyFilesAsync(ct);
+                await FlushDeferredCatalogRebuildAsync(ct);
+            }
+            catch (Exception ex) when (IsFatalDuckDbInvalidation(ex))
+            {
+                Volatile.Write(ref fatalStorageError, ex);
+                logger.LogCritical(ex, "Manual DuckDB source run encountered a fatal storage error; all scheduler writes are now blocked until restart.");
+                throw;
+            }
         }
         finally
         {
@@ -200,9 +217,32 @@ public sealed class DuckDbFirstScheduler(
             start.Environment["FETCHER_MAX_RECORDS"] = limit.ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         using var process = Process.Start(start) ?? throw new InvalidOperationException($"Unable to start fetcher {sourceCode}.");
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-        var stderrTask = CaptureFetcherDiagnosticsAsync(process.StandardError, sourceCode, ct);
-        await process.WaitForExitAsync(ct);
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = CaptureFetcherDiagnosticsAsync(process.StandardError, sourceCode, CancellationToken.None);
+        try
+        {
+            await process.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            var terminated = false;
+            try
+            {
+                if (!process.HasExited) process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync(CancellationToken.None);
+                terminated = true;
+            }
+            catch (Exception killError)
+            {
+                logger.LogWarning(killError, "Failed to terminate cancelled fetcher {SourceCode}; check for an orphan process.", sourceCode);
+            }
+            if (terminated)
+            {
+                try { await stdoutTask; } catch { }
+                try { await stderrTask; } catch { }
+            }
+            throw;
+        }
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
         if (process.ExitCode != 0)
@@ -297,5 +337,14 @@ public sealed class DuckDbFirstScheduler(
                 return true;
         }
         return false;
+    }
+
+    private void ThrowIfStorageInvalidated()
+    {
+        var fatal = Volatile.Read(ref fatalStorageError);
+        if (fatal is not null)
+            throw new InvalidOperationException(
+                "DuckDB writes are blocked after a fatal storage error; restart only after checking the database and indexes.",
+                fatal);
     }
 }

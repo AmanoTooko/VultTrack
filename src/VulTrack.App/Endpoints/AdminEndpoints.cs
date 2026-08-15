@@ -15,6 +15,10 @@ public static class AdminEndpoints
             if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
             if (string.IsNullOrWhiteSpace(request.SourceCode))
                 return ApiResult.Error("SOURCE_REQUIRED", "sourceCode is required.");
+            if (request.Limit < 0 || request.Limit > DuckDbFirstScheduler.MaxManualFetchRecords)
+                return ApiResult.Error(
+                    "FETCH_LIMIT_INVALID",
+                    $"limit must be 0 (unlimited) or between 1 and {DuckDbFirstScheduler.MaxManualFetchRecords}.");
             await scheduler.RunSourceAsync(request.SourceCode.Trim(), request.Force, request.Limit, ct);
             return ApiResult.Ok(new { sourceCode = request.SourceCode.Trim(), request.Force, request.Limit });
         });
@@ -23,12 +27,6 @@ public static class AdminEndpoints
         {
             if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
             return ApiResult.Ok(await normalizer.IngestSpoolAsync(request, ct));
-        });
-
-        app.MapPost("/api/v1/admin.duckdbAi.import", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore duckDb, DuckDbAiImportRequest request, CancellationToken ct) =>
-        {
-            if (!auth.IsAuthenticated(context)) return ApiResult.Unauthorized();
-            return ApiResult.Ok(await duckDb.ImportAiAnalysesAsync(request.Path, request.ExpectedRows, ct));
         });
 
         app.MapGet("/api/v1/admin.duckdbEvidence.stats", async (HttpContext context, AdminAuthService auth, DuckDbEvidenceStore store, CancellationToken ct) =>

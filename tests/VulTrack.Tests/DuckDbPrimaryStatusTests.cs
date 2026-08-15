@@ -26,6 +26,19 @@ public sealed class DuckDbPrimaryStatusTests
             using (var store = new DuckDbEvidenceStore(configuration))
                 await store.InitializeAsync(CancellationToken.None);
 
+            // Simulate a database last opened by the legacy indexed build, then verify a fresh
+            // store removes the ART index during startup before it runs schema maintenance DML.
+            using (var legacyConnection = new DuckDBConnection($"Data Source={databasePath}"))
+            {
+                legacyConnection.Open();
+                using var legacyCommand = legacyConnection.CreateCommand();
+                legacyCommand.CommandText = "create index ix_duck_vulnerabilities_id on vulnerabilities(id)";
+                legacyCommand.ExecuteNonQuery();
+            }
+
+            using (var migratedStore = new DuckDbEvidenceStore(configuration))
+                await migratedStore.InitializeAsync(CancellationToken.None);
+
             using var connection = new DuckDBConnection($"Data Source={databasePath}");
             connection.Open();
             using var command = connection.CreateCommand();
