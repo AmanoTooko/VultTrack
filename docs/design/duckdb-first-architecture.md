@@ -21,7 +21,7 @@ VulTrack 是一个 DuckDB-first 的单体单进程应用：
 
 ## DuckDB Schema 归属
 
-- Schema 全部在代码中创建：`src/VulTrack.App/DuckDbEvidenceStore.cs` 用 `create table if not exists` 与受保护的 alter 演进 schema。**不**新增 SQL 迁移文件。
+- Schema 全部在代码中创建：`src/VulTrack.App/DuckDbEvidenceStore.Schema.cs` 用 `create table if not exists` 与受保护的 alter 演进 schema。**不**新增 SQL 迁移文件。
 - 主要表：
   - `source_records` / `source_record_identifiers` / `source_record_relations`：所有源的原始事实与别名，永不被互相覆盖。
   - `vulnerabilities`、`vulnerability_identifiers`：规范目录。

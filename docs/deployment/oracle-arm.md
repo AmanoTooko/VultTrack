@@ -77,7 +77,8 @@ VULTRACK_ADMIN_PASSWORD=<strong-random-password>
 
 VULTRACK_STORAGE_BACKEND=duckdb
 VULTRACK_DUCKDB_ENABLED=true
-VULTRACK_DUCKDB_PATH=/workspace/data/duckdb/vultrack-evidence.duckdb
+# 当前 Oracle/Cafemini 已有库均使用这个文件名；不得改成默认名后启动空库。
+VULTRACK_DUCKDB_PATH=/workspace/data/duckdb/vultrack.duckdb
 VULTRACK_DUCKDB_MEMORY_LIMIT=3g
 VULTRACK_DUCKDB_THREADS=4
 VULTRACK_SPOOL_PATH=/workspace/data/spool
@@ -94,14 +95,18 @@ VULTRACK_FRONTEND_IMAGE=ghcr.io/amanotooko/vultrack-frontend:<verified-git-sha>
 按需设置 `GITHUB_TOKEN`、`NVD_API_KEY` 等 source 凭据。不要把秘密写入仓库、
 日志或 handoff 文档。
 
+部署脚本默认要求配置指向一个已存在、非符号链接、位于宿主机 `data/` 下的
+DuckDB 文件；这会阻止文件名拼错时静默创建空库。只有明确的新建空节点才可临时
+传入 `ALLOW_EMPTY_DUCKDB_INIT=true`。迁移执行时再传入
+`REQUIRE_SCHEDULER_DISABLED=true`，让脚本强制核对 scheduler 门禁。
+
 ## 3. 首次切换（scheduler 关闭）
 
 ```bash
 cd /home/ubuntu/vultrack
 git fetch origin main
 git merge --ff-only origin/main
-docker compose --env-file .env.production -f docker-compose.prod.yml pull
-docker compose --env-file .env.production -f docker-compose.prod.yml up -d api frontend
+REQUIRE_SCHEDULER_DISABLED=true ./scripts/deploy-prod.sh
 ```
 
 验证：
@@ -124,7 +129,28 @@ docker logs --tail=200 vultrack-api
 `system.health` 只证明进程存活；`system.ready` 会真实查询 DuckDB，不能用
 health 代替数据库就绪检查。
 
-## 4. 从开源数据重建
+## 4. 恢复 AI 核心数据
+
+AI 分析是唯一不可从公开源重建的数据。迁移前至少保留 Oracle、Cafemini 和离线
+副本，并逐份验证 SHA-256、`gzip -t` 与数据行数。当前权威导出应为 63,247 条
+（压缩文件共 63,248 行，含表头）。不要为此把生产 DuckDB 或原始 1 GB CSV
+下载到本地外置 SSD；服务器已有压缩副本时应原地使用。
+
+将服务器备份目录中的 `ai-analyses.csv.gz` 以同文件系统硬链接放到 Compose 的
+只读 `import/` 目录，避免再次写入 145 MB。API 就绪、scheduler 关闭后执行：
+
+```bash
+API_BASE_URL=http://127.0.0.1:3000 \
+VULTRACK_AI_IMPORT_PATH=/workspace/import/ai-analyses.csv.gz \
+VULTRACK_AI_EXPECTED_ROWS=63247 \
+npm run ai:import-duckdb
+```
+
+导入接口只接受 `/workspace/import` 根目录内的常规 `.csv`/`.csv.gz` 文件；空文件、
+行数不符或有记录未写入都会回滚。成功后核对 `inputRows=storedRows=63247`、
+matched/unmatched 数量、数据库 AI 计数，并随机抽查若干分析。不要删除权威压缩备份。
+
+## 5. 从开源数据重建
 
 新 Oracle 节点不复制本地开发库时，按 source 串行重建。先保持自动 scheduler
 关闭，通过受认证的 `POST /api/v1/admin.source.fetch` 一次运行一个 baseline；
@@ -141,7 +167,7 @@ health 代替数据库就绪检查。
 不要并行 baseline，不要在 baseline 期间 rebuild snapshot 或清 Docker cache。
 source 成功后记录 checkpoint、fetched/parsed/error count 与 DuckDB 表计数。
 
-## 5. 启用 scheduler
+## 6. 启用 scheduler
 
 只有 baseline 完成、status/coverage 正常、spool 没有未知 backlog 时才将：
 
@@ -154,7 +180,12 @@ DUCKDB_ALLOW_AUTOMATIC_INIT=false
 scheduler fail-stop；这时 readiness 返回 503。先停写、备份现场并重启验证，
 不能让 scheduler 反复重试。
 
-## 6. 回滚与清理
+## 7. 传输预算、回滚与清理
+
+迁移默认使用 Oracle 上已有 DuckDB 与 AI 备份，不执行数据库 rsync。若确需在服务器
+之间补充公开源 payload，单次传输硬上限为 30 GiB，先确认目标端余量并避免经过本地
+Mac。payload 成功导入、checkpoint/计数核对且可从公开源重建后，删除目标端临时下载
+副本；AI 备份不适用“导入后删除”规则。
 
 迁移前记录旧 API/frontend image ID，保留上一 commit tag。回滚时固定旧 tag，
 不要覆盖或删除当前 DuckDB/WAL。只有下列门禁全部通过后才能按白名单清理旧

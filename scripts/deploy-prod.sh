@@ -41,6 +41,63 @@ if [[ ! -f .env.production || -L .env.production ]]; then
   exit 1
 fi
 
+read_env_setting() {
+  local key="$1"
+  awk -v key="$key" '
+    index($0, key "=") == 1 { value = substr($0, length(key) + 2); found = 1 }
+    END { if (!found || value == "") exit 1; print value }
+  ' .env.production
+}
+
+unquote_env_value() {
+  local value="${1%$'\r'}"
+  value="${value#\"}"
+  value="${value%\"}"
+  value="${value#\'}"
+  value="${value%\'}"
+  printf '%s\n' "$value"
+}
+
+# Production must never fall through to the in-code filename and silently create an empty
+# catalog. A genuinely fresh deployment has to opt in explicitly.
+duckdb_path="$(unquote_env_value "$(read_env_setting VULTRACK_DUCKDB_PATH || true)")"
+if [[ "$duckdb_path" != /workspace/data/* || "$duckdb_path" == */../* || "$duckdb_path" == */.. ]]; then
+  echo "VULTRACK_DUCKDB_PATH must be explicitly set below /workspace/data" >&2
+  exit 1
+fi
+host_duckdb_path="$(realpath -m -- "$APP_DIR/data/${duckdb_path#/workspace/data/}")"
+case "$host_duckdb_path" in
+  "$APP_DIR"/data/*) ;;
+  *) echo "Resolved DuckDB path escapes $APP_DIR/data: $host_duckdb_path" >&2; exit 1 ;;
+esac
+if [[ -L "$host_duckdb_path" ]]; then
+  echo "Refusing symbolic DuckDB path: $host_duckdb_path" >&2
+  exit 1
+fi
+if [[ ! -f "$host_duckdb_path" ]]; then
+  if [[ "${ALLOW_EMPTY_DUCKDB_INIT:-false}" != "true" ]]; then
+    echo "DuckDB file does not exist: $host_duckdb_path" >&2
+    echo "Set ALLOW_EMPTY_DUCKDB_INIT=true only for an intentional empty deployment." >&2
+    exit 1
+  fi
+  echo "WARNING: deploying with an intentionally empty DuckDB path: $host_duckdb_path" >&2
+else
+  duckdb_size_kb="$(( ($(stat -c %s -- "$host_duckdb_path") + 1023) / 1024 ))"
+  required_disk_kb="$((duckdb_size_kb + 20971520))"
+  if [[ "$available_disk_kb" -lt "$required_disk_kb" ]]; then
+    echo "Refusing to deploy without DuckDB size plus 20 GiB free disk" >&2
+    exit 1
+  fi
+fi
+
+if [[ "${REQUIRE_SCHEDULER_DISABLED:-false}" == "true" ]]; then
+  scheduler_enabled="$(unquote_env_value "$(read_env_setting VULTRACK_SCHEDULER_ENABLED || true)")"
+  if [[ "$scheduler_enabled" != "false" ]]; then
+    echo "Migration requires VULTRACK_SCHEDULER_ENABLED=false" >&2
+    exit 1
+  fi
+fi
+
 if command -v systemctl >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   sudo systemctl restart vultrack-docker-forward.service || true
 fi

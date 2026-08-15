@@ -86,6 +86,20 @@ jobs:
                 print $1 "=" $2
               }
             ' "$env_file"
+            duckdb_path="$(awk -F= '$1 == "VULTRACK_DUCKDB_PATH" { value=substr($0, index($0, "=") + 1) } END { print value }' "$env_file")"
+            duckdb_path="${duckdb_path%$'\r'}"
+            duckdb_path="${duckdb_path#\"}"; duckdb_path="${duckdb_path%\"}"
+            if [[ "$duckdb_path" != /workspace/data/* ]]; then
+              echo 'VULTRACK_DUCKDB_PATH is missing or outside /workspace/data' >&2
+              exit 1
+            fi
+            host_duckdb_path="$(realpath -m -- "$app_dir/data/${duckdb_path#/workspace/data/}")"
+            case "$host_duckdb_path" in "$app_dir"/data/*) ;; *) exit 1 ;; esac
+            if [ -L "$host_duckdb_path" ] || [ ! -f "$host_duckdb_path" ]; then
+              echo "configured DuckDB is missing, non-regular, or symbolic: $host_duckdb_path" >&2
+              exit 1
+            fi
+            stat --format='configured_duckdb=%n bytes=%s' "$host_duckdb_path"
           else
             echo '.env.production missing or symbolic'
           fi

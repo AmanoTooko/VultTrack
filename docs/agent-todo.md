@@ -4,7 +4,7 @@ Last updated: 2026-08-15 Asia/Shanghai.
 
 **Read this file first.** It is the authoritative work queue and handoff state for AI agents.
 Architecture truth is `docs/design/duckdb-first-architecture.md`; schema truth is
-`src/VulTrack.App/DuckDbEvidenceStore.cs`. When those disagree with any other doc, they win.
+`src/VulTrack.App/DuckDbEvidenceStore.Schema.cs`. When those disagree with any other doc, they win.
 
 ## Handoff Rules
 
@@ -20,7 +20,7 @@ Architecture truth is `docs/design/duckdb-first-architecture.md`; schema truth i
 | Host | Role | Arch | Notes |
 | --- | --- | --- | --- |
 | local macOS | development | arm64 | Code only. External SSD overheats under heavy write IO, so avoid large local ingest/rebuild jobs. |
-| cafemini | primary data host + build host | arm64 | Live DuckDB is `data/duckdb/vultrack.duckdb` (~13.5 GB). Use for builds and long jobs. |
+| cafemini | primary data host + build host | amd64 | Live DuckDB is `data/duckdb/vultrack.duckdb` (~13.5 GB). Use for builds and long jobs. |
 | ubuntu remote | production | arm64 | 4c/24g, ~200 GB disk, disk pressure from the legacy PG era. Pulls images from GHCR; do not build there. |
 
 Critical path gotcha: cafemini sets `VULTRACK_DUCKDB_PATH=/workspace/data/duckdb/vultrack.duckdb`
@@ -55,14 +55,14 @@ serve an empty catalog.
       destructive cleanup. This table is the only asset that cannot be re-downloaded.
 - [ ] Cap DuckDB memory and threads in every compose file. Unbounded DuckDB takes ~80 % of host
       RAM; the container budget is far smaller, so this is an active OOM risk.
-- [ ] Route the SBOM-matching path through the managed read pool instead of opening a bare
-      connection. It currently competes with the single writer and is the most likely trigger
-      for a second ART-style corruption.
-      Location: `DuckDbEvidenceStore.cs:288-291`, `:3152`.
-- [ ] Accumulate changed keys across the whole scheduler cycle and rebuild the catalog once at
-      the end. Today a >50 k changed-key batch can trigger a ~56 s full rebuild repeatedly
-      inside one ingest loop; a full affected rebuild costs ~18 min 52 s.
-      Location: `DuckDbEvidenceNormalizer.Spool.cs:72-83`, `DuckDbFirstScheduler.cs:112-119`.
+- [x] Serialize SBOM candidate matching with the single-writer lock. The path creates a temp
+      table and uses COPY, so it intentionally uses a dedicated connection while holding
+      `_writeLock` rather than borrowing a read-pool connection.
+      Location: `DuckDbEvidenceStore.Sbom.cs`.
+- [x] Accumulate changed keys across the whole scheduler cycle and rebuild the catalog once at
+      the end. The normalizer returns deferred rebuild state and the scheduler coalesces it
+      across all ready files and sources.
+      Location: `DuckDbEvidenceNormalizer.Spool.cs`, `DuckDbFirstScheduler.cs`.
 
 ## P1 — Performance
 
@@ -93,14 +93,15 @@ serve an empty catalog.
       `if (duckDbPrimary) ... else Npgsql ...` branch, and the 13 PG normalizers,
       `SourceScheduler` (733 lines), and `db/init/*.sql` are dead code in the default
       deployment. This is the single largest structural drag on the codebase.
-- [ ] Split the `DuckDbEvidenceStore` god class (4,446 lines: DTOs + DDL + read + write + SBOM
-      + search) into Catalog / Evidence / SBOM / Schema units.
-- [ ] Move the ~30 endpoints out of `Program.cs` (2,768 lines) into per-area endpoint files,
-      following the existing `SbomEndpoints.cs` pattern.
+- [x] Split `DuckDbEvidenceStore` into Catalog / Evidence / Affected / AI / EPSS / SBOM /
+      Status / Schema / DTO partial-class units. The shared connection and COPY discipline
+      remains in the small root file.
+- [x] Move endpoints out of `Program.cs` into per-area endpoint files. `Program.cs` now only
+      wires services, middleware, endpoint groups, and cache warm-up.
 - [ ] Collapse scattered `Environment.GetEnvironmentVariable` reads and `appsettings.json` into
       strongly typed Options.
-- [ ] Introduce a build step and split the 2,936-line single-file frontend `app.js`. It will
-      not survive the planned SBOM-diff and policy features in its current shape.
+- [x] Split the old single-file frontend into native ES modules under `wwwroot/js`. A bundler
+      is not currently required because the static frontend has no compile-time dependency.
 - [ ] Remove the pre-existing CS9113 warning by using or deleting the unread `services`
       parameter.
 
@@ -111,8 +112,9 @@ serve an empty catalog.
 - [ ] Mark every superseded PG-first doc under `docs/design/` with an explicit obsolete banner,
       or move them to `docs/design/legacy/`. They still contradict the implementation and
       mislead new agents.
-- [ ] Document the ubuntu-remote cutover runbook, including the 30 GB transfer budget and the
-      delete-after-download rule for large payloads.
+- [x] Document the ubuntu-remote cutover runbook, including the 30 GiB transfer budget,
+      server-to-server/no-local-SSD rule, AI restore gate, and delete-after-import rule for
+      rebuildable payloads.
 
 ## P4 — Product Gaps Versus OpenCVE / Dependency-Track
 
