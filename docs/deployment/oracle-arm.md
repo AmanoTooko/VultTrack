@@ -37,6 +37,9 @@ VULTRACK_FRONTEND_IMAGE=ghcr.io/amanotooko/vultrack-frontend:<git-sha>
 自动部署默认关闭。只有仓库变量 `VULTRACK_AUTO_DEPLOY=true` 时，GitHub
 Actions 才会执行生产部署。
 
+生产 Compose 故意不为镜像 tag 或 DuckDB 路径提供 fallback；直接运行时若漏掉
+`--env-file .env.production` 会立即失败，不能绕过路径与固定镜像门禁。
+
 ## 1. 只读预检
 
 任何 pull、build、停止服务或数据复制前先记录：
@@ -136,13 +139,15 @@ AI 分析是唯一不可从公开源重建的数据。迁移前至少保留 Orac
 （压缩文件共 63,248 行，含表头）。不要为此把生产 DuckDB 或原始 1 GB CSV
 下载到本地外置 SSD；服务器已有压缩副本时应原地使用。
 
-恢复不保留生产 API。停止 API 写入后，在 Cafemini 内部临时目录生成一个使用
-`DuckDB.NET.Data`/`DuckDB.NET.Bindings.Full 1.5.3` 的一次性控制台工具；分别发布
-`linux-x64` 与 `linux-arm64`，ARM 版本只在 Cafemini 交叉发布，不在 Oracle 构建。
-工具直接读取服务器已有的 gzip，单事务完成临时表读取、`inputRows=63247` 校验、
-AI 表替换、`storedRows=63247` 校验和 commit；任一步不符必须 rollback。成功后核对
-matched/unmatched、AI 表计数并随机抽查，再删除临时源码、二进制和容器，只保留
-权威压缩备份及校验清单。最终应用镜像不包含 AI 导入 endpoint 或脚本。
+恢复不保留生产 API。GitHub Actions 从临时的 `tools/VulTrack.AiRecovery` 发布
+`linux/amd64,linux/arm64` 多架构镜像，只打 commit SHA、不打 `latest`。停止 API
+写入后，以 `--network none --read-only --rm` 运行同一 manifest 对应本机架构的
+镜像；数据库目录读写挂载，服务器已有 gzip 只读挂载。工具使用与应用一致的
+`DuckDB.NET.Data`/`DuckDB.NET.Bindings.Full 1.5.3`，单事务完成输入 63,247 行、
+目录映射、JSON/数值、stage/target 全行一致和显式索引为 0 的校验；任一步不符
+必须 rollback。先在 Cafemini 验证同一 digest，再在 Oracle ARM 执行。两端恢复、
+计数与固定样本抽查完成后，从仓库/CI 删除 recovery 项目和构建步骤，并删除服务器
+上的恢复镜像；只保留权威压缩备份及校验清单。最终应用镜像不包含导入能力。
 
 ## 5. 从开源数据重建
 

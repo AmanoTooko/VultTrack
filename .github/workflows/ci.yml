@@ -75,6 +75,16 @@ jobs:
             ghcr.io/${{ env.IMAGE_NAMESPACE }}/vultrack-frontend:latest
             ghcr.io/${{ env.IMAGE_NAMESPACE }}/vultrack-frontend:${{ github.sha }}
 
+      # Temporary migration-only image. It has no HTTP listener and is removed from the
+      # repository and hosts after both amd64 and arm64 AI restores are verified.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: tools/VulTrack.AiRecovery/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/${{ env.IMAGE_NAMESPACE }}/vultrack-ai-recovery:${{ github.sha }}
+
   deploy:
     runs-on: ubuntu-24.04
     needs: docker

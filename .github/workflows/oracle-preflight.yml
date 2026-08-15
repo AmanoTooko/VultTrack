@@ -64,7 +64,7 @@ jobs:
           git -C "$app_dir" rev-parse HEAD
 
           echo '== compose =='
-          docker compose -f "$app_dir/docker-compose.prod.yml" config --services
+          docker compose --env-file "$app_dir/.env.production" -f "$app_dir/docker-compose.prod.yml" config --services
 
           echo '== runtime paths =='
           for path in "$app_dir/data" "$app_dir/pgdata" "$app_dir/data/duckdb"; do
