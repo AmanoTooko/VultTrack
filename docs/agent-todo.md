@@ -78,12 +78,13 @@ serve an empty catalog.
       OSV records that repeat the same IDs in both `upstream` and `related` are projected once as
       upstream; only relation IDs unique to `related` stay in the related set. Relations equal to
       the final canonical key are omitted to prevent self-links after CVE promotion.
-      The real bulk run also found content-free `MINI-*` and `CGA-*` package-range projections.
+      The real bulk run also found content-free `MINI-*` and `CGA-*` distro projections.
       Only these evidence-only distro records use relation-assisted projection: one direct CVE
-      alias takes precedence, otherwise one related CVE owns their affected facts. Records without
-      a unique CVE remain as raw evidence and relations but are suppressed from the searchable
-      catalog. Normal advisories still never use `upstream` or `related` as identity, and CVE-less
-      GHSA/BDSA records remain independent.
+      alias takes precedence, otherwise one related CVE owns any affected facts. Records without a
+      unique CVE remain as raw evidence and relations but are suppressed from the searchable
+      catalog. The rule also suppresses content-free projections that have no affected facts.
+      Normal advisories still never use `upstream` or `related` as identity, and CVE-less GHSA/BDSA
+      records remain independent.
 
 ## P1 — Performance
 

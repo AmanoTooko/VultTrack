@@ -796,10 +796,9 @@ public sealed partial class DuckDbEvidenceNormalizer
     {
         var normalized = Identifier.Normalize(osvId);
         return (normalized.StartsWith("MINI-", StringComparison.Ordinal)
-                || normalized.StartsWith("CGA-", StringComparison.Ordinal))
+               || normalized.StartsWith("CGA-", StringComparison.Ordinal))
                && string.IsNullOrWhiteSpace(title)
                && string.IsNullOrWhiteSpace(description)
-               && affected.Count > 0
                && severity.Count == 0
                && references.Count == 0;
     }
