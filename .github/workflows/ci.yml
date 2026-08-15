@@ -78,7 +78,10 @@ jobs:
   deploy:
     runs-on: ubuntu-24.04
     needs: docker
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # Production migration is intentionally opt-in. Set the repository
+    # variable VULTRACK_AUTO_DEPLOY=true only after the target host has passed
+    # the disk/memory/backup preflight documented in docs/deployment/oracle-arm.md.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.VULTRACK_AUTO_DEPLOY == 'true'
     concurrency:
       group: vultrack-production-deploy
       cancel-in-progress: false

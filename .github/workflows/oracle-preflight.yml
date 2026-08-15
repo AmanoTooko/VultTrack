@@ -1,0 +1,92 @@
+name: Oracle ARM preflight
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check deploy secrets
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          test -n "$DEPLOY_HOST"
+          test -n "$DEPLOY_USER"
+          test -n "$DEPLOY_SSH_KEY"
+
+      - name: Configure SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/vultrack_deploy
+          chmod 600 ~/.ssh/vultrack_deploy
+
+      - name: Read-only host preflight
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+        run: |
+          port="${DEPLOY_PORT:-22}"
+          ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+            -i ~/.ssh/vultrack_deploy -p "$port" "$DEPLOY_USER@$DEPLOY_HOST" \
+            'bash -s' <<'REMOTE'
+          set -euo pipefail
+          echo '== host =='
+          uname -a
+          printf 'architecture='; uname -m
+          printf 'cpus='; nproc
+          uptime
+
+          echo '== memory =='
+          free -h
+
+          echo '== filesystems =='
+          df -h / /home /var/lib/docker 2>&1 || true
+
+          echo '== docker =='
+          docker version --format '{{.Server.Os}}/{{.Server.Arch}} {{.Server.Version}}'
+          docker system df
+          docker ps -a --format 'table {{.Names}}\t{{.Image}}\t{{.Status}}'
+
+          app_dir=/home/ubuntu/vultrack
+          echo '== repository =='
+          test -d "$app_dir"
+          git -C "$app_dir" status --short --branch
+          git -C "$app_dir" rev-parse HEAD
+
+          echo '== compose =='
+          docker compose -f "$app_dir/docker-compose.prod.yml" config --services
+
+          echo '== runtime paths =='
+          for path in "$app_dir/data" "$app_dir/pgdata" "$app_dir/data/duckdb"; do
+            if [ -L "$path" ]; then
+              echo "refusing symbolic path: $path" >&2
+              exit 1
+            elif [ -e "$path" ]; then
+              stat --format='%n type=%F bytes=%s' "$path"
+            else
+              echo "$path missing"
+            fi
+          done
+
+          echo '== non-secret settings =='
+          env_file="$app_dir/.env.production"
+          if [ -f "$env_file" ] && [ ! -L "$env_file" ]; then
+            awk -F= '
+              /^(VULTRACK_DUCKDB_PATH|VULTRACK_DUCKDB_MEMORY_LIMIT|VULTRACK_DUCKDB_THREADS|VULTRACK_SCHEDULER_ENABLED|DUCKDB_ALLOW_AUTOMATIC_INIT|DUCKDB_FETCH_INTERVAL_SECONDS)=/ {
+                print $1 "=" $2
+              }
+            ' "$env_file"
+          else
+            echo '.env.production missing or symbolic'
+          fi
+          REMOTE

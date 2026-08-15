@@ -14,14 +14,26 @@ mkdir -p data/duckdb data/spool/incoming data/spool/state
 docker compose up -d --build --remove-orphans api frontend
 
 echo "Waiting for API readiness..."
+READY_URL="${API_BASE_URL:-}"
+if [[ -n "$READY_URL" ]]; then
+  READY_URL="${READY_URL%/}/api/v1/system.ready"
+fi
 for _ in $(seq 1 120); do
-  if curl -fsS "http://127.0.0.1:5099/api/v1/system.ready" >/dev/null 2>&1; then
+  if [[ -n "$READY_URL" ]] && curl -fsS "$READY_URL" >/dev/null 2>&1; then
     break
   fi
+  for candidate in \
+    "http://127.0.0.1:5099/api/v1/system.ready" \
+    "http://127.0.0.1:3000/api/v1/system.ready"; do
+    if curl -fsS "$candidate" >/dev/null 2>&1; then
+      READY_URL="$candidate"
+      break 2
+    fi
+  done
   sleep 1
 done
 
-if ! curl -fsS "http://127.0.0.1:5099/api/v1/system.ready" >/dev/null 2>&1; then
+if [[ -z "$READY_URL" ]] || ! curl -fsS "$READY_URL" >/dev/null 2>&1; then
   echo "API did not become ready within 120 seconds." >&2
   docker compose logs --tail=120 api >&2 || true
   exit 1
@@ -30,6 +42,6 @@ fi
 echo
 echo "VulTrack is running:"
 echo "  Frontend: http://localhost:3000"
-echo "  API:      http://localhost:5099"
+echo "  Ready:    $READY_URL"
 echo
-node scripts/status-local.mjs
+API_BASE_URL="${READY_URL%/api/v1/system.ready}" node scripts/status-local.mjs

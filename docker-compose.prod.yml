@@ -1,12 +1,12 @@
 services:
   api:
-    build:
-      context: .
-      dockerfile: src/VulTrack.App/Dockerfile
+    image: ${VULTRACK_API_IMAGE:-ghcr.io/amanotooko/vultrack-api:latest}
     container_name: ${VULTRACK_API_CONTAINER:-vultrack-api}
     restart: unless-stopped
     working_dir: /app
     env_file:
+      - path: .env
+        required: false
       - path: .env.production
         required: false
     environment:
@@ -15,7 +15,7 @@ services:
       VULTRACK_REPO_ROOT: /workspace
       VULTRACK_STORAGE_BACKEND: duckdb
       VULTRACK_DUCKDB_ENABLED: "true"
-      VULTRACK_DUCKDB_PATH: /workspace/data/duckdb/vultrack.duckdb
+      VULTRACK_DUCKDB_PATH: ${VULTRACK_DUCKDB_PATH:-/workspace/data/duckdb/vultrack-evidence.duckdb}
       VULTRACK_DUCKDB_MEMORY_LIMIT: ${VULTRACK_DUCKDB_MEMORY_LIMIT:-3g}
       VULTRACK_DUCKDB_THREADS: ${VULTRACK_DUCKDB_THREADS:-4}
       VULTRACK_SPOOL_PATH: /workspace/data/spool
@@ -27,9 +27,7 @@ services:
     command: ["dotnet", "/app/VulTrack.App.dll"]
 
   frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile
+    image: ${VULTRACK_FRONTEND_IMAGE:-ghcr.io/amanotooko/vultrack-frontend:latest}
     container_name: ${VULTRACK_FRONTEND_CONTAINER:-vultrack-frontend}
     restart: unless-stopped
     ports:
