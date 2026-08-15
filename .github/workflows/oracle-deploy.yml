@@ -86,7 +86,7 @@ jobs:
           DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           GHCR_USERNAME: ${{ github.actor }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_SHA: ${{ inputs.release_sha }}
           DUCKDB_PATH: ${{ inputs.duckdb_path }}
         run: |
@@ -132,7 +132,7 @@ jobs:
           # The token is supplied only on this pipe. The remote script reads
           # one line, logs in with --password-stdin, and removes its temporary
           # Docker credentials on EXIT.
-          printf '%s\n' "$GHCR_TOKEN" | \
+          printf '%s\n' "$GITHUB_TOKEN" | \
             ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
               -i ~/.ssh/vultrack_deploy -p "$port" "$DEPLOY_USER@$DEPLOY_HOST" \
               "GHCR_USERNAME=$GHCR_USERNAME GHCR_PASSWORD_STDIN=true /home/ubuntu/vultrack/scripts/deploy-prod.sh"

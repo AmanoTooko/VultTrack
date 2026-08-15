@@ -1,5 +1,8 @@
 .env
 ssh-key-*.key
+ghtoken.md
+*token*.md
+nexttodo.md
 data/
 exports/
 logs/

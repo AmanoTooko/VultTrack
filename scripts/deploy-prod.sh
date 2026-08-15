@@ -4,6 +4,24 @@ set -euo pipefail
 APP_DIR="${APP_DIR:-/home/ubuntu/vultrack}"
 BRANCH="${BRANCH:-main}"
 
+# Registry authentication is optional. The published VulTrack images are public, so an
+# anonymous pull succeeds and a manual deploy does not need a long-lived token. Set
+# GHCR_PASSWORD_STDIN=true (token on stdin) when the packages are private, or to lift the
+# anonymous pull rate limit. The Actions workflow always sets it and pipes its own
+# short-lived GITHUB_TOKEN.
+GHCR_LOGIN="${GHCR_PASSWORD_STDIN:-false}"
+if [[ "$GHCR_LOGIN" != "true" && "$GHCR_LOGIN" != "false" ]]; then
+  echo "GHCR_PASSWORD_STDIN must be true or false" >&2
+  exit 1
+fi
+if [[ "$GHCR_LOGIN" == "true" ]]; then
+  : "${GHCR_USERNAME:?GHCR_USERNAME is required when GHCR_PASSWORD_STDIN=true}"
+  if [[ ! "$GHCR_USERNAME" =~ ^[A-Za-z0-9-]+$ ]]; then
+    echo "GHCR_USERNAME contains unsupported characters" >&2
+    exit 1
+  fi
+fi
+
 cd "$APP_DIR"
 
 current_branch="$(git branch --show-current)"
@@ -122,24 +140,39 @@ if command -v systemctl >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then
   sudo systemctl restart vultrack-docker-forward.service || true
 fi
 
-if [[ "${GHCR_PASSWORD_STDIN:-false}" == "true" ]]; then
-  : "${GHCR_USERNAME:?GHCR_USERNAME is required when GHCR_PASSWORD_STDIN=true}"
+# Always run the pull against an isolated Docker config so no ambient credentials on the
+# host are used or modified, and so any token supplied here cannot outlive this script.
+docker_config_dir="$(mktemp -d -- "${TMPDIR:-/tmp}/vultrack-docker-config.XXXXXX")"
+if [[ ! -d "$docker_config_dir" || -L "$docker_config_dir" ]]; then
+  echo "mktemp did not create a regular Docker config directory" >&2
+  exit 1
+fi
+chmod 700 -- "$docker_config_dir"
+export DOCKER_CONFIG="$docker_config_dir"
+cleanup_docker_config() {
+  if [[ -n "${docker_config_dir:-}" && -d "$docker_config_dir" && ! -L "$docker_config_dir" ]]; then
+    rm -rf -- "$docker_config_dir"
+  fi
+}
+trap cleanup_docker_config EXIT
+
+if [[ "$GHCR_LOGIN" == "true" ]]; then
   ghcr_token=""
   if ! IFS= read -r ghcr_token; then
-    echo "GHCR password was not supplied on stdin" >&2
-    exit 1
+    if [[ -z "$ghcr_token" ]]; then
+      echo "GHCR password was not supplied on stdin" >&2
+      exit 1
+    fi
   fi
-  docker_config_dir="$(mktemp -d "${TMPDIR:-/tmp}/vultrack-docker-config.XXXXXX")"
-  chmod 700 "$docker_config_dir"
-  export DOCKER_CONFIG="$docker_config_dir"
-  cleanup_docker_config() {
-    docker logout ghcr.io >/dev/null 2>&1 || true
-    rm -rf -- "$docker_config_dir"
-  }
-  trap cleanup_docker_config EXIT
+  login_status=0
   printf '%s' "$ghcr_token" | docker login ghcr.io \
-    --username "$GHCR_USERNAME" --password-stdin >/dev/null
+    --username "$GHCR_USERNAME" --password-stdin >/dev/null || login_status=$?
   unset ghcr_token
+  if (( login_status != 0 )); then
+    exit "$login_status"
+  fi
+else
+  echo "Pulling anonymously from ghcr.io; set GHCR_PASSWORD_STDIN=true for private packages." >&2
 fi
 
 compose=(docker compose --env-file .env.production -f docker-compose.prod.yml)
