@@ -258,6 +258,34 @@ test('OSV bulk prefix feeder emits append-only segmented spool', async () => {
   }
 });
 
+test('OSV bulk ID feeder deduplicates requests and reports missing records', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-osv-ids-'));
+  try {
+    const { writeOsvIdRecords } = await import('../../scripts/feed-osv-bulk-prefix.mjs');
+    const result = await writeOsvIdRecords(
+      [
+        { id: 'OSV-0001', aliases: ['CVE-2026-10001'] },
+        { id: 'OSV-0002' },
+        { id: 'OSV-0003' }
+      ],
+      root,
+      { ids: ['osv-0002', 'OSV-0001', 'OSV-0002', 'OSV-MISSING'], segmentSize: 1, runId: 'ids-fixture' });
+
+    assert.equal(result.records, 2);
+    assert.deepEqual(result.files.map((item) => item.records), [1, 1]);
+    assert.deepEqual(result.missingIds, ['OSV-MISSING']);
+    const lines = [];
+    for (const segment of result.files) {
+      const content = await fs.readFile(path.join(root, 'incoming', segment.file), 'utf8');
+      lines.push(...content.trim().split('\n').map(JSON.parse));
+    }
+    assert.deepEqual(lines.map((line) => line.externalId), ['OSV-0001', 'OSV-0002']);
+    assert.ok(lines.every((line) => line.sourceMode === 'append'));
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 function boundaryOsv(id, aliases, upstream, complete = false) {
   return {
     id,

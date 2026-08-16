@@ -39,6 +39,42 @@ export async function feedOsvBulkPrefix(zipPath, outputDirectory, options) {
   return { manifestPath, manifest };
 }
 
+export async function feedOsvBulkIds(zipPath, outputDirectory, options) {
+  const ids = normalizeIds(options?.ids);
+  const segmentSize = positiveInteger(options?.segmentSize, 5000);
+  const archiveHash = await fileSha256(zipPath);
+  const runId = `ids-${archiveHash.slice(0, 16)}`;
+  const incoming = path.join(outputDirectory, 'incoming');
+  await fs.mkdir(incoming, { recursive: true });
+
+  const writer = createSegmentWriter(incoming, runId, segmentSize);
+  const remaining = new Set(ids);
+  const scan = await scanOsvIds(zipPath, remaining, async (item) => {
+    await writer.add(item);
+    remaining.delete(normalizeId(item.id));
+  });
+  const spool = await writer.finish();
+  const missingIds = [...remaining].sort();
+  const manifest = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    archive: { path: path.resolve(zipPath), sha256: archiveHash },
+    sourceCode: 'osv-init',
+    sourceMode: 'append',
+    requestedIds: ids.length,
+    selectedRecords: spool.records,
+    missingIds,
+    scannedEntries: scan.scannedEntries,
+    segmentSize,
+    segments: spool.files
+  };
+  const manifestPath = path.join(outputDirectory, 'manifest.json');
+  await fs.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' });
+  if (missingIds.length > 0)
+    throw new Error(`OSV archive is missing ${missingIds.length} requested IDs; see ${manifestPath}`);
+  return { manifestPath, manifest };
+}
+
 export async function writeOsvPrefixRecords(records, outputDirectory, options) {
   const prefix = normalizePrefix(options?.prefix);
   const segmentSize = positiveInteger(options?.segmentSize, 5000);
@@ -50,6 +86,24 @@ export async function writeOsvPrefixRecords(records, outputDirectory, options) {
     if (matchesPrefix(item?.id, prefix)) await writer.add(item);
   }
   return writer.finish();
+}
+
+export async function writeOsvIdRecords(records, outputDirectory, options) {
+  const ids = normalizeIds(options?.ids);
+  const requested = new Set(ids);
+  const segmentSize = positiveInteger(options?.segmentSize, 5000);
+  const runId = options?.runId ?? 'ids-fixture';
+  const incoming = path.join(outputDirectory, 'incoming');
+  await fs.mkdir(incoming, { recursive: true });
+  const writer = createSegmentWriter(incoming, runId, segmentSize);
+  for (const item of records) {
+    const id = normalizeId(item?.id);
+    if (!requested.has(id)) continue;
+    await writer.add(item);
+    requested.delete(id);
+  }
+  const result = await writer.finish();
+  return { ...result, missingIds: [...requested].sort() };
 }
 
 async function scanOsvPrefix(zipPath, prefix, onItem) {
@@ -95,6 +149,55 @@ async function scanOsvPrefix(zipPath, prefix, onItem) {
     zip.close();
   }
   return { scannedEntries, candidateEntries };
+}
+
+async function scanOsvIds(zipPath, remaining, onItem) {
+  const zip = await openZip(zipPath);
+  let scannedEntries = 0;
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (error) => {
+        if (settled) return;
+        settled = true;
+        if (error) reject(error);
+        else resolve();
+      };
+      zip.once('error', finish);
+      zip.once('end', () => finish());
+      zip.on('entry', async (entry) => {
+        try {
+          if (/\/$/.test(entry.fileName) || !entry.fileName.endsWith('.json')) {
+            zip.readEntry();
+            return;
+          }
+          scannedEntries++;
+          const entryId = normalizeId(path.posix.basename(entry.fileName, '.json'));
+          if (!remaining.has(entryId)) {
+            zip.readEntry();
+            return;
+          }
+          const item = JSON.parse((await readZipEntry(zip, entry)).toString('utf8'));
+          if (normalizeId(item?.id) !== entryId)
+            throw new Error(`OSV archive entry ${entry.fileName} has mismatched payload ID ${item?.id}`);
+          await onItem(item);
+          if (remaining.size === 0) {
+            zip.close();
+            finish();
+            return;
+          }
+          zip.readEntry();
+        } catch (error) {
+          zip.close();
+          finish(error);
+        }
+      });
+      zip.readEntry();
+    });
+  } finally {
+    zip.close();
+  }
+  return { scannedEntries };
 }
 
 function createSegmentWriter(incoming, runId, segmentSize) {
@@ -157,6 +260,16 @@ function matchesPrefix(value, prefix) {
   return String(value ?? '').toUpperCase().startsWith(prefix);
 }
 
+function normalizeIds(values) {
+  const ids = [...new Set((values ?? []).map(normalizeId).filter(Boolean))].sort();
+  if (ids.length === 0) throw new Error('at least one OSV ID is required');
+  return ids;
+}
+
+function normalizeId(value) {
+  return String(value ?? '').trim().toUpperCase();
+}
+
 function positiveInteger(value, fallback) {
   const parsed = Number(value ?? fallback);
   if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error('segment size must be a positive integer');
@@ -208,8 +321,16 @@ async function main() {
   const zipPath = path.resolve(root, argument('--zip', DEFAULT_ZIP));
   const outputDirectory = path.resolve(root, argument('--output', DEFAULT_OUTPUT));
   const prefix = argument('--prefix');
+  const idsFile = argument('--ids-file');
   const segmentSize = Number(argument('--segment-size', '5000'));
-  const result = await feedOsvBulkPrefix(zipPath, outputDirectory, { prefix, segmentSize });
+  if (Boolean(prefix) === Boolean(idsFile))
+    throw new Error('provide exactly one of --prefix or --ids-file');
+  const result = idsFile
+    ? await feedOsvBulkIds(zipPath, outputDirectory, {
+      ids: (await fs.readFile(path.resolve(idsFile), 'utf8')).split(/\r?\n/),
+      segmentSize
+    })
+    : await feedOsvBulkPrefix(zipPath, outputDirectory, { prefix, segmentSize });
   console.log(JSON.stringify({ ok: true, manifest: result.manifestPath, ...result.manifest }));
 }
 
