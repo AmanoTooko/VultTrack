@@ -4,6 +4,10 @@ select 'catalog' as audit,
        count(*) as vulnerabilities,
        sum(case when nullif(trim(primary_identifier), '') is null then 1 else 0 end) as blank_primary_identifiers,
        sum(case when primary_identifier like 'MINI-%' or primary_identifier like 'CGA-%' or primary_identifier like 'ECHO-%' then 1 else 0 end) as known_projection_catalog_rows,
+       sum(case when (primary_identifier like 'MINI-%' or primary_identifier like 'CGA-%' or primary_identifier like 'ECHO-%')
+                     and nullif(trim(title), '') is null
+                     and nullif(trim(description), '') is null
+                     and max_cvss_score is null then 1 else 0 end) as empty_projection_catalog_rows,
        sum(case when nullif(trim(title), '') is null and nullif(trim(description), '') is null and max_cvss_score is null then 1 else 0 end) as content_and_severity_empty
 from vulnerabilities;
 
