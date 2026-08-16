@@ -113,7 +113,7 @@ GitHub 公开 API 不强制要求 token，但全量跑 `poc-in-github`、手动�
 - `cnvd`：CNVD 会触发反爬挑战，默认禁用。只支持在许可范围内提供 `CNVD_COOKIE`，并可用 `CNVD_IDS=CNVD-2024-...` 定向同步；不要尝试自动绕过验证码。
 - `cert-360`：360CERT RSS 当前 TLS 和内容时效不稳定，默认禁用。如明确接受 TLS 风险，可设置 `CERT360_ALLOW_INSECURE_TLS=1` 后定向运行。
 
-默认只有 `cnnvd` 启用定时抓取，每 6 小时运行一次。其余中国境内来源全部是 `manual` 且默认禁用，只能通过管理界面或显式 `npm run fetch -- --source <code>` 运行。
+生产默认不启用 CNNVD 定时抓取：其详情接口当前不稳定，失败会产生大量无效重试。其余中国境内来源全部是 `manual` 且默认禁用，只能通过管理界面或显式 `npm run fetch -- --source <code>` 运行。CNNVD 仍可在受控环境中显式 smoke 或手动运行。
 
 这些来源统一带 `schemaHint: 'external-advisory'` 写入 spool，由 .NET 端归一化合并。能解析出 CVE 时优先归并到 CVE；没有 CVE 时保留来源编号，例如 `CNNVD-*`、`CNVD-*`、`SSV-*`、`AVD-*` 或 `CT-*`。产品名称作为弱结构化事实保存，不会伪造 purl。
 

@@ -1,4 +1,5 @@
 .env
+.env.production*
 ssh-key-*.key
 ghtoken.md
 *token*.md

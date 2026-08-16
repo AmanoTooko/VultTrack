@@ -336,7 +336,7 @@ test('FIRST EPSS is enabled after its native delta pipeline is accepted', async 
   const storeStatus = await fs.readFile('src/VulTrack.App/DuckDbEvidenceStore.Status.cs', 'utf8');
   const options = await fs.readFile('src/VulTrack.App/VulTrackOptions.cs', 'utf8');
   const envExample = await fs.readFile('.env.example', 'utf8');
-  const defaults = 'nvd-cve,osv,ghsa,google-osv,cnnvd,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory';
+  const defaults = 'nvd-cve,osv,ghsa,google-osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory';
   assert.match(options, new RegExp(`DefaultFetchSources =\\s*"${defaults}"`));
   assert.match(scheduler, /options\.Scheduler\.SourceCodes\(\)/);
   assert.match(sourceEndpoints, /options\.Scheduler\.SourceCodes\(\)/);

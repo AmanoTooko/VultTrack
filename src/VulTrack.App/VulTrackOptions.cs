@@ -122,7 +122,7 @@ public sealed record SchedulerOptions(
     string FetchSources)
 {
     public const string DefaultFetchSources =
-        "nvd-cve,osv,ghsa,google-osv,cnnvd,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory";
+        "nvd-cve,osv,ghsa,google-osv,cisa-kev,first-epss,exploitdb,nuclei-templates,metasploit,poc-in-github,cargo-advisory";
 
     public string[] SourceCodes() =>
         FetchSources
