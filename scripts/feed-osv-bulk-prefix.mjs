@@ -235,6 +235,7 @@ function osvAppendEnvelope(item, runId) {
     schemaVersion: 1,
     sourceCode: 'osv-init',
     sourceMode: 'append',
+    forceNormalize: true,
     runId,
     externalKey: item.id,
     externalId: item.id,

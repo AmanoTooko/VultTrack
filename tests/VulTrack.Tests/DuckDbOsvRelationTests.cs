@@ -71,6 +71,68 @@ public sealed class DuckDbOsvRelationTests
     }
 
     [Fact]
+    public async Task ForcedReplayReplacesAnUnchangedSourceHash()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-forced-replay-tests", Guid.NewGuid().ToString("N"));
+        var previousSpoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
+        Directory.CreateDirectory(Path.Combine(root, "incoming"));
+        Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", root);
+        try
+        {
+            var databasePath = Path.Combine(root, "forced-replay.duckdb");
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = databasePath,
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var normalizer = new DuckDbEvidenceNormalizer(
+                new UnusedServiceProvider(), store, NullLogger<DuckDbEvidenceNormalizer>.Instance);
+
+            var firstFile = "osv-forced-replay-first.ndjson.ready";
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "incoming", firstFile),
+                ProjectionSpoolLine(
+                    "ECHO-FORCED-0001",
+                    upstream: ["CVE-2026-44001"],
+                    summary: "Forced replay advisory",
+                    fixedVersion: "1.0.0",
+                    recordHash: "unchanged-hash") + Environment.NewLine);
+            await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(firstFile, BatchSize: 100), CancellationToken.None);
+
+            var replayFile = "osv-forced-replay-second.ndjson.ready";
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "incoming", replayFile),
+                ProjectionSpoolLine(
+                    "ECHO-FORCED-0001",
+                    upstream: ["CVE-2026-44002"],
+                    summary: "Forced replay advisory",
+                    fixedVersion: "2.0.0",
+                    recordHash: "unchanged-hash",
+                    forceNormalize: true) + Environment.NewLine);
+            await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(replayFile, BatchSize: 100), CancellationToken.None);
+
+            using var connection = new DuckDBConnection($"Data Source={databasePath}");
+            connection.Open();
+            using var relation = connection.CreateCommand();
+            relation.CommandText = "select related_identifier from source_record_relations";
+            Assert.Equal("CVE-2026-44002", relation.ExecuteScalar()?.ToString());
+            using var range = connection.CreateCommand();
+            range.CommandText = "select version_range_raw from affected_facts";
+            Assert.Equal(">= 0, < 2.0.0", range.ExecuteScalar()?.ToString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", previousSpoolPath);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task GhsaBulkRecordsUseOsvFactsAndKeepAmbiguousAdvisoriesIndependent()
     {
         var root = Path.Combine(Path.GetTempPath(), "vultrack-ghsa-bulk-tests", Guid.NewGuid().ToString("N"));
@@ -709,7 +771,8 @@ public sealed class DuckDbOsvRelationTests
         bool includeAffected = true,
         string? summary = null,
         string fixedVersion = "2.0.0",
-        string? recordHash = null) =>
+        string? recordHash = null,
+        bool forceNormalize = false) =>
         JsonSerializer.Serialize(new
         {
             schemaVersion = 1,
@@ -719,6 +782,7 @@ public sealed class DuckDbOsvRelationTests
             externalId = advisoryId,
             modifiedAt = "2026-08-10T00:00:00Z",
             recordHash = recordHash ?? $"{advisoryId}-v1",
+            forceNormalize,
             payload = new
             {
                 id = advisoryId,

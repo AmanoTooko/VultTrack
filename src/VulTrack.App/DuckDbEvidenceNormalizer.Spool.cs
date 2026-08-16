@@ -798,7 +798,8 @@ public sealed partial class DuckDbEvidenceNormalizer
                 identifiers,
                 upstreamIdentifiers,
                 relatedIdentifiers,
-                normalizationVersion),
+                normalizationVersion,
+                ForceNormalize: IsTrue(envelope["forceNormalize"])),
             exploit,
             threatScore);
     }

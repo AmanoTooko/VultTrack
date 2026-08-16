@@ -80,7 +80,8 @@ public sealed partial class DuckDbEvidenceStore
 
         return records
             .Where(record =>
-                string.IsNullOrWhiteSpace(record.RecordHash)
+                record.ForceNormalize
+                || string.IsNullOrWhiteSpace(record.RecordHash)
                 || !existingVersions.TryGetValue(
                     SourceRecordIdentity(record.SourceCode, record.SourceRecordId),
                     out var existing)

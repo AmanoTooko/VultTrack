@@ -76,7 +76,8 @@ public sealed record DuckDbCatalogRecord(
     IReadOnlyList<string> Identifiers,
     IReadOnlyList<string>? UpstreamIdentifiers = null,
     IReadOnlyList<string>? RelatedIdentifiers = null,
-    string NormalizationVersion = "catalog-v1");
+    string NormalizationVersion = "catalog-v1",
+    bool ForceNormalize = false);
 
 public sealed record DuckDbVulnerabilityRelations(
     string[] UpstreamIdentifiers,

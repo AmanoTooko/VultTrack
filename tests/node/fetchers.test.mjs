@@ -251,6 +251,7 @@ test('OSV bulk prefix feeder emits append-only segmented spool', async () => {
     assert.deepEqual(lines.map((line) => line.externalId), ['ECHO-0001', 'echo-0002', 'ECHO-0003']);
     assert.ok(lines.every((line) => line.sourceCode === 'osv-init'));
     assert.ok(lines.every((line) => line.sourceMode === 'append'));
+    assert.ok(lines.every((line) => line.forceNormalize === true));
     assert.ok(lines.every((line) => line.runId === 'echo-fixture'));
     assert.deepEqual(lines[0].identifiers, ['ECHO-0001', 'CVE-2026-10001']);
   } finally {
@@ -281,6 +282,7 @@ test('OSV bulk ID feeder deduplicates requests and reports missing records', asy
     }
     assert.deepEqual(lines.map((line) => line.externalId), ['OSV-0001', 'OSV-0002']);
     assert.ok(lines.every((line) => line.sourceMode === 'append'));
+    assert.ok(lines.every((line) => line.forceNormalize === true));
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
