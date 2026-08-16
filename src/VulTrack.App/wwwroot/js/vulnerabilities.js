@@ -207,13 +207,13 @@ function renderDetail(data) {
         <div class="detail-main-column">
           ${descriptions.length > 1 ? renderDescriptionCards(descriptions.slice(1)) : ''}
           ${renderMitreData(v, records, sourceUrls)}
-          ${renderRelationEvidence(v)}
-          ${renderRelationshipReferences(v)}
           ${renderExploitSignals(exploits)}
           ${renderCpeConfigurations(affected, affectedExpressions)}
           ${renderAffectedGrouped(affected)}
           ${renderAdvisories(refs)}
           ${refs.length ? renderReferenceCards(refs) : '<section class="detail-section" id="references"><h3 class="section-h">References</h3><p class="muted">No references</p></section>'}
+          ${renderRelationEvidence(v)}
+          ${renderRelationshipReferences(v)}
           ${renderSourceChanges(history.filter(item => isVulnerabilitySource(item.code)))}
           ${renderRecordsBySource(records)}
         </div>
@@ -285,6 +285,8 @@ function renderDetailNav() {
     ['Tracking', 'tracking'],
     ['Source Changes', 'source-changes'],
     ['References', 'references'],
+    ['Relationships', 'relations'],
+    ['Relationship References', 'relationship-references'],
     ['Raw Data', 'raw-data']
   ];
   return `
@@ -797,6 +799,7 @@ function renderMitreData(v, records, sourceUrls) {
 }
 
 function renderRelationEvidence(v) {
+  const maxVisible = 12;
   const groups = [
     ['Upstream', v.upstreamIdentifiers || []],
     ['Related', v.relatedIdentifiers || []],
@@ -806,31 +809,28 @@ function renderRelationEvidence(v) {
     [...new Set(identifiers.filter(Boolean).map(displayIdentifierValue))]
   ]).filter(([, identifiers]) => identifiers.length);
   if (!groups.length) return '';
-  const downstreamSources = new Map((v.downstreamRelations || []).map(item => [
-    displayIdentifierValue(item.primaryIdentifier),
-    item.sourceCode
-  ]));
+  const groupMarkup = groups.map(([label, identifiers], groupIndex) => {
+    const group = `relation-identifiers-${groupIndex}`;
+    const visible = identifiers.slice(0, maxVisible);
+    const hidden = identifiers.slice(maxVisible);
+    return `
+      <div class="info-card relation-group-card">
+        <div class="info-card-row"><strong>${escapeHtml(label)}</strong><span class="badge">${fmt(identifiers.length)}</span></div>
+        <div class="chips compact-chips">
+          ${visible.map(identifier => `<a class="badge" href="${cveRoute(identifier)}" title="${escapeAttr(`${label}: ${identifier}`)}">${escapeHtml(identifier)}</a>`).join('')}
+          ${hidden.map(identifier => `<a class="badge" hidden data-overflow-group="${group}" href="${cveRoute(identifier)}" title="${escapeAttr(`${label}: ${identifier}`)}">${escapeHtml(identifier)}</a>`).join('')}
+        </div>
+        ${hidden.length ? renderOverflowButton(group, `Show ${fmt(hidden.length)} more`, 'Show fewer') : ''}
+      </div>
+    `;
+  }).join('');
   return `
     <section class="detail-section" id="relations">
       <div class="section-title-row">
         <h3 class="section-h">Relationships</h3>
         <span class="badge">${fmt(groups.reduce((total, [, identifiers]) => total + identifiers.length, 0))}</span>
       </div>
-      <div class="card-stack">
-        ${groups.map(([label, identifiers]) => `
-          <div class="info-card">
-            <div class="info-card-row"><strong>${escapeHtml(label)}</strong></div>
-            <div class="chips compact-chips">
-              ${identifiers.map(identifier => `
-                <a class="badge" href="${cveRoute(identifier)}" title="${escapeAttr(`${label}: ${identifier}`)}">
-                  ${escapeHtml(identifier)}
-                  ${downstreamSources.has(identifier) ? `<small>${escapeHtml(downstreamSources.get(identifier))}</small>` : ''}
-                </a>
-              `).join('')}
-            </div>
-          </div>
-        `).join('')}
-      </div>
+      <div class="card-stack">${groupMarkup}</div>
     </section>
   `;
 }
@@ -838,6 +838,7 @@ function renderRelationEvidence(v) {
 function renderRelationshipReferences(v) {
   const references = (v.relationshipReferences || []).filter(item => item && item.identifier);
   if (!references.length) return '';
+  const maxVisible = 12;
   return `
     <section class="detail-section" id="relationship-references">
       <div class="section-title-row">
@@ -845,12 +846,12 @@ function renderRelationshipReferences(v) {
         <span class="badge">${fmt(references.length)}</span>
       </div>
       <div class="card-stack">
-        ${references.map(reference => {
+        ${references.map((reference, index) => {
           const label = reference.direction === 'downstream' ? 'Downstream' : reference.relationType;
           const source = [reference.sourceCode, reference.sourceRecordId].filter(Boolean).join(' / ');
           const identifier = displayIdentifierValue(reference.identifier);
           return `
-            <div class="info-card">
+            <div class="info-card" ${index >= maxVisible ? 'hidden data-overflow-group="relationship-references"' : ''}>
               <div class="info-card-row">
                 <strong>${escapeHtml(label)}</strong>
                 <a class="badge" href="${cveRoute(identifier)}" title="Open ${escapeAttr(identifier)}">
@@ -865,6 +866,7 @@ function renderRelationshipReferences(v) {
           `;
         }).join('')}
       </div>
+      ${references.length > maxVisible ? renderOverflowButton('relationship-references', `Show ${fmt(references.length - maxVisible)} more relationships`, 'Show fewer relationships') : ''}
     </section>
   `;
 }

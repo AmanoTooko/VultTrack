@@ -442,4 +442,83 @@ public sealed class DuckDbCatalogSearchTests
             hash,
             ["CVE-2024-2001"]);
     }
+
+    [Fact]
+    public async Task SearchCatalog_SortsByCvssInBothDirections()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-cvss-sort-tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "catalog.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var records = new[]
+            {
+                Record("CVE-2024-3001", 9.8m),
+                Record("CVE-2024-3002", 5.4m),
+                Record("CVE-2024-3003", 7.5m),
+                Record("CVE-2024-3004", null)
+            };
+
+            await store.ReplaceCatalogRecordsAsync(records.Select(item => item.Catalog).ToArray(), CancellationToken.None);
+            await store.ReplaceRecordsAsync(records.Select(item => item.Evidence).ToArray(), CancellationToken.None);
+            await store.RebuildCatalogAsync(CancellationToken.None);
+
+            var descending = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("", 1, 25, "cvssDesc"),
+                CancellationToken.None);
+            Assert.Equal(
+                ["CVE-2024-3001", "CVE-2024-3003", "CVE-2024-3002", "CVE-2024-3004"],
+                descending.Items.Select(item => item.PrimaryIdentifier).ToArray());
+            Assert.Equal("cvssDesc", descending.Sort);
+
+            var ascending = await store.SearchCatalogAsync(
+                new VulnerabilitySearchRequest("", 1, 25, "cvssAsc"),
+                CancellationToken.None);
+            Assert.Equal(
+                ["CVE-2024-3002", "CVE-2024-3003", "CVE-2024-3001", "CVE-2024-3004"],
+                ascending.Items.Select(item => item.PrimaryIdentifier).ToArray());
+            Assert.Equal("cvssAsc", ascending.Sort);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+
+        static (DuckDbCatalogRecord Catalog, DuckDbEvidenceRecord Evidence) Record(string key, decimal? score)
+        {
+            var id = Guid.NewGuid();
+            return (
+                new DuckDbCatalogRecord(
+                    "test-source",
+                    key,
+                    id,
+                    key,
+                    key,
+                    "Description",
+                    "active",
+                    "2024-03-01T00:00:00Z",
+                    "2024-03-02T00:00:00Z",
+                    $"https://example.test/{key}",
+                    $"hash-{key}",
+                    [key]),
+                new DuckDbEvidenceRecord(
+                    "test-source",
+                    id,
+                    key,
+                    key,
+                    [],
+                    score is null
+                        ? []
+                        : [new DuckDbSeverityScore("CVSS", "3.1", "base", null, score, "HIGH")],
+                    [],
+                    []));
+        }
+    }
 }

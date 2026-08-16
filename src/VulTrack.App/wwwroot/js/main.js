@@ -3,6 +3,7 @@ import {
   state,
   el,
   applyThemeColor,
+  applyThemeMode,
   openLogin,
   updateAuthUi,
   setDetailOnlyView,
@@ -34,6 +35,10 @@ el.themeSwatches.forEach((button) => {
 
 el.themeColorInput?.addEventListener('input', (event) => {
   applyThemeColor(event.target.value);
+});
+
+el.themeModeButton?.addEventListener('click', () => {
+  applyThemeMode(state.themeMode === 'dark' ? 'light' : 'dark');
 });
 
 el.refreshButton.addEventListener('click', () => {

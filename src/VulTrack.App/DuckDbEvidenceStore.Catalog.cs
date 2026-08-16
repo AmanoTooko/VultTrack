@@ -598,7 +598,10 @@ public sealed partial class DuckDbEvidenceStore
             "modifiedAsc" => "modifiedAsc",
             "identifierAsc" => "identifierAsc",
             "identifierDesc" => "identifierDesc",
+            "cvssDesc" => "cvssDesc",
+            "cvssAsc" => "cvssAsc",
             "severityDesc" => "severityDesc",
+            "severityAsc" => "severityAsc",
             _ => "modifiedDesc"
         };
         // Deep OFFSET pages re-scan and re-sort the full match set on every request;
@@ -625,7 +628,8 @@ public sealed partial class DuckDbEvidenceStore
             "modifiedAsc" => "modified_at asc nulls last, primary_identifier asc",
             "identifierAsc" => "primary_identifier asc",
             "identifierDesc" => "primary_identifier desc",
-            "severityDesc" => "max_cvss_score desc nulls last, modified_at desc nulls last",
+            "cvssDesc" or "severityDesc" => "max_cvss_score desc nulls last, modified_at desc nulls last, primary_identifier asc",
+            "cvssAsc" or "severityAsc" => "max_cvss_score asc nulls last, modified_at desc nulls last, primary_identifier asc",
             _ => "modified_at desc nulls last, primary_identifier desc"
         };
 

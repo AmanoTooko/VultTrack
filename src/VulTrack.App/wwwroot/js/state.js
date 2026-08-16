@@ -4,6 +4,7 @@ export const state = {
   mode: 'vulnerability',
   selectedId: null,
   themeColor: localStorage.getItem('vultrack.themeColor') || '#1f5f8b',
+  themeMode: localStorage.getItem('vultrack.themeMode') || 'dark',
   page: 1,
   pageSize: Number(localStorage.getItem('vultrack.pageSize') || 25),
   sort: localStorage.getItem('vultrack.sort') || 'modifiedDesc',
@@ -16,6 +17,7 @@ export const el = {
   shell: document.querySelector('.shell'),
   themeColorInput: document.querySelector('#themeColorInput'),
   themeSwatches: [...document.querySelectorAll('.theme-swatch')],
+  themeModeButton: document.querySelector('#themeModeButton'),
   statusLine: document.querySelector('#statusLine'),
   refreshButton: document.querySelector('#refreshButton'),
   statusButton: document.querySelector('#statusButton'),
@@ -55,6 +57,7 @@ if (el.limitSelect) el.limitSelect.value = String(state.pageSize);
 if (el.sortSelect) el.sortSelect.value = state.sort;
 document.body.dataset.mode = state.mode;
 if (el.syntaxHint) el.syntaxHint.innerHTML = syntaxHintHtml(state.mode);
+applyThemeMode(state.themeMode);
 applyThemeColor(state.themeColor);
 
 export function showDetailPane() {
@@ -87,14 +90,29 @@ export function applyThemeColor(color) {
   state.themeColor = normalized;
   localStorage.setItem('vultrack.themeColor', normalized);
   const rootStyle = document.documentElement.style;
+  const lightMode = state.themeMode === 'light';
   rootStyle.setProperty('--accent', normalized);
-  rootStyle.setProperty('--accent-bright', mixHex(normalized, '#ffffff', 0.42));
-  rootStyle.setProperty('--accent-soft', mixHex(normalized, '#0a0f15', 0.78));
-  rootStyle.setProperty('--accent-wash', mixHex(normalized, '#0a0f15', 0.92));
+  rootStyle.setProperty('--accent-bright', lightMode ? mixHex(normalized, '#10212c', 0.18) : mixHex(normalized, '#ffffff', 0.42));
+  rootStyle.setProperty('--accent-soft', lightMode ? mixHex(normalized, '#ffffff', 0.88) : mixHex(normalized, '#0a0f15', 0.78));
+  rootStyle.setProperty('--accent-wash', lightMode ? mixHex(normalized, '#ffffff', 0.94) : mixHex(normalized, '#0a0f15', 0.92));
   if (el.themeColorInput) el.themeColorInput.value = normalized;
   el.themeSwatches.forEach((button) => {
     button.classList.toggle('is-active', normalizeHexColor(button.dataset.themeColor) === normalized);
   });
+}
+
+export function applyThemeMode(mode) {
+  const normalized = mode === 'light' ? 'light' : 'dark';
+  state.themeMode = normalized;
+  localStorage.setItem('vultrack.themeMode', normalized);
+  document.documentElement.dataset.theme = normalized;
+  applyThemeColor(state.themeColor);
+  if (el.themeModeButton) {
+    const next = normalized === 'dark' ? 'light' : 'dark';
+    el.themeModeButton.textContent = normalized === 'dark' ? '☀' : '☾';
+    el.themeModeButton.title = `Switch to ${next} mode`;
+    el.themeModeButton.setAttribute('aria-label', `Switch to ${next} mode`);
+  }
 }
 
 export function updateAuthUi() {
