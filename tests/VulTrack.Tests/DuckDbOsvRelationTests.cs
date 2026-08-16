@@ -281,6 +281,77 @@ public sealed class DuckDbOsvRelationTests
     }
 
     [Fact]
+    public async Task MultiUpstreamAdvisoryIsVisibleFromEachDownstreamCve()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-downstream-tests", Guid.NewGuid().ToString("N"));
+        var previousSpoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
+        Directory.CreateDirectory(Path.Combine(root, "incoming"));
+        Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", root);
+        try
+        {
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = Path.Combine(root, "downstream.duckdb"),
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var normalizer = new DuckDbEvidenceNormalizer(
+                new UnusedServiceProvider(), store, NullLogger<DuckDbEvidenceNormalizer>.Instance);
+
+            await store.ReplaceCatalogRecordsAsync(
+                [
+                    CatalogFixture("nvd-cve", "CVE-2026-43001"),
+                    CatalogFixture("nvd-cve", "CVE-2026-43002")
+                ],
+                CancellationToken.None);
+            await store.RebuildCatalogAsync(CancellationToken.None);
+
+            var fileName = "osv-clsa-relations-s0000.ndjson.ready";
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "incoming", fileName),
+                UpstreamOnlySpoolLine("CLSA-2026:1234", ["CVE-2026-43001", "CVE-2026-43002"])
+                + Environment.NewLine);
+            await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true),
+                CancellationToken.None);
+
+            var clsa = await store.GetCatalogByIdentifierAsync("CLSA-2026:1234", CancellationToken.None);
+            Assert.NotNull(clsa);
+            var clsaDetail = JsonSerializer.SerializeToNode(
+                await store.GetCatalogDetailAsync(clsa.Id, CancellationToken.None))!.AsObject();
+            Assert.Equal(
+                ["CVE-2026-43001", "CVE-2026-43002"],
+                clsaDetail["vulnerability"]!["upstreamIdentifiers"]!.AsArray()
+                    .Select(value => value!.GetValue<string>()));
+
+            foreach (var cve in new[] { "CVE-2026-43001", "CVE-2026-43002" })
+            {
+                var target = await store.GetCatalogByIdentifierAsync(cve, CancellationToken.None);
+                Assert.NotNull(target);
+                var targetDetail = JsonSerializer.SerializeToNode(
+                    await store.GetCatalogDetailAsync(target.Id, CancellationToken.None))!.AsObject();
+                Assert.Equal(
+                    ["CLSA-2026:1234"],
+                    targetDetail["vulnerability"]!["downstreamIdentifiers"]!.AsArray()
+                        .Select(value => value!.GetValue<string>()));
+                var downstream = Assert.Single(
+                    targetDetail["vulnerability"]!["downstreamRelations"]!.AsArray());
+                Assert.Equal("CLSA-2026:1234", downstream!["primaryIdentifier"]!.GetValue<string>());
+                Assert.Equal("CLSA-2026:1234", downstream["sourceRecordId"]!.GetValue<string>());
+                Assert.Equal("osv", downstream["sourceCode"]!.GetValue<string>());
+                Assert.Equal("upstream", downstream["relationType"]!.GetValue<string>());
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", previousSpoolPath);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task EvidenceOnlyDistributionProjectionsAttachToOneCveOrStayOutOfCatalog()
     {
         var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-projection-tests", Guid.NewGuid().ToString("N"));
@@ -711,6 +782,21 @@ public sealed class DuckDbOsvRelationTests
             }
         }
     });
+
+    private static DuckDbCatalogRecord CatalogFixture(string sourceCode, string identifier) =>
+        new(
+            sourceCode,
+            identifier,
+            Guid.NewGuid(),
+            identifier,
+            $"{identifier} title",
+            $"{identifier} description",
+            "active",
+            "2026-08-01T00:00:00Z",
+            "2026-08-10T00:00:00Z",
+            $"https://example.test/{identifier}",
+            $"{identifier}-v1",
+            [identifier]);
 
     private sealed class UnusedServiceProvider : IServiceProvider
     {

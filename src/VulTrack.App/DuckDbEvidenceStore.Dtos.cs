@@ -82,6 +82,12 @@ public sealed record DuckDbVulnerabilityRelations(
     string[] UpstreamIdentifiers,
     string[] RelatedIdentifiers);
 
+public sealed record DuckDbDownstreamRelation(
+    string SourceCode,
+    string SourceRecordId,
+    string PrimaryIdentifier,
+    string RelationType);
+
 public sealed record DuckDbCatalogStats(long SourceRecords, long Vulnerabilities, long Identifiers);
 public sealed record DuckDbSourceProjectionState(IReadOnlyList<string> VulnerabilityKeys, bool HasAffectedFacts);
 public sealed record DuckDbNucleiSnapshotStats(long ActiveRows, long ActiveDistinctRawIds);

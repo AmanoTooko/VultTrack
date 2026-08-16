@@ -297,6 +297,7 @@ public sealed partial class DuckDbEvidenceStore
         var evidence = await QueryDetailEvidenceAsync(connection, id, key, ct);
         var relations = await ReadRelationsByVulnerabilityIdsAsync(connection, [id], ct);
         relations.TryGetValue(id, out var vulnerabilityRelations);
+        var downstreamRelations = await ReadDownstreamRelationsAsync(connection, key, ct);
         return new
         {
             vulnerability = new
@@ -314,6 +315,18 @@ public sealed partial class DuckDbEvidenceStore
                 aliases = vulnerability.Identifiers.Where(value => !value.Equals(key, StringComparison.OrdinalIgnoreCase)).ToArray(),
                 upstreamIdentifiers = vulnerabilityRelations?.UpstreamIdentifiers ?? [],
                 relatedIdentifiers = vulnerabilityRelations?.RelatedIdentifiers ?? [],
+                downstreamIdentifiers = downstreamRelations
+                    .Select(relation => relation.PrimaryIdentifier)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+                downstreamRelations = downstreamRelations.Select(relation => new
+                {
+                    sourceCode = relation.SourceCode,
+                    sourceRecordId = relation.SourceRecordId,
+                    primaryIdentifier = relation.PrimaryIdentifier,
+                    relationType = relation.RelationType
+                }).ToArray(),
                 vulnerability.SourceCount,
                 vulnerability.AffectedComponentCount,
                 vulnerability.AffectedComponentNames
@@ -328,6 +341,41 @@ public sealed partial class DuckDbEvidenceStore
             threatScores = evidence.ThreatScores,
             history = Array.Empty<object>()
         };
+    }
+
+    private static async Task<IReadOnlyList<DuckDbDownstreamRelation>> ReadDownstreamRelationsAsync(
+        DuckDBConnection connection,
+        string vulnerabilityKey,
+        CancellationToken ct)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            select distinct relation.source_code,
+                            relation.source_record_id,
+                            source.vulnerability_key,
+                            relation.relation_type
+            from source_record_relations relation
+            join source_records source
+              on source.source_code = relation.source_code
+             and source.source_record_id = relation.source_record_id
+            where relation.related_identifier = $1
+              and source.vulnerability_key <> $1
+            order by source.vulnerability_key, relation.source_code,
+                     relation.source_record_id, relation.relation_type
+            limit 500
+            """;
+        command.Parameters.Add(new DuckDBParameter(NormalizeKey(vulnerabilityKey)));
+        var rows = new List<DuckDbDownstreamRelation>();
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new DuckDbDownstreamRelation(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3)));
+        }
+        return rows;
     }
 
     private static async Task<DetailEvidence> QueryDetailEvidenceAsync(

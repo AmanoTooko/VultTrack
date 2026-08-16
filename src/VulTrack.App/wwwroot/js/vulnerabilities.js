@@ -207,6 +207,7 @@ function renderDetail(data) {
         <div class="detail-main-column">
           ${descriptions.length > 1 ? renderDescriptionCards(descriptions.slice(1)) : ''}
           ${renderMitreData(v, records, sourceUrls)}
+          ${renderRelationEvidence(v)}
           ${renderExploitSignals(exploits)}
           ${renderCpeConfigurations(affected, affectedExpressions)}
           ${renderAffectedGrouped(affected)}
@@ -790,6 +791,45 @@ function renderMitreData(v, records, sourceUrls) {
           `).join('')}
         </div>
       ` : renderDataGap('CVE List / NVD source URLs are not attached to this normalized record yet.')}
+    </section>
+  `;
+}
+
+function renderRelationEvidence(v) {
+  const groups = [
+    ['Upstream', v.upstreamIdentifiers || []],
+    ['Related', v.relatedIdentifiers || []],
+    ['Downstream', v.downstreamIdentifiers || []]
+  ].map(([label, identifiers]) => [
+    label,
+    [...new Set(identifiers.filter(Boolean).map(displayIdentifierValue))]
+  ]).filter(([, identifiers]) => identifiers.length);
+  if (!groups.length) return '';
+  const downstreamSources = new Map((v.downstreamRelations || []).map(item => [
+    displayIdentifierValue(item.primaryIdentifier),
+    item.sourceCode
+  ]));
+  return `
+    <section class="detail-section" id="relations">
+      <div class="section-title-row">
+        <h3 class="section-h">Relationships</h3>
+        <span class="badge">${fmt(groups.reduce((total, [, identifiers]) => total + identifiers.length, 0))}</span>
+      </div>
+      <div class="card-stack">
+        ${groups.map(([label, identifiers]) => `
+          <div class="info-card">
+            <div class="info-card-row"><strong>${escapeHtml(label)}</strong></div>
+            <div class="chips compact-chips">
+              ${identifiers.map(identifier => `
+                <a class="badge" href="${cveRoute(identifier)}" title="${escapeAttr(`${label}: ${identifier}`)}">
+                  ${escapeHtml(identifier)}
+                  ${downstreamSources.has(identifier) ? `<small>${escapeHtml(downstreamSources.get(identifier))}</small>` : ''}
+                </a>
+              `).join('')}
+            </div>
+          </div>
+        `).join('')}
+      </div>
     </section>
   `;
 }

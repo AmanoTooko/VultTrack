@@ -91,6 +91,10 @@ serve an empty catalog.
       catalog. The rule also suppresses content-free projections that have no affected facts.
       Normal advisories still never use `upstream` or `related` as identity, and CVE-less GHSA/BDSA
       records remain independent.
+- [x] Expose OSV relationship evidence bidirectionally in vulnerability detail. Advisory pages
+      list their upstream/related identifiers, while target CVEs list the source advisories as
+      downstream identifiers with source code, source record ID, and relation type. The UI renders
+      all three sets as linked identifiers without rewriting source descriptions or references.
 
 ## P1 — Performance
 
