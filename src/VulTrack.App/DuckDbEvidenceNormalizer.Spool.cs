@@ -813,13 +813,14 @@ public sealed partial class DuckDbEvidenceNormalizer
         IReadOnlyList<DuckDbReference> references)
     {
         var normalized = Identifier.Normalize(osvId);
+        var isEcho = normalized.StartsWith("ECHO-", StringComparison.Ordinal);
         return (normalized.StartsWith("MINI-", StringComparison.Ordinal)
                || normalized.StartsWith("CGA-", StringComparison.Ordinal)
-               || normalized.StartsWith("ECHO-", StringComparison.Ordinal))
+               || isEcho)
                && string.IsNullOrWhiteSpace(title)
                && string.IsNullOrWhiteSpace(description)
                && severity.Count == 0
-               && references.Count == 0;
+               && (isEcho || references.Count == 0);
     }
 
     private static string? FirstLocalizedValue(JsonNode? node, string language)

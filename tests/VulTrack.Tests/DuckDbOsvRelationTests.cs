@@ -535,10 +535,12 @@ public sealed class DuckDbOsvRelationTests
                         includeAffected: false),
                     ProjectionSpoolLine(
                         "ECHO-AAAA-BBBB-0009",
-                        upstream: ["CVE-2026-42009"]),
+                        upstream: ["CVE-2026-42009"],
+                        includeReference: true),
                     ProjectionSpoolLine(
                         "ECHO-AAAA-BBBB-0010",
-                        includeAffected: false),
+                        includeAffected: false,
+                        includeReference: true),
                     ProjectionSpoolLine(
                         "ECHO-AAAA-BBBB-0011",
                         upstream: ["CVE-2026-42011"],
@@ -772,7 +774,8 @@ public sealed class DuckDbOsvRelationTests
         string? summary = null,
         string fixedVersion = "2.0.0",
         string? recordHash = null,
-        bool forceNormalize = false) =>
+        bool forceNormalize = false,
+        bool includeReference = false) =>
         JsonSerializer.Serialize(new
         {
             schemaVersion = 1,
@@ -790,6 +793,12 @@ public sealed class DuckDbOsvRelationTests
                 upstream,
                 related,
                 summary,
+                references = includeReference
+                    ? new object[]
+                    {
+                        new { type = "PACKAGE", url = $"https://example.test/{advisoryId}" }
+                    }
+                    : Array.Empty<object>(),
                 affected = includeAffected
                     ? new object[]
                     {
