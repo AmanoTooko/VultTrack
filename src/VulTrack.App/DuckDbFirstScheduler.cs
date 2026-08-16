@@ -235,6 +235,14 @@ public sealed class DuckDbFirstScheduler(
             if (!string.IsNullOrWhiteSpace(watermark))
                 start.Environment["OSV_BOOTSTRAP_WATERMARK"] = watermark;
         }
+        if (sourceCode.Equals("google-osv", StringComparison.OrdinalIgnoreCase)
+            && MissingGoogleOsvCursor(ReadCheckpoint("google-osv")))
+        {
+            var baseline = ReadCheckpoint("google-osv-init");
+            var watermark = baseline?["incrementalSince"]?.GetValue<string>();
+            if (!string.IsNullOrWhiteSpace(watermark))
+                start.Environment["OSV_BOOTSTRAP_WATERMARK"] = watermark;
+        }
         if (sourceCode.Equals("ghsa", StringComparison.OrdinalIgnoreCase)
             && ReadCheckpoint("ghsa")?["updatedSince"] is null)
         {
@@ -346,6 +354,10 @@ public sealed class DuckDbFirstScheduler(
     }
 
     private bool HasOsvPending() => ReadCheckpoint("osv")?["pending"] is JsonObject;
+
+    private static bool MissingGoogleOsvCursor(JsonObject? checkpoint) =>
+        checkpoint?["Android"]?["cursor"] is null
+        || checkpoint?["OSS-Fuzz"]?["cursor"] is null;
 
     private string SpoolRootPath() => options.ResolveSpoolRoot();
 

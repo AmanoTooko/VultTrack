@@ -101,6 +101,8 @@ test('DuckDB scheduler defaults to blocking automatic baseline imports on every 
   assert.match(scheduler, /"osv" or "osv-init" => "osv-init"/);
   assert.match(scheduler, /"ghsa" or "ghsa-init" => "ghsa-init"/);
   assert.match(scheduler, /GHSA_BOOTSTRAP_WATERMARK/);
+  assert.match(scheduler, /sourceCode\.Equals\("google-osv"[\s\S]*MissingGoogleOsvCursor[\s\S]*OSV_BOOTSTRAP_WATERMARK/);
+  assert.match(scheduler, /MissingGoogleOsvCursor\(JsonObject\? checkpoint\)/);
   assert.match(scheduler, /checkpoint\?\["initComplete"\].*== false\)\s*return RequireAutomaticInit/s);
   assert.match(scheduler, /sourceCode\.EndsWith\("-init"[\s\S]*return RequireAutomaticInit/);
   assert.match(scheduler, /HasSourceRecordsAsync\(sourceCode, ct\)\) return sourceCode;\s*return RequireAutomaticInit/s);
