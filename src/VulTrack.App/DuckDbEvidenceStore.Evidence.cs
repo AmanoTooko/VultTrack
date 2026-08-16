@@ -298,6 +298,7 @@ public sealed partial class DuckDbEvidenceStore
         var relations = await ReadRelationsByVulnerabilityIdsAsync(connection, [id], ct);
         relations.TryGetValue(id, out var vulnerabilityRelations);
         var downstreamRelations = await ReadDownstreamRelationsAsync(connection, key, ct);
+        var relationshipReferences = await ReadRelationshipReferencesAsync(connection, id, key, ct);
         return new
         {
             vulnerability = new
@@ -326,6 +327,16 @@ public sealed partial class DuckDbEvidenceStore
                     sourceRecordId = relation.SourceRecordId,
                     primaryIdentifier = relation.PrimaryIdentifier,
                     relationType = relation.RelationType
+                }).ToArray(),
+                relationshipReferences = relationshipReferences.Select(reference => new
+                {
+                    identifier = reference.Identifier,
+                    relationType = reference.RelationType,
+                    direction = reference.Direction,
+                    sourceCode = reference.SourceCode,
+                    sourceRecordId = reference.SourceRecordId,
+                    primaryIdentifier = reference.PrimaryIdentifier,
+                    sourceUrl = reference.SourceUrl
                 }).ToArray(),
                 vulnerability.SourceCount,
                 vulnerability.AffectedComponentCount,
@@ -374,6 +385,71 @@ public sealed partial class DuckDbEvidenceStore
                 reader.GetString(1),
                 reader.GetString(2),
                 reader.GetString(3)));
+        }
+        return rows;
+    }
+
+    private static async Task<IReadOnlyList<DuckDbRelationshipReference>> ReadRelationshipReferencesAsync(
+        DuckDBConnection connection,
+        Guid vulnerabilityId,
+        string vulnerabilityKey,
+        CancellationToken ct)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = """
+            with outgoing as (
+                select relation.related_identifier as identifier,
+                       relation.relation_type,
+                       'outgoing' as direction,
+                       relation.source_code,
+                       relation.source_record_id,
+                       source.vulnerability_key as primary_identifier,
+                       source.source_url
+                from source_record_relations relation
+                join source_records source
+                  on source.source_code = relation.source_code
+                 and source.source_record_id = relation.source_record_id
+                where relation.vulnerability_id = $1
+                  and relation.related_identifier <> $2
+            ), incoming as (
+                select source.vulnerability_key as identifier,
+                       relation.relation_type,
+                       'downstream' as direction,
+                       relation.source_code,
+                       relation.source_record_id,
+                       source.vulnerability_key as primary_identifier,
+                       source.source_url
+                from source_record_relations relation
+                join source_records source
+                  on source.source_code = relation.source_code
+                 and source.source_record_id = relation.source_record_id
+                where relation.related_identifier = $2
+                  and source.vulnerability_key <> $2
+            )
+            select distinct identifier, relation_type, direction, source_code,
+                            source_record_id, primary_identifier, source_url
+            from (
+                select * from outgoing
+                union all
+                select * from incoming
+            ) relation_refs
+            order by direction, relation_type, identifier, source_code, source_record_id
+            limit 1000
+            """;
+        command.Parameters.Add(new DuckDBParameter(vulnerabilityId.ToString("D")));
+        command.Parameters.Add(new DuckDBParameter(NormalizeKey(vulnerabilityKey)));
+        var rows = new List<DuckDbRelationshipReference>();
+        using var reader = await command.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add(new DuckDbRelationshipReference(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6)));
         }
         return rows;
     }

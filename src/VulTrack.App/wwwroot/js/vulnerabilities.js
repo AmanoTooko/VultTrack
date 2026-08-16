@@ -208,6 +208,7 @@ function renderDetail(data) {
           ${descriptions.length > 1 ? renderDescriptionCards(descriptions.slice(1)) : ''}
           ${renderMitreData(v, records, sourceUrls)}
           ${renderRelationEvidence(v)}
+          ${renderRelationshipReferences(v)}
           ${renderExploitSignals(exploits)}
           ${renderCpeConfigurations(affected, affectedExpressions)}
           ${renderAffectedGrouped(affected)}
@@ -829,6 +830,40 @@ function renderRelationEvidence(v) {
             </div>
           </div>
         `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+function renderRelationshipReferences(v) {
+  const references = (v.relationshipReferences || []).filter(item => item && item.identifier);
+  if (!references.length) return '';
+  return `
+    <section class="detail-section" id="relationship-references">
+      <div class="section-title-row">
+        <h3 class="section-h">Relationship References</h3>
+        <span class="badge">${fmt(references.length)}</span>
+      </div>
+      <div class="card-stack">
+        ${references.map(reference => {
+          const label = reference.direction === 'downstream' ? 'Downstream' : reference.relationType;
+          const source = [reference.sourceCode, reference.sourceRecordId].filter(Boolean).join(' / ');
+          const identifier = displayIdentifierValue(reference.identifier);
+          return `
+            <div class="info-card">
+              <div class="info-card-row">
+                <strong>${escapeHtml(label)}</strong>
+                <a class="badge" href="${cveRoute(identifier)}" title="Open ${escapeAttr(identifier)}">
+                  ${escapeHtml(identifier)}
+                </a>
+              </div>
+              <div class="chips">
+                ${source ? `<span class="badge">${escapeHtml(source)}</span>` : ''}
+                ${reference.sourceUrl ? renderExternalLink(reference.sourceUrl, shortUrl(reference.sourceUrl)) : '<span class="muted">Source URL unavailable</span>'}
+              </div>
+            </div>
+          `;
+        }).join('')}
       </div>
     </section>
   `;

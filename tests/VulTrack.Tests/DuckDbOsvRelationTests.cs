@@ -342,6 +342,14 @@ public sealed class DuckDbOsvRelationTests
                 Assert.Equal("CLSA-2026:1234", downstream["sourceRecordId"]!.GetValue<string>());
                 Assert.Equal("osv", downstream["sourceCode"]!.GetValue<string>());
                 Assert.Equal("upstream", downstream["relationType"]!.GetValue<string>());
+
+                var relationshipReference = Assert.Single(
+                    targetDetail["vulnerability"]!["relationshipReferences"]!.AsArray());
+                Assert.Equal("CLSA-2026:1234", relationshipReference!["identifier"]!.GetValue<string>());
+                Assert.Equal("downstream", relationshipReference["direction"]!.GetValue<string>());
+                Assert.Equal("upstream", relationshipReference["relationType"]!.GetValue<string>());
+                Assert.Equal("https://osv.dev/vulnerability/CLSA-2026:1234",
+                    relationshipReference["sourceUrl"]!.GetValue<string>());
             }
         }
         finally
@@ -581,13 +589,18 @@ public sealed class DuckDbOsvRelationTests
             runId = "relations",
             externalKey = advisoryId,
             externalId = advisoryId,
+            sourceUrl = $"https://osv.dev/vulnerability/{advisoryId}",
             modifiedAt = "2026-08-10T00:00:00Z",
             recordHash = $"{advisoryId}-v1",
             payload = new
             {
                 id = advisoryId,
                 upstream,
-                summary = $"{advisoryId} advisory"
+                summary = $"{advisoryId} advisory",
+                references = new[]
+                {
+                    new { type = "ADVISORY", url = $"https://osv.dev/vulnerability/{advisoryId}" }
+                }
             }
         });
 
