@@ -10,7 +10,8 @@ Current state: DuckDB-first single binary. One .NET 10 service `VulTrack.App` is
 
 ## Source Of Truth
 
-- Current work queue and handoff state: `docs/agent-todo.md` (read this first).
+- Persistent agent context and unfinished backlog: `memory/README.md` (read this first).
+- Product overview and design philosophy: `README.md`.
 - Current architecture: `docs/design/duckdb-first-architecture.md`.
 - Completed migration history: `docs/proposals/affected-duckdb-migration.md`.
 - Actual API routes: `src/VulTrack.App/Endpoints/` and `src/VulTrack.App/SbomEndpoints.cs`.
@@ -24,8 +25,8 @@ Legacy design docs: everything else under `docs/design/` describes the supersede
 - Build a modular monolith as a single binary, not microservices.
 - Main runtime is one `.NET 10 LTS` service: `VulTrack.App` (API, `DuckDbFirstScheduler`, normalizers, matching, detail snapshots).
 - DuckDB (embedded file, default `data/duckdb/vultrack-evidence.duckdb`, overridable via `VULTRACK_DUCKDB_PATH`) is the ONLY store: catalog, evidence, affected components, exploits, threat scores, AI analyses, SBOM. No PostgreSQL server in the default stack.
-- Host-specific DuckDB paths differ. cafemini's live database is `data/duckdb/vultrack.duckdb` (~13.5 GB) and its `vultrack-evidence.duckdb` is an empty placeholder; never remove that host's explicit `VULTRACK_DUCKDB_PATH` or the API will serve an empty catalog.
-- Node.js fetchers (`plugins/fetchers/sources/*.mjs`, ~46 sources) run as child processes and write atomic gzipped NDJSON spool files to `data/spool/incoming/`; a file becomes visible to the scheduler only when promoted with the `.ready` suffix.
+- Host-specific DuckDB paths may differ. The operational hosts explicitly use `data/duckdb/vultrack.duckdb`; never remove the explicit `VULTRACK_DUCKDB_PATH` or the API may serve a different empty database.
+- Node.js fetchers (`plugins/fetchers/sources/*.mjs`) run as child processes and write atomic NDJSON spool files to `data/spool/incoming/`; a file becomes visible to the scheduler only when promoted with the `.ready` suffix.
 - FIRST EPSS uses a native gzip CSV snapshot pipeline, not the NDJSON spool.
 - `DuckDbFirstScheduler` runs fetchers serially and ingests spool files directly into DuckDB; there is no staging database.
 - Do not reintroduce PostgreSQL, OpenSearch, Temporal, RabbitMQ, NATS, or Kubernetes. Redis may be reintroduced later ONLY as an optional cache/queue if profiling demands it; never as the source of truth.
@@ -47,6 +48,7 @@ tests/
 docs/
   design/                # legacy PG-first docs + duckdb-first-architecture.md
   proposals/
+memory/                  # current state, architecture decisions, agent guide, backlog, archive
 data/
   spool/incoming/        # fetcher output spool (.ndjson.partial -> .ndjson.ready)
   duckdb/                # embedded DuckDB file
@@ -107,6 +109,14 @@ data/
 - API smoke checks live in `tests/api` and `scripts/test-mvp.sh` and require a running API.
 - Prefer focused tests near the changed module before running the full suite.
 - If tests cannot be run, state why and what remains unverified.
+
+## Memory Hygiene
+
+- `memory/backlog.md` contains only unfinished work; delete completed tasks rather than leaving checked boxes.
+- `memory/current-state.md` contains the latest verified state, not chronological command output.
+- `memory/architecture-decisions.md` records durable invariants and their rationale.
+- `memory/archive/` contains useful but non-authoritative historical lessons.
+- Host access details and secrets belong only in ignored `memory/private/` files or host environment files.
 
 ## Essential Commands
 

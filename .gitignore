@@ -4,6 +4,7 @@ ssh-key-*.key
 ghtoken.md
 *token*.md
 nexttodo.md
+/memory/private/
 data/
 exports/
 logs/

@@ -1,7 +1,8 @@
-# Normalizer Rebuild Lessons
+# Historical Normalizer Rebuild Lessons
 
-> **Historical PG-first incident notes.** References to PostgreSQL tables and
-> `pg_stat_activity` describe the June 2026 runtime, not current DuckDB operations.
+> **Archive only.** These PG-first incident notes describe the June 2026 runtime, not current
+> DuckDB operations. For current rules, read `memory/architecture-decisions.md` and
+> `memory/agent-guide.md`.
 
 This note captures the operational traps found during the June 2026 normalizer rebuild and status-page repair. Treat it as a project-local skill before changing fetcher, normalizer, or status logic.
 

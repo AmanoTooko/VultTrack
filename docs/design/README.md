@@ -9,13 +9,13 @@
 
 1. [`duckdb-first-architecture.md`](./duckdb-first-architecture.md)：当前运行时、
    数据流、schema ownership 与可靠性约束。
-2. [`../implementation-status.md`](../implementation-status.md)：当前实现范围、
-   endpoint 与验证状态。
-3. [`../deployment/oracle-arm.md`](../deployment/oracle-arm.md)：生产 ARM 部署、
+2. [`../../memory/current-state.md`](../../memory/current-state.md)：当前实现、生产与数据质量验收状态。
+3. [`../../memory/architecture-decisions.md`](../../memory/architecture-decisions.md)：必须在重构中保持的设计决策。
+4. [`../deployment/oracle-arm.md`](../deployment/oracle-arm.md)：生产 ARM 部署、
    迁移、回滚与资源门禁。
-4. `src/VulTrack.App/Endpoints/` 与 `SbomEndpoints.cs`：实际 API 路由；
+5. `src/VulTrack.App/Endpoints/` 与 `SbomEndpoints.cs`：实际 API 路由；
    [`contracts/api-rpc.md`](./contracts/api-rpc.md) 只是历史 API 草案。
-5. [`../../plugins/fetchers/README.md`](../../plugins/fetchers/README.md)：当前 source
+6. [`../../plugins/fetchers/README.md`](../../plugins/fetchers/README.md)：当前 source
    行为、checkpoint 与 spool 协议。`docs/reference/fetchers.md` 是 PG-first 历史参考。
 
 代码中的最终事实来源：
