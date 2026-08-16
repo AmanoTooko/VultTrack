@@ -330,7 +330,17 @@ public sealed class DuckDbOsvRelationTests
                         includeAffected: false),
                     ProjectionSpoolLine(
                         "CGA-AAAA-BBBB-0008",
-                        includeAffected: false)) + Environment.NewLine);
+                        includeAffected: false),
+                    ProjectionSpoolLine(
+                        "ECHO-AAAA-BBBB-0009",
+                        upstream: ["CVE-2026-42009"]),
+                    ProjectionSpoolLine(
+                        "ECHO-AAAA-BBBB-0010",
+                        includeAffected: false),
+                    ProjectionSpoolLine(
+                        "ECHO-AAAA-BBBB-0011",
+                        upstream: ["CVE-2026-42011"],
+                        summary: "Independent ECHO advisory")) + Environment.NewLine);
             await normalizer.IngestSpoolAsync(
                 new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true),
                 CancellationToken.None);
@@ -383,13 +393,28 @@ public sealed class DuckDbOsvRelationTests
             Assert.Null(await store.GetCatalogByIdentifierAsync(
                 "CGA-AAAA-BBBB-0008", CancellationToken.None));
 
+            var echo = await store.GetCatalogByIdentifierAsync(
+                "ECHO-AAAA-BBBB-0009", CancellationToken.None);
+            Assert.NotNull(echo);
+            Assert.Equal("CVE-2026-42009", echo.PrimaryIdentifier);
+            Assert.Contains("ECHO-AAAA-BBBB-0009", echo.Identifiers);
+            Assert.Null(await store.GetCatalogByIdentifierAsync(
+                "ECHO-AAAA-BBBB-0010", CancellationToken.None));
+
+            var contentfulEcho = await store.GetCatalogByIdentifierAsync(
+                "ECHO-AAAA-BBBB-0011", CancellationToken.None);
+            Assert.NotNull(contentfulEcho);
+            Assert.Equal("ECHO-AAAA-BBBB-0011", contentfulEcho.PrimaryIdentifier);
+            Assert.Equal("Independent ECHO advisory", contentfulEcho.Title);
+
             // Keyed rebuilds must keep the same suppression rule used by a full rebuild.
             await store.RebuildCatalogForKeysAsync(
                 [
                     "MINI-AAAA-BBBB-0003",
                     "MINI-AAAA-BBBB-0005",
                     "CGA-AAAA-BBBB-0006",
-                    "CGA-AAAA-BBBB-0008"
+                    "CGA-AAAA-BBBB-0008",
+                    "ECHO-AAAA-BBBB-0010"
                 ],
                 CancellationToken.None);
             Assert.Null(await store.GetCatalogByIdentifierAsync(
@@ -400,6 +425,8 @@ public sealed class DuckDbOsvRelationTests
                 "CGA-AAAA-BBBB-0006", CancellationToken.None));
             Assert.Null(await store.GetCatalogByIdentifierAsync(
                 "CGA-AAAA-BBBB-0008", CancellationToken.None));
+            Assert.Null(await store.GetCatalogByIdentifierAsync(
+                "ECHO-AAAA-BBBB-0010", CancellationToken.None));
         }
         finally
         {
@@ -534,7 +561,8 @@ public sealed class DuckDbOsvRelationTests
         string[]? aliases = null,
         string[]? upstream = null,
         string[]? related = null,
-        bool includeAffected = true) =>
+        bool includeAffected = true,
+        string? summary = null) =>
         JsonSerializer.Serialize(new
         {
             schemaVersion = 1,
@@ -550,6 +578,7 @@ public sealed class DuckDbOsvRelationTests
                 aliases,
                 upstream,
                 related,
+                summary,
                 affected = includeAffected
                     ? new object[]
                     {

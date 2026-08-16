@@ -72,7 +72,7 @@ serve an empty catalog.
       `vulnerability_id` and `vulnerability_key` from the same canonical owner, and keyed rebuilds
       globally recompute every shared alias touched by the changed keys. This prevents alias lookup
       from resolving through one key's ID to a different vulnerability.
-- [ ] Complete the cafemini shadow rebuild from official OSV `all.zip` plus GitHub Advisory
+- [x] Complete the cafemini shadow rebuild from official OSV `all.zip` plus GitHub Advisory
       Database `github-reviewed`, then validate identity, severity, references, affected facts,
       search, and API behavior before switching the cafemini database path. Never rewrite the
       live 13 GB DuckDB in place.
@@ -82,7 +82,9 @@ serve an empty catalog.
       OSV records that repeat the same IDs in both `upstream` and `related` are projected once as
       upstream; only relation IDs unique to `related` stay in the related set. Relations equal to
       the final canonical key are omitted to prevent self-links after CVE promotion.
-      The real bulk run also found content-free `MINI-*` and `CGA-*` distro projections.
+      The real bulk run also found content-free `MINI-*` and `CGA-*` distro projections. The
+      post-cutover catalog audit found the same shape under `ECHO-*`; that prefix follows the same
+      evidence-only rule when it has no title, description, severity, or references.
       Only these evidence-only distro records use relation-assisted projection: one direct CVE
       alias takes precedence, otherwise one related CVE owns any affected facts. Records without a
       unique CVE remain as raw evidence and relations but are suppressed from the searchable

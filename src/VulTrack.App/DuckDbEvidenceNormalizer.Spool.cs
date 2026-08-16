@@ -593,7 +593,7 @@ public sealed partial class DuckDbEvidenceNormalizer
                                 .ToArray();
                             if (directCveAliases.Length == 0 && relationCves.Length == 1)
                             {
-                                // MINI/CGA records carry downstream package ranges but no advisory
+                                // Distro projections carry downstream package ranges but no advisory
                                 // content. A unique related CVE is the owner of those source facts.
                                 key = relationCves[0];
                                 normalizationVersion = "evidence-projection-v1";
@@ -796,7 +796,8 @@ public sealed partial class DuckDbEvidenceNormalizer
     {
         var normalized = Identifier.Normalize(osvId);
         return (normalized.StartsWith("MINI-", StringComparison.Ordinal)
-               || normalized.StartsWith("CGA-", StringComparison.Ordinal))
+               || normalized.StartsWith("CGA-", StringComparison.Ordinal)
+               || normalized.StartsWith("ECHO-", StringComparison.Ordinal))
                && string.IsNullOrWhiteSpace(title)
                && string.IsNullOrWhiteSpace(description)
                && severity.Count == 0
