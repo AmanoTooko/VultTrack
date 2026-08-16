@@ -438,24 +438,30 @@ public sealed partial class DuckDbEvidenceNormalizer
         if (evidence.Count == 0 && catalog.Count == 0 && exploits.Count == 0 && threatScores.Count == 0)
             return [];
 
-        IReadOnlyList<DuckDbCatalogRecord> changedCatalog = catalog;
-        IReadOnlyList<DuckDbEvidenceRecord> changedEvidence = evidence;
+        var uniqueCatalog = KeepLastSourceRecord(
+            catalog,
+            record => SourceRecordIdentity(record.SourceCode, record.SourceRecordId));
+        var uniqueEvidence = KeepLastSourceRecord(
+            evidence,
+            record => SourceRecordIdentity(record.SourceCode, record.SourceRecordId));
+        IReadOnlyList<DuckDbCatalogRecord> changedCatalog = uniqueCatalog;
+        IReadOnlyList<DuckDbEvidenceRecord> changedEvidence = uniqueEvidence;
         IReadOnlyList<string> previousKeys = [];
-        if (!appendOnly && catalog.Count > 0)
+        if (!appendOnly && uniqueCatalog.Count > 0)
         {
-            changedCatalog = await store.FilterChangedCatalogRecordsAsync(catalog, ct);
+            changedCatalog = await store.FilterChangedCatalogRecordsAsync(uniqueCatalog, ct);
             previousKeys = await store.GetExistingCatalogKeysAsync(changedCatalog, ct);
             var changedRecords = changedCatalog
                 .Select(record => SourceRecordIdentity(record.SourceCode, record.SourceRecordId))
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
-            changedEvidence = evidence
+            changedEvidence = uniqueEvidence
                 .Where(record => changedRecords.Contains(
                     SourceRecordIdentity(record.SourceCode, record.SourceRecordId)))
                 .ToArray();
         }
 
         if (appendOnly)
-            await store.AppendSpoolBatchAsync(evidence, catalog, exploits, threatScores, ct);
+            await store.AppendSpoolBatchAsync(uniqueEvidence, uniqueCatalog, exploits, threatScores, ct);
         else
         {
             await store.ReplaceRecordsAsync(changedEvidence, ct);
@@ -476,6 +482,17 @@ public sealed partial class DuckDbEvidenceNormalizer
 
     private static string SourceRecordIdentity(string sourceCode, string sourceRecordId) =>
         $"{sourceCode}\u001f{sourceRecordId}";
+
+    private static IReadOnlyList<T> KeepLastSourceRecord<T>(
+        IReadOnlyList<T> records,
+        Func<T, string> identity) =>
+        records
+            .Select((record, index) => (record, index))
+            .GroupBy(item => identity(item.record), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.Last())
+            .OrderBy(item => item.index)
+            .Select(item => item.record)
+            .ToArray();
 
     private static ParsedSpoolRecord BuildSpoolRecords(JsonObject envelope)
     {

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using DuckDB.NET.Data;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using VulTrack.App;
@@ -9,6 +10,66 @@ namespace VulTrack.Tests;
 [Collection("DuckDbSpoolEnvironment")]
 public sealed class DuckDbOsvRelationTests
 {
+    [Fact]
+    public async Task DuplicateSourceRecordsInOneSpoolBatchKeepOnlyTheLastUpdate()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "vultrack-osv-duplicate-batch-tests", Guid.NewGuid().ToString("N"));
+        var previousSpoolPath = Environment.GetEnvironmentVariable("VULTRACK_SPOOL_PATH");
+        Directory.CreateDirectory(Path.Combine(root, "incoming"));
+        Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", root);
+        try
+        {
+            var databasePath = Path.Combine(root, "duplicates.duckdb");
+            var configuration = new ConfigurationBuilder()
+                .AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["VulTrack:DuckDb:Path"] = databasePath,
+                    ["VulTrack:DuckDb:Enabled"] = "true"
+                })
+                .Build();
+            using var store = new DuckDbEvidenceStore(configuration);
+            var normalizer = new DuckDbEvidenceNormalizer(
+                new UnusedServiceProvider(), store, NullLogger<DuckDbEvidenceNormalizer>.Instance);
+
+            var fileName = "osv-duplicate-batch.ndjson.ready";
+            await File.WriteAllTextAsync(
+                Path.Combine(root, "incoming", fileName),
+                ProjectionSpoolLine(
+                    "ECHO-DUPLICATE-0001",
+                    upstream: ["CVE-2026-43001"],
+                    summary: "Duplicate advisory v1",
+                    fixedVersion: "1.0.0",
+                    recordHash: "duplicate-v1") + Environment.NewLine +
+                ProjectionSpoolLine(
+                    "ECHO-DUPLICATE-0001",
+                    upstream: ["CVE-2026-43002"],
+                    summary: "Duplicate advisory v2",
+                    fixedVersion: "2.0.0",
+                    recordHash: "duplicate-v2") + Environment.NewLine);
+            await normalizer.IngestSpoolAsync(
+                new DuckDbSpoolIngestRequest(fileName, BatchSize: 100, DeleteOnSuccess: true),
+                CancellationToken.None);
+
+            using var connection = new DuckDBConnection($"Data Source={databasePath}");
+            connection.Open();
+            Assert.Equal(1L, CountRows(connection, "source_records"));
+            Assert.Equal(1L, CountRows(connection, "source_record_relations"));
+            Assert.Equal(1L, CountRows(connection, "affected_facts"));
+
+            using var relation = connection.CreateCommand();
+            relation.CommandText = "select related_identifier from source_record_relations";
+            Assert.Equal("CVE-2026-43002", relation.ExecuteScalar()?.ToString());
+            using var range = connection.CreateCommand();
+            range.CommandText = "select version_range_raw from affected_facts";
+            Assert.Equal(">= 0, < 2.0.0", range.ExecuteScalar()?.ToString());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("VULTRACK_SPOOL_PATH", previousSpoolPath);
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
     [Fact]
     public async Task GhsaBulkRecordsUseOsvFactsAndKeepAmbiguousAdvisoriesIndependent()
     {
@@ -646,7 +707,9 @@ public sealed class DuckDbOsvRelationTests
         string[]? upstream = null,
         string[]? related = null,
         bool includeAffected = true,
-        string? summary = null) =>
+        string? summary = null,
+        string fixedVersion = "2.0.0",
+        string? recordHash = null) =>
         JsonSerializer.Serialize(new
         {
             schemaVersion = 1,
@@ -655,7 +718,7 @@ public sealed class DuckDbOsvRelationTests
             externalKey = advisoryId,
             externalId = advisoryId,
             modifiedAt = "2026-08-10T00:00:00Z",
-            recordHash = $"{advisoryId}-v1",
+            recordHash = recordHash ?? $"{advisoryId}-v1",
             payload = new
             {
                 id = advisoryId,
@@ -682,7 +745,7 @@ public sealed class DuckDbOsvRelationTests
                                 events = new[]
                                 {
                                     new Dictionary<string, string> { ["introduced"] = "0" },
-                                    new Dictionary<string, string> { ["fixed"] = "2.0.0" }
+                                    new Dictionary<string, string> { ["fixed"] = fixedVersion }
                                 }
                             }
                         }
@@ -691,6 +754,13 @@ public sealed class DuckDbOsvRelationTests
                     : Array.Empty<object>()
             }
         });
+
+    private static long CountRows(DuckDBConnection connection, string table)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"select count(*) from {table}";
+        return Convert.ToInt64(command.ExecuteScalar());
+    }
 
     private static string GhsaInitSpoolLine(string advisoryId, string[] aliases) =>
         JsonSerializer.Serialize(new
