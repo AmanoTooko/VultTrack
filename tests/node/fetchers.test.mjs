@@ -225,6 +225,37 @@ test('OSV bulk selector keeps real boundary categories without duplicating spool
     ['alias-cve-maximum', 'complete-evidence', 'embedded-cve-id', 'upstream-cve-maximum']);
 });
 
+test('OSV bulk prefix feeder emits append-only segmented spool', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'vultrack-osv-prefix-'));
+  try {
+    const { writeOsvPrefixRecords } = await import('../../scripts/feed-osv-bulk-prefix.mjs');
+    const result = await writeOsvPrefixRecords(
+      [
+        { id: 'ECHO-0001', aliases: ['CVE-2026-10001'], affected: [] },
+        { id: 'GHSA-2222-3333-4444', aliases: [], affected: [] },
+        { id: 'echo-0002', upstream: ['CVE-2026-10002'], affected: [] },
+        { id: 'ECHO-0003', affected: [] }
+      ],
+      root,
+      { prefix: 'ECHO-', segmentSize: 2, runId: 'echo-fixture' });
+
+    assert.equal(result.records, 3);
+    assert.deepEqual(result.files.map((item) => item.records), [2, 1]);
+    const lines = [];
+    for (const segment of result.files) {
+      const content = await fs.readFile(path.join(root, 'incoming', segment.file), 'utf8');
+      lines.push(...content.trim().split('\n').map(JSON.parse));
+    }
+    assert.deepEqual(lines.map((line) => line.externalId), ['ECHO-0001', 'echo-0002', 'ECHO-0003']);
+    assert.ok(lines.every((line) => line.sourceCode === 'osv-init'));
+    assert.ok(lines.every((line) => line.sourceMode === 'append'));
+    assert.ok(lines.every((line) => line.runId === 'echo-fixture'));
+    assert.deepEqual(lines[0].identifiers, ['ECHO-0001', 'CVE-2026-10001']);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 function boundaryOsv(id, aliases, upstream, complete = false) {
   return {
     id,

@@ -8,6 +8,7 @@
     "bootstrap:duckdb": "node scripts/bootstrap-duckdb.mjs",
     "spool:ingest": "node scripts/ingest-duckdb-spool.mjs",
     "osv:bulk-samples": "node scripts/select-osv-bulk-samples.mjs",
+    "osv:bulk-prefix": "node scripts/feed-osv-bulk-prefix.mjs",
     "status": "node scripts/status-local.mjs",
     "fetch": "node plugins/fetchers/run-fetcher.mjs",
     "fetch:all:smoke": "FETCHER_MAX_RECORDS=2 node plugins/fetchers/run-all.mjs",
