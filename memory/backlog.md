@@ -16,6 +16,20 @@ to `current-state.md` or architecture decisions and delete their task entries.
   row.
 - Reduce fixed per-source scheduler overhead while preserving the one-writer invariant.
 
+## AI Analysis
+
+- The AI generation path is dead code. `AiVulnerabilitySummaryService` has no caller, and
+  `admin.vulnerability.aiSummary` only re-reads the cache and returns `AI_BATCH_REQUIRED` on a
+  miss, so the UI's Generate button can never produce an analysis. Either wire the service to that
+  endpoint or remove the button and document the batch-import path as the only route.
+- `CVE-2021-44228` carries a placeholder analysis row (`model=verification-sample`,
+  `evidence_hash=deadbeef`) whose JSON uses a shallower schema than
+  `prompts/vulnerability-analysis-batch.system.md`. Every canonical field is absent, so the detail
+  page renders Unknown throughout. Audit `ai_vulnerability_analyses` for other sample rows and
+  regenerate them. Real `mimo-v2.5-pro` rows render correctly.
+- Add a schema check at import time so an analysis whose top-level keys do not match the current
+  prompt version is rejected or flagged rather than stored and silently rendered as Unknown.
+
 ## Refactoring
 
 - Decide whether to delete the legacy PostgreSQL path or isolate it behind a clear store boundary.
@@ -25,6 +39,9 @@ to `current-state.md` or architecture decisions and delete their task entries.
   parameter.
 - Move or mark remaining PG-first design documents as historical so they cannot be mistaken for
   implementation truth.
+- Add a contract test over the `vulnerability.detail` payload. The frontend read `severities`,
+  `records` and `sourceUrls` while the API sent `severityScores` and omitted the rest; nothing
+  failed, the blocks just rendered empty.
 
 ## Product
 
