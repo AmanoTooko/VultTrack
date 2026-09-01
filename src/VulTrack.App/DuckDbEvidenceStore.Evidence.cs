@@ -294,7 +294,14 @@ public sealed partial class DuckDbEvidenceStore
         var vulnerability = (await ReadCatalogRowsAsync(catalogCommand, ct)).FirstOrDefault();
         if (vulnerability is null) return null;
         var key = vulnerability.PrimaryIdentifier;
-        var evidence = await QueryDetailEvidenceAsync(connection, id, key, ct);
+        var evidenceKeys = new[] { key }
+            .Concat(vulnerability.Identifiers ?? Array.Empty<string>())
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(NormalizeKey)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        var evidence = await QueryDetailEvidenceAsync(connection, id, key, evidenceKeys, ct);
+        var topScore = evidence.SeverityScores.FirstOrDefault();
         var relations = await ReadRelationsByVulnerabilityIdsAsync(connection, [id], ct);
         relations.TryGetValue(id, out var vulnerabilityRelations);
         var downstreamRelations = await ReadDownstreamRelationsAsync(connection, key, ct);
@@ -310,6 +317,8 @@ public sealed partial class DuckDbEvidenceStore
                 vulnerability.Status,
                 severityLabel = vulnerability.SeverityLabel,
                 maxCvssScore = vulnerability.MaxCvssScore,
+                maxCvssVector = topScore is not null && topScore.TryGetValue("vector_string", out var vectorValue) ? vectorValue : null,
+                maxCvssVersion = topScore is not null && topScore.TryGetValue("scoring_version", out var versionValue) ? versionValue : null,
                 vulnerability.PublishedAt,
                 vulnerability.ModifiedAt,
                 vulnerability.Identifiers,
@@ -342,10 +351,16 @@ public sealed partial class DuckDbEvidenceStore
                 vulnerability.AffectedComponentCount,
                 vulnerability.AffectedComponentNames
             },
-            descriptions = Array.Empty<object>(),
+            descriptions = evidence.Descriptions,
             affectedComponents = evidence.AffectedComponents,
             affectedFacts = evidence.AffectedFacts,
+            severities = evidence.SeverityScores,
             severityScores = evidence.SeverityScores,
+            records = evidence.Records,
+            sourceUrls = evidence.Records
+                .Where(record => record.TryGetValue("sourceUrl", out var url) && url is string text && !string.IsNullOrWhiteSpace(text))
+                .GroupBy(record => record["code"] as string ?? "unknown", StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => (string)group.First()["sourceUrl"]!, StringComparer.OrdinalIgnoreCase),
             references = evidence.References,
             weaknesses = evidence.Weaknesses,
             exploits = evidence.Exploits,
@@ -458,10 +473,14 @@ public sealed partial class DuckDbEvidenceStore
         DuckDBConnection connection,
         Guid id,
         string vulnerabilityKey,
+        IReadOnlyCollection<string> evidenceKeys,
         CancellationToken ct)
     {
         var idValue = id.ToString("D");
         var key = NormalizeKey(vulnerabilityKey);
+        // Evidence is keyed by whichever identifier the upstream record used (CVE, GHSA, OSV, ...).
+        // Query every alias so an OSV- or GHSA-keyed NVD reference still surfaces on the CVE page.
+        var keyList = KeyList(evidenceKeys);
         var affectedComponents = await QueryDetailRowsAsync(connection, """
             select ecosystem, package_name, display_name,
                    left(coalesce(primary_purl,''), 80) as primary_purl,
@@ -474,43 +493,72 @@ public sealed partial class DuckDbEvidenceStore
                      ecosystem nulls last, display_name
             limit 200
             """, idValue, ct);
-        var affectedFacts = await QueryDetailRowsAsync(connection, """
+        var affectedFacts = await QueryDetailRowsAsync(connection, $"""
             select source_code as code, fact_type, ecosystem, package_name,
                    purl, purl_without_version, cpe23_uri, version_range_raw,
                    range_type, vulnerable, cast(null as double) as source_confidence
             from affected_facts
-            where vulnerability_key = $1
+            where vulnerability_key in ({keyList})
             order by case when cpe23_uri is not null then 0 else 1 end,
                      case when purl is not null then 0 else 1 end,
                      source_code nulls last, package_name nulls last
             limit 250
-            """, key, ct);
-        var severityScores = await QueryDetailRowsAsync(connection, """
+            """, ct);
+        var severityScores = await QueryDetailRowsAsync(connection, $"""
             select code, scoring_system, scoring_version, score_type,
                    vector_string, score, severity_label, rn = 1 as is_selected
             from (
-              select source_code as code, scoring_system, scoring_version, score_type,
-                     vector_string, score, severity_label,
-                     row_number() over (order by score desc nulls last, source_code nulls last) as rn
-              from severity_scores where vulnerability_key = $1
+              select code, scoring_system, scoring_version, score_type, vector_string, score, severity_label,
+                     row_number() over (
+                       order by case when vector_string is not null and vector_string <> '' then 0 else 1 end,
+                                score desc nulls last, code nulls last) as rn
+              from (
+                select distinct source_code as code, scoring_system, scoring_version, score_type,
+                       vector_string, score, severity_label
+                from severity_scores where vulnerability_key in ({keyList})
+              ) deduped
             ) ranked
             order by rn limit 40
-            """, key, ct);
-        var references = ParseReferenceTags(await QueryDetailRowsAsync(connection, """
-            select source_code as code, url, ref_type, tags_json
-            from evidence_references
-            where vulnerability_key = $1
-            order by source_code nulls last, url
+            """, ct);
+        var references = ParseReferenceTags(await QueryDetailRowsAsync(connection, $"""
+            select code, url, ref_type, tags_json from (
+              select distinct source_code as code, url, ref_type, tags_json
+              from evidence_references
+              where vulnerability_key in ({keyList})
+            ) deduped
+            order by code nulls last, url
             limit 160
-            """, key, ct));
-        var weaknesses = await QueryDetailRowsAsync(connection, """
-            select source_code as code, weakness_type, weakness_id, description
-            from weaknesses
-            where vulnerability_key = $1
+            """, ct));
+        var weaknesses = await QueryDetailRowsAsync(connection, $"""
+            select code, weakness_type, weakness_id, description from (
+              select distinct source_code as code, weakness_type, weakness_id, description
+              from weaknesses
+              where vulnerability_key in ({keyList})
+            ) deduped
             order by case when weakness_id is not null and weakness_id <> '' then 0 else 1 end,
-                     weakness_id nulls last, source_code nulls last
+                     weakness_id nulls last, code nulls last
             limit 80
-            """, key, ct);
+            """, ct);
+        var records = await QueryDetailRowsAsync(connection, $"""
+            select source_code as code, source_record_id as "recordId", vulnerability_key as "vulnerabilityKey",
+                   title, status, published_at as "publishedAt", modified_at as "modifiedAt",
+                   source_url as "sourceUrl", record_hash as "recordHash",
+                   normalizer_version as "normalizerVersion"
+            from source_records
+            where vulnerability_key in ({keyList})
+            order by source_code nulls last, source_record_id
+            limit 120
+            """, ct);
+        var descriptions = await QueryDetailRowsAsync(connection, $"""
+            select code, value, title from (
+              select distinct source_code as code, description as value, title
+              from source_records
+              where vulnerability_key in ({keyList})
+                and description is not null and description <> ''
+            ) deduped
+            order by length(value) desc
+            limit 40
+            """, ct);
         var exploits = await QueryDetailRowsAsync(connection, """
             select source_code, source_key, title, source_url, artifact_type,
                    exploit_type, maturity, verification_status, published_at, modified_at
@@ -519,15 +567,25 @@ public sealed partial class DuckDbEvidenceStore
               and identifiers like '%' || $1 || '%'
             limit 40
             """, key, ct);
-        var threatScores = await QueryDetailRowsAsync(connection, """
+        var threatScores = await QueryDetailRowsAsync(connection, $"""
             select source_code, score_type, score, percentile, observed_at
             from threat_scores
-            where vulnerability_key = $1
+            where vulnerability_key in ({keyList})
             limit 20
-            """, key, ct);
+            """, ct);
         return new DetailEvidence(
             affectedComponents, affectedFacts, severityScores, references,
-            weaknesses, exploits, threatScores);
+            weaknesses, exploits, threatScores, records, descriptions);
+    }
+
+    private static async Task<IReadOnlyList<Dictionary<string, object?>>> QueryDetailRowsAsync(
+        DuckDBConnection connection,
+        string sql,
+        CancellationToken ct)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = sql;
+        return await ReadRowsAsync(command, ct);
     }
 
     private static async Task<IReadOnlyList<Dictionary<string, object?>>> QueryDetailRowsAsync(
@@ -549,7 +607,9 @@ public sealed partial class DuckDbEvidenceStore
         IReadOnlyList<Dictionary<string, object?>> References,
         IReadOnlyList<Dictionary<string, object?>> Weaknesses,
         IReadOnlyList<Dictionary<string, object?>> Exploits,
-        IReadOnlyList<Dictionary<string, object?>> ThreatScores);
+        IReadOnlyList<Dictionary<string, object?>> ThreatScores,
+        IReadOnlyList<Dictionary<string, object?>> Records,
+        IReadOnlyList<Dictionary<string, object?>> Descriptions);
 
     public async Task<SourceEvidenceReplaceSession> BeginSourceEvidenceReplaceAsync(string sourceCode, CancellationToken ct)
     {

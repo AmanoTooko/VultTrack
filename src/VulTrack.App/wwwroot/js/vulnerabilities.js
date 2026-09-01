@@ -150,7 +150,7 @@ export function componentVulnerabilityResult(item) {
 function renderDetail(data) {
   const v = data.vulnerability;
   const records = data.records || [];
-  const severities = data.severities || [];
+  const severities = data.severities || data.severityScores || [];
   const refs = data.references || [];
   const exploits = data.exploits || [];
   const descriptions = aggregateDescriptions(data.descriptions || []);
@@ -180,6 +180,7 @@ function renderDetail(data) {
             ${v.kevDateAdded ? '<span class="badge risk">KEV</span>' : ''}
           </div>
           <h3 class="cve-headline">${escapeHtml(title)}</h3>
+          ${renderIdentityLine(v)}
           <div class="cve-page-actions" aria-label="Detail navigation">
             <a class="tab" href="${searchRouteFor('vulnerability')}">Vulnerability Search</a>
             <a class="tab" href="${searchRouteFor('vulnerability', displayId)}">Search ${escapeHtml(displayId)}</a>
@@ -205,6 +206,8 @@ function renderDetail(data) {
 
       <div class="detail-two-column">
         <div class="detail-main-column">
+          ${renderRelationEvidence(v)}
+          ${renderRelationshipReferences(v)}
           ${descriptions.length > 1 ? renderDescriptionCards(descriptions.slice(1)) : ''}
           ${renderMitreData(v, records, sourceUrls)}
           ${renderExploitSignals(exploits)}
@@ -212,8 +215,6 @@ function renderDetail(data) {
           ${renderAffectedGrouped(affected)}
           ${renderAdvisories(refs)}
           ${refs.length ? renderReferenceCards(refs) : '<section class="detail-section" id="references"><h3 class="section-h">References</h3><p class="muted">No references</p></section>'}
-          ${renderRelationEvidence(v)}
-          ${renderRelationshipReferences(v)}
           ${renderSourceChanges(history.filter(item => isVulnerabilitySource(item.code)))}
           ${renderRecordsBySource(records)}
         </div>
@@ -242,7 +243,59 @@ function renderDetail(data) {
     body.classList.toggle('is-collapsed', expanded);
   });
   bindDetailInteractions(el.detailPane);
+  bindSectionCollapse(el.detailPane);
   loadAiSummary(v.id);
+}
+
+// Detail blocks vary wildly in length (a CVE can carry 200 affected components or 3).
+// Rather than hand-tuning each renderer, clamp any section that renders taller than
+// COLLAPSE_THRESHOLD_PX and give it a toggle.
+const COLLAPSE_THRESHOLD_PX = 420;
+
+function bindSectionCollapse(root) {
+  root.querySelectorAll('.detail-section').forEach((section) => {
+    if (section.dataset.collapseBound === 'true') return;
+    const body = section.querySelector('[data-section-body]') || wrapSectionBody(section);
+    if (!body || body.scrollHeight <= COLLAPSE_THRESHOLD_PX) return;
+
+    section.dataset.collapseBound = 'true';
+    body.classList.add('section-collapsible', 'is-collapsed');
+
+    const toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'section-toggle';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.textContent = 'Show more';
+    toggle.addEventListener('click', () => {
+      const expanded = toggle.getAttribute('aria-expanded') === 'true';
+      toggle.setAttribute('aria-expanded', String(!expanded));
+      toggle.textContent = expanded ? 'Show more' : 'Show less';
+      body.classList.toggle('is-collapsed', expanded);
+      if (expanded) section.scrollIntoView({ block: 'nearest' });
+    });
+    section.appendChild(toggle);
+  });
+}
+
+// Section headings must stay visible when the body collapses, so move everything
+// after the heading row into a dedicated wrapper.
+function wrapSectionBody(section) {
+  const heading = section.querySelector('.section-title-row, .section-h');
+  if (!heading) return null;
+  const anchor = heading.classList.contains('section-h') && heading.parentElement !== section
+    ? heading.parentElement
+    : heading;
+  const body = document.createElement('div');
+  body.dataset.sectionBody = 'true';
+  let node = anchor.nextSibling;
+  while (node) {
+    const next = node.nextSibling;
+    body.appendChild(node);
+    node = next;
+  }
+  if (!body.childNodes.length) return null;
+  section.appendChild(body);
+  return body;
 }
 
 function renderHeroMetadata(v, affectedByEco, records, refs, exploits = []) {
@@ -768,12 +821,49 @@ function renderExploitItem(item) {
   `;
 }
 
+function renderIdentityLine(v) {
+  const primary = displayIdentifier(v);
+  // Aliases are the first thing an analyst pivots on, so surface them next to the
+  // primary identifier instead of burying them in the Mitre Data block.
+  const aliases = [...new Set([...(v.identifiers || []), ...(v.aliases || [])]
+    .filter(Boolean)
+    .map(displayIdentifierValue))]
+    .filter(value => value.toUpperCase() !== String(primary || '').toUpperCase())
+    .sort(aliasRank);
+  if (!aliases.length) return '';
+  return `
+    <div class="identity-line" aria-label="Aliases">
+      <span class="identity-primary">${escapeHtml(primary)}</span>
+      <span class="identity-label">alias</span>
+      <span class="chips compact-chips">
+        ${aliases.map(a => `<span class="badge ${aliasKlass(a)}">${escapeHtml(a)}</span>`).join('')}
+      </span>
+    </div>
+  `;
+}
+
+function aliasNamespace(value) {
+  const text = String(value || '').toUpperCase();
+  if (text.startsWith('CVE-')) return 'cve';
+  if (text.startsWith('GHSA-')) return 'ghsa';
+  if (text.startsWith('OSV-')) return 'osv';
+  return 'other';
+}
+
+function aliasKlass(value) {
+  return `tag-alias tag-alias-${aliasNamespace(value)}`;
+}
+
+function aliasRank(a, b) {
+  const order = { cve: 0, ghsa: 1, osv: 2, other: 3 };
+  return (order[aliasNamespace(a)] - order[aliasNamespace(b)]) || a.localeCompare(b);
+}
+
 function renderMitreData(v, records, sourceUrls) {
   const displayId = displayIdentifier(v);
   const cveListRecords = records.filter(r =>
     ['cve-list-v5', 'nvd-cve', 'nvd-cve-init'].includes(String(r.code || '').toLowerCase()) &&
     String(r.recordId || '').toUpperCase() === String(displayId || '').toUpperCase());
-  const aliases = [...new Set([...(v.identifiers || []), ...(v.aliases || [])].filter(Boolean).map(displayIdentifierValue))];
   return `
     <section class="detail-section" id="mitre-data">
       <div class="section-title-row">
@@ -786,7 +876,6 @@ function renderMitreData(v, records, sourceUrls) {
         <div><span>Source modified</span><strong>${date(v.modifiedAt)}</strong></div>
         <div><span>Local normalized</span><strong>${date(v.updatedAt)}</strong></div>
       </div>
-      ${aliases.length ? `<div class="chips compact-chips">${aliases.slice(0, 14).map(a => `<span class="badge">${escapeHtml(a)}</span>`).join('')}</div>` : ''}
       ${Object.keys(sourceUrls).length ? `
         <div class="link-grid">
           ${Object.entries(sourceUrls).map(([k, u]) => `

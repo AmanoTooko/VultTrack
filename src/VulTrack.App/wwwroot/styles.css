@@ -1346,6 +1346,55 @@ a.result-item {
   text-decoration: underline;
 }
 
+/* Generic collapse for any over-long detail section. */
+.section-collapsible.is-collapsed {
+  max-height: 420px;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 78%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 78%, transparent 100%);
+}
+
+.section-toggle {
+  margin-top: 8px;
+  width: fit-content;
+  border: 0;
+  background: transparent;
+  color: var(--accent-bright);
+  cursor: pointer;
+  padding: 2px 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.section-toggle:hover {
+  text-decoration: underline;
+}
+
+/* Alias line under the hero headline. */
+.identity-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 2px;
+}
+
+.identity-primary {
+  font-weight: 700;
+  font-size: 13px;
+}
+
+.identity-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.65;
+}
+
+.tag-alias-cve { border-color: var(--accent-bright); }
+.tag-alias-ghsa { border-color: #a371f7; }
+.tag-alias-osv { border-color: #3fb950; }
+
 .hero-description-head,
 .cvss-vector-head {
   display: flex;
